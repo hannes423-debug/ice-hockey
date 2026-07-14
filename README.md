@@ -6,6 +6,7 @@ A single-file Three.js ice hockey practice game with realistic EA-NHL-style skat
 
 ## Features
 
+- AI goalie built on real goaltending technique: angle play on the puck→net line, shuffle/T-push movement, butterfly with committed drop, RVH post seals on sharp angles, poke checks, rare baitable desperation dives, live rebounds + puck covers, goalie stamina that slows recoveries when gassed — and a hard rule that a goalie already blocking the shot line never moves out of the way
 - Stance-gated wrist / backhand / slap / pass shots with swipe-gesture release (curve depth controls saucer & chip loft)
 - NHL 25 style energy model: only sprint/hustle drains stamina — normal skating slowly regenerates, gliding recovers faster, standing still refills very fast
 - Pivot / backskate, puck protect, dives
