@@ -42,10 +42,10 @@
       press(MP1,0);
       await until(()=>GAME.selMode==='practice',3000);
       await relSeenM(MP1,0);
-      // ---- practice shows the lobby, single BOTS counter, no team B ----
+      // ---- practice shows the lobby with TEAMMATE + OPPONENT counters ----
       RES.checks.lPracticeLobby=document.getElementById('smLobby').style.display!=='none'&&
-        document.getElementById('smALbl').textContent==='BOTS'&&
-        document.getElementById('smBWrap').style.display==='none';
+        document.getElementById('smALbl').textContent==='TEAMMATE BOTS'&&
+        document.getElementById('smBLbl').textContent==='OPPONENT BOTS';
       // ---- MP2 joins the PRACTICE lobby with Cross (team A) ----
       press(MP2,0);
       RES.checks.lJoin=await until(()=>MATCH.joined.length===1&&MATCH.padUsed[1]===true&&

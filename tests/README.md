@@ -8,6 +8,7 @@ fetched into the `python3 -m http.server` log.
 - `harness_gamepad.js` — P1 gamepad layer, Hybrid + Classic schemes (42 checks, live loop, mock DS4)
 - `harness_match.js` — MATCH mode: lobby join, device exclusivity, two nets, team AI tactics, P2 controls, colors (20 checks, two mock pads)
 - `harness_lobby.js` — lobby rework: pad menu focus-nav, practice lobby (join/leave, BOTS counter, free-skate roster), P1 input lock pad/kbm/auto (23 checks, two mock pads)
+- `harness_tactics.js` — positional AI v3 + practice opponents: point/net-front/F1/high-slot/net-side structure, D trailer, breakout up-pass, point shot, D dump retrieval + outlet, opponent-bot defend + keep-away (21 checks, no pads; scenarios staged by teleporting skaters)
 
 ## Running one
 
