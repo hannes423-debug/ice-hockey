@@ -273,7 +273,9 @@
 
   var MODE_DEFAULTS = {
     practice: { mode: 'practice', botsP: 0, botsO: 0, skill: 99 },
-    match:    { mode: 'match',    botsA: 0, botsB: 1, skill: 99 }
+    // full regulation 5-skater sides by default (P1 + 4 bots vs 5 bots) —
+    // still adjustable with the steppers before confirming
+    match:    { mode: 'match',    botsA: 4, botsB: 5, skill: 99 }
   };
   function cloneDefaults(mode){
     var d = MODE_DEFAULTS[mode], out = {};
@@ -300,8 +302,10 @@
 
   function renderConfirm(){
     var isMatch = pending.mode === 'match';
-    var aLabel = isMatch ? 'TEAM A BOTS' : 'TEAMMATE BOTS', aKey = isMatch ? 'botsA' : 'botsP', aMax = isMatch ? 2 : 3;
-    var bLabel = isMatch ? 'TEAM B BOTS' : 'OPPONENT BOTS', bKey = isMatch ? 'botsB' : 'botsO', bMax = 3;
+    // Match Mode caps at a regulation 5-skater side (C+LW+RW+LD+RD): team A
+    // reserves one spot for P1, team B is bots-only so it can fill all 5.
+    var aLabel = isMatch ? 'TEAM A BOTS' : 'TEAMMATE BOTS', aKey = isMatch ? 'botsA' : 'botsP', aMax = isMatch ? 4 : 3;
+    var bLabel = isMatch ? 'TEAM B BOTS' : 'OPPONENT BOTS', bKey = isMatch ? 'botsB' : 'botsO', bMax = isMatch ? 5 : 3;
     $confirmOverlay.innerHTML =
       '<div class="confirm-card glass">' +
         '<div class="confirm-title">' + (isMatch ? 'MATCH MODE' : 'PRACTICE') + '</div>' +

@@ -34,7 +34,11 @@
       for(const s of[aC,aD,bC,bW,bD])s.ent.vel.set(0,0,0);
       player.pos.set(4,0,14);player.vel.set(0,0,0);
       puck.possessed=true;player.protectActive=true; // protect blocks F1 steals during the measurement
-      RES.checks.tPointD=await until(()=>aD.ent.pos.x>1&&Math.abs(aD.ent.pos.z-8.6)<3.0,24000);
+      // D now walks ITS OWN assigned side (pSide) rather than the carrier's
+      // side (the deliberate multi-D split fix) — team A's roster gives the
+      // lone D index 1 -> side=-1, so its point is at x<0, not x>0 as the
+      // old carrier-relative behavior produced.
+      RES.checks.tPointD=await until(()=>aD.ent.pos.x<-1&&Math.abs(aD.ent.pos.z-8.6)<3.0,24000);
       RES.checks.tNetFrontC=await until(()=>aC.ent.pos.z>15&&Math.abs(aC.ent.pos.x)<3.5,20000);
       RES.checks.tF1Pressure=await until(()=>bC.ent.pos.distanceTo(player.pos)<3.5,20000);
       // net sits at z≈27.1 — the collapsed W's high slot is own.z−10.5≈16.6
