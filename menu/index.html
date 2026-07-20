@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICE HOCKEY — Main Menu</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="bg-locker" aria-hidden="true">
+  <div class="base"></div>
+  <div class="lockers"></div>
+  <div class="rays"></div>
+  <div class="floor"></div>
+  <div class="vignette"></div>
+</div>
+
+<div class="app">
+
+  <header class="topnav">
+    <div class="brand"><span class="brand-mark">IH</span><span class="brand-text">ICE HOCKEY</span></div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Main sections">
+      <span class="tab-indicator" id="tabIndicator" aria-hidden="true"></span>
+    </nav>
+    <div class="profile-chip">
+      <div class="ovr-badge">72<span>OVR</span></div>
+      <div class="profile-id">
+        <span class="name">SNIPER92</span>
+        <span class="role">Right Wing · Helsinki Wolves</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <aside class="panel-left glass" aria-label="Section menu">
+      <h1 class="section-title" id="sectionTitle">PLAY</h1>
+      <div class="menu-list" id="menuList" role="listbox" aria-labelledby="sectionTitle">
+        <span class="menu-rail" id="menuRail" aria-hidden="true"></span>
+      </div>
+    </aside>
+
+    <section class="stage" aria-label="Player preview">
+      <div class="stage-spot" aria-hidden="true"></div>
+      <div class="stage-floor-glow" aria-hidden="true"></div>
+      <!-- Intentionally empty. A future WebGL renderer mounts its canvas here. -->
+      <div id="player-placeholder"></div>
+      <div class="stage-caption" id="stageCaption">
+        <div class="cap-title" id="capTitle">Quick Match</div>
+        <div class="cap-sub" id="capSub">Jump into a game</div>
+      </div>
+    </section>
+
+    <aside class="panel-right" id="widgetRail" aria-label="Info"></aside>
+
+  </div>
+
+  <footer class="hintbar">
+    <div class="kb-hints">
+      <span class="hint"><i class="key">↑↓</i>Navigate</span>
+      <span class="hint"><i class="key">←→</i>Section</span>
+      <span class="hint"><i class="key">Enter</i>Select</span>
+    </div>
+    <div class="pad-hints">
+      <span class="hint"><i class="key round">A</i>Select</span>
+      <span class="hint"><i class="key round">B</i>Back</span>
+      <span class="hint"><i class="key round">LB</i><i class="key round">RB</i>Section</span>
+    </div>
+  </footer>
+
+</div>
+
+<div class="toast glass" id="toast" role="status" aria-live="polite"></div>
+
+<script src="script.js"></script>
+</body>
+</html>
