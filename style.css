@@ -105,6 +105,9 @@ h1,h2,p{margin:0}
   position:relative;z-index:1;
   height:100vh;height:100dvh;
   display:grid;
+  grid-template-columns:minmax(0,1fr); /* explicit 1fr, not auto — else the implicit column
+    grows to the max-content width of unwrapped text (tab labels, menu items) and overflows
+    on narrow screens even though .app's own box is correctly sized */
   grid-template-rows:var(--nav-h) 1fr var(--hint-h);
 }
 
@@ -135,7 +138,7 @@ h1,h2,p{margin:0}
 }
 .brand-text{font-family:var(--font-display);font-weight:700;font-size:19px;letter-spacing:.14em}
 
-.tabs{position:relative;display:flex;align-items:center;gap:2px;margin:0 auto;height:100%}
+.tabs{position:relative;display:flex;align-items:center;gap:2px;margin:0 auto;height:100%;min-width:0} /* min-width:0 lets it actually shrink/scroll instead of forcing .topnav wider */
 .tab{
   position:relative;z-index:1;
   font-family:var(--font-display);font-weight:600;font-size:15px;letter-spacing:.1em;
@@ -168,7 +171,7 @@ h1,h2,p{margin:0}
    LAYOUT — left panel / center stage / right panel
    ============================================================ */
 .layout{
-  position:relative;min-height:0;
+  position:relative;min-height:0;min-width:0; /* else .app's auto grid column grows to fit unwrapped content */
   display:grid;
   grid-template-columns:clamp(232px,19vw,300px) 1fr clamp(220px,17vw,296px);
   gap:clamp(12px,1.4vw,20px);
@@ -383,7 +386,8 @@ body.pad-active .kb-hints{display:none}
 /* ============================================================
    RESPONSIVE
    Desktop-first. Verified targets: 1440p, 1080p, Steam Deck
-   (1280x800), ultrawide (>=2560, capped by .layout max-width).
+   (1280x800), ultrawide (>=2560, capped by .layout max-width),
+   plus phone portrait and landscape below.
    ============================================================ */
 @media (max-width:1180px){
   .profile-id{display:none}
@@ -392,13 +396,41 @@ body.pad-active .kb-hints{display:none}
   .layout{grid-template-columns:clamp(220px,26vw,280px) 1fr}
   .panel-right{display:none}
 }
-@media (max-width:760px){
-  .brand-text{display:none}
-  .layout{grid-template-columns:1fr}
-  .panel-left{display:none}
-  .hintbar .hint:not(:first-child){display:none}
-}
 @media (max-height:640px){
   :root{--nav-h:56px;--hint-h:30px}
   #player-placeholder{height:min(52vh,520px)}
+}
+
+/* phone LANDSCAPE: width is workable (list + stage still fit) but height
+   is the binding constraint — shrink chrome, drop the hint bar and stage
+   caption rather than starving the actual player-preview area. */
+@media (max-height:520px) and (max-width:1000px){
+  :root{--nav-h:48px;--hint-h:0px}
+  .hintbar{display:none}
+  .stage-caption{display:none}
+  #player-placeholder{height:min(66vh,340px)}
+  .layout{padding:8px}
+}
+
+/* phone PORTRAIT (and any window too narrow for two columns): the section
+   list becomes the primary, full-width, page-scrolling surface — this is
+   the same navigable menu, not a separate mobile build, it just stacks.
+   The decorative locker-room "stage" is dropped rather than starved, same
+   as console-menu companion apps do on small screens; #player-placeholder
+   stays in the DOM (untouched) for when a WebGL preview needs it later. */
+@media (max-width:640px){
+  :root{--hint-h:0px}
+  .brand-text{display:none}
+  .hintbar{display:none}
+  .tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;justify-content:flex-start;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .layout{
+    display:block;max-width:none;
+    overflow-y:auto;-webkit-overflow-scrolling:touch;
+    padding:12px;
+  }
+  .stage{display:none}
+  .panel-left{width:100%;margin-bottom:12px}
+  .panel-right{display:flex;width:100%}
+  .confirm-row{flex-wrap:wrap;row-gap:8px}
 }

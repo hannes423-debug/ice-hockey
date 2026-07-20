@@ -180,6 +180,7 @@
   function placeTabIndicator(){
     var el = tabButtons[tabIdx];
     if (!el) return;
+    el.scrollIntoView({ inline: 'nearest', block: 'nearest' }); // tabs scroll horizontally on narrow screens
     $tabIndicator.style.width = el.offsetWidth + 'px';
     $tabIndicator.style.transform = 'translate(' + el.offsetLeft + 'px,-50%)';
   }
