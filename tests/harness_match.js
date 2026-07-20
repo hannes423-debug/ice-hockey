@@ -24,9 +24,11 @@
   }
   async function run(){
     try{
-      // claim P1 on MP1, cycle menu to MATCH — press until each step is SEEN
-      press(MP1,15);await until(()=>document.getElementById('sm1v1').classList.contains('sel'),5000);await relSeen1(15);
-      press(MP1,15);await until(()=>document.getElementById('smMatch').classList.contains('sel'),5000);await relSeen1(15);
+      // menu pad-nav itself is covered by harness_lobby; pick MATCH via focus+Cross
+      menuSetFocus(document.getElementById('smMatch'));
+      press(MP1,0);await until(()=>document.getElementById('smMatch').classList.contains('sel'),5000);
+      rel(MP1,0);await until(()=>MPAD.pb[0]&&MPAD.pb[0][0]===false,4000);
+      menuSetFocus(null);
       RES.checks.mMenuMatch=GAME.selMode==='match'&&document.getElementById('smLobby').style.display!=='none';
       // MP2 presses a button -> joins as P2 on pad 2
       press(MP2,0);
@@ -117,14 +119,21 @@
       await sleep(400);
       press(MP2,0);await until(()=>!s2.ent.hasPuck,3000);rel(MP2,0);
       RES.checks.mP2Pass=await until(()=>!s2.ent.hasPuck&&Math.hypot(puck.vel.x,puck.vel.z)>3,3000);
-      // back to practice: menu, cycle left twice, start -> full teardown
+      // back to practice: menu via Options, pick PRACTICE via focus, start.
+      // MP2 leaves first so the practice start is a plain solo teardown.
       press(MP1,9);
       await until(()=>window.__poseFrozen===true,4000);
       await relSeen1(9);
-      press(MP1,14);await until(()=>document.getElementById('sm1v1').classList.contains('sel'),5000);await relSeen1(14);
-      press(MP1,14);await until(()=>document.getElementById('smPractice').classList.contains('sel'),5000);await relSeen1(14);
+      menuSetFocus(document.getElementById('smPractice'));
+      press(MP1,0);await until(()=>document.getElementById('smPractice').classList.contains('sel'),5000);
+      rel(MP1,0);await until(()=>MPAD.pb[0]&&MPAD.pb[0][0]===false,4000);
+      menuSetFocus(null);
+      press(MP2,1); // Circle on a joined pad = leave the lobby
+      RES.checks.mPadLeave=await until(()=>MATCH.joined.length===0&&!MATCH.padUsed[1],4000);
+      rel(MP2,1);await sleep(250);
       press(MP1,0);await until(()=>PAD.pb[0]===true,4000);await relSeen1(0);
       RES.checks.mTeardown=await until(()=>GAME.mode==='practice'&&MATCH.active===false&&
+        MATCH.freeSkate===false&&
         MATCH.goalBGroup.visible===false&&MATCH.goalieB.root.visible===false&&
         (typeof dummy==='undefined'||!dummy||dummy.group.visible===true)&&puck.possessed===true,8000);
     }catch(e){RES.error=String(e&&e.stack?e.stack.split('\n').slice(0,2).join('|'):e);}

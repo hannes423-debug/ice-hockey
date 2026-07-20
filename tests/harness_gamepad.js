@@ -23,17 +23,23 @@
   }
   async function run(){
     try{
-      // ---- menu nav ----
-      press(15);
+      // ---- menu nav (focus-based since the lobby rework) ----
+      press(15); // first dpad press births the focus ring
+      const focusBorn=await until(()=>!!MPAD.focus,2500);
+      rel(15);await until(()=>MPAD.pb[0]&&MPAD.pb[0][15]===false,3000);
+      menuSetFocus(document.getElementById('sm1v1'));
+      press(0); // Cross clicks the focused control
       const oneSel=await until(()=>document.getElementById('sm1v1').classList.contains('sel'),2500);
-      rel(15);await sleep(300);
-      press(14);
-      const pracSel=await until(()=>document.getElementById('smPractice').classList.contains('sel'),2500);
-      rel(14);await sleep(300);
+      rel(0);await until(()=>MPAD.pb[0]&&MPAD.pb[0][0]===false,3000);
+      menuSetFocus(document.getElementById('smPractice'));
       press(0);
+      const pracSel=await until(()=>document.getElementById('smPractice').classList.contains('sel'),2500);
+      rel(0);await until(()=>MPAD.pb[0]&&MPAD.pb[0][0]===false,3000);
+      menuSetFocus(null);
+      press(0); // nothing focused: Cross = START
       const started=await until(()=>window.__poseFrozen===false,2500);
       rel(0);
-      RES.checks.menuNav=oneSel&&pracSel&&started&&GAME.mode==='practice';
+      RES.checks.menuNav=focusBorn&&oneSel&&pracSel&&started&&GAME.mode==='practice';
       RES.checks.padClaims=PAD.on===true;
       // ---- skating / stance ----
       ax(1,-1);

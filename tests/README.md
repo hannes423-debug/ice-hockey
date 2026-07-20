@@ -6,7 +6,8 @@ fetched into the `python3 -m http.server` log.
 
 - `harness_1v1.js` — 1v1 Swedish-style rules + bot brain + net/board physics (14 checks, stepped physics under `__poseFrozen`)
 - `harness_gamepad.js` — P1 gamepad layer, Hybrid + Classic schemes (42 checks, live loop, mock DS4)
-- `harness_match.js` — MATCH mode: lobby join, device exclusivity, two nets, team AI tactics, P2 controls, colors (19 checks, two mock pads)
+- `harness_match.js` — MATCH mode: lobby join, device exclusivity, two nets, team AI tactics, P2 controls, colors (20 checks, two mock pads)
+- `harness_lobby.js` — lobby rework: pad menu focus-nav, practice lobby (join/leave, BOTS counter, free-skate roster), P1 input lock pad/kbm/auto (23 checks, two mock pads)
 
 ## Running one
 
