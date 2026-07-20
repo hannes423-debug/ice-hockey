@@ -146,6 +146,7 @@
   var $capSub      = document.getElementById('capSub');
   var $stageCaption= document.getElementById('stageCaption');
   var $toast       = document.getElementById('toast');
+  var $confirmOverlay = document.getElementById('confirmOverlay');
 
   var tabIdx  = 1;  // PLAY
   var itemIdx = 0;
@@ -245,14 +246,121 @@
       setTimeout(function(){ el.classList.remove('is-pressed'); }, 110);
     }
     var item = TABS[tabIdx].items[itemIdx];
-    toast('LAUNCHING — ' + item.t.toUpperCase());
-    // PLAY is the only tab wired to the real game so far — every item under it
-    // hands off to game.html, which has its own mode-select/lobby screen.
-    // Other tabs (Train/Customize/...) are placeholder content, toast only.
+    // PLAY is the only tab wired to the real game so far. Quick Match jumps
+    // straight in with sensible defaults; Practice/Match Mode collect their
+    // settings HERE (confirm overlay) instead of showing a second start
+    // screen after game.html loads. Other PLAY items + other tabs are still
+    // placeholder content — toast only, unchanged.
     if (TABS[tabIdx].id === 'play'){
-      setTimeout(function(){ location.href = 'game.html'; }, 260);
+      if (item.t === 'Quick Match'){
+        toast('LAUNCHING — QUICK MATCH');
+        setTimeout(function(){ launchGame(cloneDefaults('practice')); }, 260);
+        return;
+      }
+      if (item.t === 'Practice'){ openConfirm('practice'); return; }
+      if (item.t === 'Match Mode'){ openConfirm('match'); return; }
     }
+    toast('LAUNCHING — ' + item.t.toUpperCase());
   }
+
+  /* ---------------- mode confirm overlay + game handoff ----------------
+     Practice/Match Mode settings (bots, bot skill, control scheme) are
+     picked and confirmed in this overlay, then handed to game.html via a
+     one-shot localStorage key so its own start menu never has to reappear. */
+  var AUTOSTART_KEY = 'ihAutoStart';
+  var SCHEME_KEY = 'padScheme'; // same key game.html already reads on boot
+
+  var MODE_DEFAULTS = {
+    practice: { mode: 'practice', botsP: 0, botsO: 0, skill: 99 },
+    match:    { mode: 'match',    botsA: 0, botsB: 1, skill: 99 }
+  };
+  function cloneDefaults(mode){
+    var d = MODE_DEFAULTS[mode], out = {};
+    for (var k in d) out[k] = d[k];
+    return out;
+  }
+  function readScheme(){
+    try { return localStorage.getItem(SCHEME_KEY) === 'classic' ? 'classic' : 'hybrid'; }
+    catch (e) { return 'hybrid'; }
+  }
+
+  var pending = null;          // settings object while the overlay is open, else null
+  var pendingScheme = 'hybrid';
+  var overlayFocusables = [];
+  var overlayFocusIdx = 0;
+
+  function launchGame(settings){
+    try {
+      localStorage.setItem(AUTOSTART_KEY, JSON.stringify(settings));
+      localStorage.setItem(SCHEME_KEY, pendingScheme);
+    } catch (e) {}
+    location.href = 'game.html';
+  }
+
+  function renderConfirm(){
+    var isMatch = pending.mode === 'match';
+    var aLabel = isMatch ? 'TEAM A BOTS' : 'TEAMMATE BOTS', aKey = isMatch ? 'botsA' : 'botsP', aMax = isMatch ? 2 : 3;
+    var bLabel = isMatch ? 'TEAM B BOTS' : 'OPPONENT BOTS', bKey = isMatch ? 'botsB' : 'botsO', bMax = 3;
+    $confirmOverlay.innerHTML =
+      '<div class="confirm-card glass">' +
+        '<div class="confirm-title">' + (isMatch ? 'MATCH MODE' : 'PRACTICE') + '</div>' +
+        '<div class="confirm-sub">Confirm your settings, then start</div>' +
+        '<div class="confirm-row"><span>' + aLabel + '</span><div class="stepper">' +
+          '<button data-act="dec" data-key="' + aKey + '">−</button><b>' + pending[aKey] + '</b>' +
+          '<button data-act="inc" data-key="' + aKey + '" data-max="' + aMax + '">+</button>' +
+        '</div></div>' +
+        '<div class="confirm-row"><span>' + bLabel + '</span><div class="stepper">' +
+          '<button data-act="dec" data-key="' + bKey + '">−</button><b>' + pending[bKey] + '</b>' +
+          '<button data-act="inc" data-key="' + bKey + '" data-max="' + bMax + '">+</button>' +
+        '</div></div>' +
+        '<div class="confirm-row"><span>BOT SKILL — ' + pending.skill + '</span><div class="confirm-slider">' +
+          '<input type="range" id="confirmSkill" min="50" max="99" value="' + pending.skill + '">' +
+        '</div></div>' +
+        '<div class="confirm-row"><span>CONTROL SCHEME</span><div class="scheme-toggle">' +
+          '<button data-scheme="hybrid" class="' + (pendingScheme === 'hybrid' ? 'sel' : '') + '">HYBRID</button>' +
+          '<button data-scheme="classic" class="' + (pendingScheme === 'classic' ? 'sel' : '') + '">CLASSIC</button>' +
+        '</div></div>' +
+        '<div class="confirm-actions">' +
+          '<button class="confirm-cancel" id="confirmCancel">BACK</button>' +
+          '<button class="confirm-start" id="confirmStart">START</button>' +
+        '</div>' +
+      '</div>';
+
+    [].forEach.call($confirmOverlay.querySelectorAll('.stepper button'), function(btn){
+      btn.addEventListener('click', function(){
+        var key = btn.dataset.key, max = btn.dataset.max ? parseInt(btn.dataset.max, 10) : null;
+        if (btn.dataset.act === 'inc') pending[key] = Math.min(max, pending[key] + 1);
+        else pending[key] = Math.max(0, pending[key] - 1);
+        renderConfirm();
+      });
+    });
+    var skillInput = document.getElementById('confirmSkill');
+    skillInput.addEventListener('input', function(){ pending.skill = parseInt(skillInput.value, 10); });
+    skillInput.addEventListener('change', renderConfirm);
+    [].forEach.call($confirmOverlay.querySelectorAll('.scheme-toggle button'), function(btn){
+      btn.addEventListener('click', function(){ pendingScheme = btn.dataset.scheme; renderConfirm(); });
+    });
+    document.getElementById('confirmCancel').addEventListener('click', closeConfirm);
+    document.getElementById('confirmStart').addEventListener('click', function(){ launchGame(pending); });
+
+    overlayFocusables = [].slice.call($confirmOverlay.querySelectorAll('button,input[type=range]'));
+    overlayFocusIdx = Math.min(overlayFocusIdx, overlayFocusables.length - 1);
+  }
+
+  function openConfirm(mode){
+    pending = cloneDefaults(mode);
+    pendingScheme = readScheme();
+    renderConfirm();
+    $confirmOverlay.classList.add('show');
+    overlayFocusIdx = overlayFocusables.length - 1; // focus START by default
+    if (overlayFocusables[overlayFocusIdx]) overlayFocusables[overlayFocusIdx].focus({ preventScroll: true });
+  }
+  function closeConfirm(){
+    pending = null;
+    $confirmOverlay.classList.remove('show');
+    $confirmOverlay.innerHTML = '';
+  }
+  function overlayOpen(){ return $confirmOverlay.classList.contains('show'); }
 
   /* ---------------- right panel: widgets ---------------- */
   function buildWidgets(){
@@ -270,6 +378,12 @@
 
   /* ---------------- keyboard ---------------- */
   function onKeydown(e){
+    if (overlayOpen()){
+      // real <button>/<input type=range> elements already get native Tab/
+      // Enter/Space/arrow-key behavior — only Escape needs a hook here
+      if (e.key === 'Escape'){ closeConfirm(); e.preventDefault(); }
+      return;
+    }
     switch (e.key){
       case 'ArrowUp':    moveItem(-1); e.preventDefault(); break;
       case 'ArrowDown':  moveItem(1);  e.preventDefault(); break;
@@ -286,11 +400,36 @@
   var padLoopActive = false;
   var lastFrameTime = 0;
 
+  function moveOverlayFocus(delta){
+    if (!overlayFocusables.length) return;
+    overlayFocusIdx = (overlayFocusIdx + delta + overlayFocusables.length) % overlayFocusables.length;
+    overlayFocusables[overlayFocusIdx].focus({ preventScroll: true });
+  }
+  function adjustOverlayFocused(delta){
+    var el = document.activeElement;
+    if (el && $confirmOverlay.contains(el) && el.type === 'range'){
+      el.value = Math.max(+el.min, Math.min(+el.max, parseInt(el.value, 10) + delta));
+      el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new Event('change'));
+    }
+  }
+
   function pollPad(dt){
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
     var p = pads[0];
     if (!p) return;
     var hit = function(i){ return p.buttons[i] && p.buttons[i].pressed && !padPrev[i]; };
+
+    if (overlayOpen()){
+      if (hit(12)) moveOverlayFocus(-1);
+      if (hit(13)) moveOverlayFocus(1);
+      if (hit(14)) adjustOverlayFocused(-1);
+      if (hit(15)) adjustOverlayFocused(1);
+      if (hit(0)){ var el = document.activeElement; if (el && $confirmOverlay.contains(el)) el.click(); }
+      if (hit(1)) closeConfirm(); // B = cancel
+      for (var j = 0; j < p.buttons.length; j++) padPrev[j] = p.buttons[j].pressed;
+      return;
+    }
 
     if (hit(12)) moveItem(-1);
     if (hit(13)) moveItem(1);
@@ -350,6 +489,9 @@
     window.addEventListener('resize', function(){
       placeTabIndicator();
       placeMenuRail();
+    });
+    $confirmOverlay.addEventListener('click', function(e){
+      if (e.target === $confirmOverlay) closeConfirm(); // click on the dimmed backdrop cancels
     });
 
     // a gamepad may already be connected before this script ran

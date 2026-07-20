@@ -323,6 +323,45 @@ body.pad-active .pad-hints{display:flex}
 body.pad-active .kb-hints{display:none}
 
 /* ============================================================
+   MODE CONFIRM OVERLAY
+   Settings for Practice / Match Mode are picked and confirmed here,
+   instead of a second start-menu screen appearing after game.html loads.
+   ============================================================ */
+.confirm-overlay{
+  position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;
+  background:rgba(5,7,11,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+}
+.confirm-overlay.show{display:flex}
+.confirm-card{width:min(440px,88vw);padding:28px 30px 26px;text-align:center}
+.confirm-title{font-family:var(--font-display);font-weight:700;font-size:22px;letter-spacing:.1em;color:var(--ink);margin-bottom:2px}
+.confirm-sub{font-size:11.5px;color:var(--ink-dim);letter-spacing:.05em;margin-bottom:22px}
+.confirm-row{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px;font-size:12.5px;color:var(--ink-dim);letter-spacing:.04em;text-align:left}
+.confirm-row + .confirm-row{border-top:1px solid var(--line);padding-top:16px}
+.stepper{display:flex;align-items:center;gap:10px;flex:none}
+.stepper button{
+  width:28px;height:28px;border-radius:8px;border:1px solid var(--line-strong);background:rgba(255,255,255,.05);
+  color:var(--ink);font-weight:700;font-size:15px;line-height:1;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease);
+}
+.stepper button:hover{background:var(--accent-soft);border-color:var(--accent)}
+.stepper b{min-width:14px;text-align:center;color:var(--accent);font-variant-numeric:tabular-nums}
+.confirm-slider{flex:none;width:150px}
+.confirm-slider input[type=range]{width:100%;accent-color:var(--accent)}
+.scheme-toggle{display:flex;gap:6px;flex:none}
+.scheme-toggle button{
+  padding:6px 12px;border-radius:8px;border:1px solid var(--line-strong);background:rgba(255,255,255,.05);
+  color:var(--ink-dim);font-family:var(--font-display);font-weight:600;font-size:11px;letter-spacing:.06em;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.scheme-toggle button.sel{color:var(--ink);background:var(--accent-soft);border-color:var(--accent)}
+.confirm-actions{display:flex;gap:10px;margin-top:24px}
+.confirm-actions button{flex:1;padding:12px;border-radius:11px;font-family:var(--font-display);font-weight:700;font-size:14px;letter-spacing:.09em}
+.confirm-cancel{border:1px solid var(--line-strong);background:rgba(255,255,255,.04);color:var(--ink-dim)}
+.confirm-cancel:hover{color:var(--ink);background:rgba(255,255,255,.08)}
+.confirm-start{border:1px solid var(--accent);background:var(--accent-soft);color:var(--ink);box-shadow:0 0 16px var(--accent-glow)}
+.confirm-start:hover{background:rgba(79,141,253,.24)}
+
+/* ============================================================
    TOAST
    ============================================================ */
 .toast{
