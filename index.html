@@ -25,6 +25,12 @@
     <nav class="tabs" id="tabs" role="tablist" aria-label="Main sections">
       <span class="tab-indicator" id="tabIndicator" aria-hidden="true"></span>
     </nav>
+    <button class="party-chip" id="partyChip" type="button" aria-haspopup="true" aria-expanded="false">
+      <span class="party-dots" id="partyDots"></span>
+      <span class="party-label" id="partyLabel">PARTY</span>
+      <span class="party-caret" aria-hidden="true"></span>
+    </button>
+
     <div class="profile-chip">
       <div class="ovr-badge">72<span>OVR</span></div>
       <div class="profile-id">
@@ -33,6 +39,10 @@
       </div>
     </div>
   </header>
+
+  <!-- Party roster popover — assemble local players here, before picking a
+       mode. Built/positioned by script.js relative to #partyChip. -->
+  <div class="party-popover glass" id="partyPopover" aria-hidden="true"></div>
 
   <div class="layout">
 

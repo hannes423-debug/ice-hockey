@@ -147,6 +147,23 @@
   var $stageCaption= document.getElementById('stageCaption');
   var $toast       = document.getElementById('toast');
   var $confirmOverlay = document.getElementById('confirmOverlay');
+  var $partyChip    = document.getElementById('partyChip');
+  var $partyDots    = document.getElementById('partyDots');
+  var $partyLabel   = document.getElementById('partyLabel');
+  var $partyPopover = document.getElementById('partyPopover');
+
+  /* ---------------- party: local co-op roster, assembled here in the main
+     menu so Quick Match / Practice / Match Mode all launch multiplayer-ready
+     instead of needing an in-game "press A to join" step. LOCAL ONLY for
+     now (extra gamepads); the data shape ({pad,team}) and the popover's
+     "online" note are deliberately kept so a future online-invite path can
+     slot in without reworking this. Same P1-red/P2-blue/... convention as
+     game.html's P_COLORS, so the color a player sees here is the color
+     they'll see in-game. */
+  var PARTY_COLORS = ['#ff3b30','#2f6fff','#2ecc40','#ffdc00','#00e5ff','#b14cff'];
+  var party = []; // { pad:<gamepad index>, team:'A'|'B' } — P1 (index 0 slot) is implicit, always present, not stored here
+  var partyPopoverOpen = false;
+  var partyPadPrev = {}; // padIndex -> prev-frame button states, for join edge-detection independent of the menu-nav pad
 
   var tabIdx  = 1;  // PLAY
   var itemIdx = 0;
@@ -293,11 +310,35 @@
   var overlayFocusIdx = 0;
 
   function launchGame(settings){
+    // every launch path (Quick Match included) carries whatever local party
+    // has been assembled via the header chip — team defaults to 'A' until
+    // reassigned in the confirm overlay, which Quick Match skips by design
+    settings.party = party.map(function(p){ return { pad: p.pad, team: p.team }; });
     try {
       localStorage.setItem(AUTOSTART_KEY, JSON.stringify(settings));
       localStorage.setItem(SCHEME_KEY, pendingScheme);
     } catch (e) {}
     location.href = 'game.html';
+  }
+
+  // party members are already assembled via the header chip by the time
+  // a mode gets confirmed here — this section is ONLY where their team gets
+  // picked (per the chosen design: manual assignment, not auto-split).
+  // Solo play (party.length===0) shows nothing extra.
+  function renderConfirmPartyRows(isMatch){
+    if (!party.length) return '';
+    var aLbl = isMatch ? 'A' : 'YOU', bLbl = isMatch ? 'B' : 'OPP';
+    var rows = '<div class="confirm-row" style="display:block"><span>YOUR PARTY</span>';
+    party.forEach(function(p, k){
+      rows += '<div class="confirm-party-row">' +
+        '<span class="party-dot" style="background:' + PARTY_COLORS[(k + 1) % 6] + '">' + (k + 2) + '</span>' +
+        '<span class="who">Player ' + (k + 2) + ' · Pad ' + (p.pad + 1) + '</span>' +
+        '<div class="team-toggle">' +
+          '<button data-party-pad="' + p.pad + '" data-team="A" class="' + (p.team === 'A' ? 'sel' : '') + '">' + aLbl + '</button>' +
+          '<button data-party-pad="' + p.pad + '" data-team="B" class="' + (p.team === 'B' ? 'sel' : '') + '">' + bLbl + '</button>' +
+        '</div></div>';
+    });
+    return rows + '</div>';
   }
 
   function renderConfirm(){
@@ -325,6 +366,7 @@
           '<button data-scheme="hybrid" class="' + (pendingScheme === 'hybrid' ? 'sel' : '') + '">HYBRID</button>' +
           '<button data-scheme="classic" class="' + (pendingScheme === 'classic' ? 'sel' : '') + '">CLASSIC</button>' +
         '</div></div>' +
+        renderConfirmPartyRows(isMatch) +
         '<div class="confirm-actions">' +
           '<button class="confirm-cancel" id="confirmCancel">BACK</button>' +
           '<button class="confirm-start" id="confirmStart">START</button>' +
@@ -345,6 +387,13 @@
     [].forEach.call($confirmOverlay.querySelectorAll('.scheme-toggle button'), function(btn){
       btn.addEventListener('click', function(){ pendingScheme = btn.dataset.scheme; renderConfirm(); });
     });
+    [].forEach.call($confirmOverlay.querySelectorAll('.team-toggle button'), function(btn){
+      btn.addEventListener('click', function(){
+        var member = party.find(function(p){ return p.pad === parseInt(btn.dataset.partyPad, 10); });
+        if (member) member.team = btn.dataset.team;
+        renderConfirm();
+      });
+    });
     document.getElementById('confirmCancel').addEventListener('click', closeConfirm);
     document.getElementById('confirmStart').addEventListener('click', function(){ launchGame(pending); });
 
@@ -353,6 +402,7 @@
   }
 
   function openConfirm(mode){
+    closePartyPopover();
     pending = cloneDefaults(mode);
     pendingScheme = readScheme();
     renderConfirm();
@@ -381,6 +431,132 @@
     toastTimer = setTimeout(function(){ $toast.classList.remove('show'); }, 1300);
   }
 
+  /* ---------------- party chip + popover ---------------- */
+  function partyDotHTML(color, label, empty){
+    return '<span class="party-dot' + (empty ? ' empty' : '') + '"' +
+      (empty ? '' : ' style="background:' + color + '"') + '>' + (empty ? '' : label) + '</span>';
+  }
+
+  function renderPartyChip(){
+    var n = 1 + party.length; // P1 + joined
+    var dots = partyDotHTML(PARTY_COLORS[0], '1', false);
+    party.forEach(function(p, k){ dots += partyDotHTML(PARTY_COLORS[(k + 1) % 6], String(k + 2), false); });
+    $partyDots.innerHTML = dots;
+    $partyLabel.textContent = 'PARTY ' + n;
+    $partyChip.classList.toggle('has-extra', party.length > 0);
+  }
+
+  function connectedJoinablePads(){
+    // any gamepad other than slot 0 (reserved for the menu-nav pad / P1,
+    // same convention game.html itself uses) that isn't already in the party
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var out = [];
+    for (var i = 1; i < pads.length; i++){
+      if (pads[i] && !party.some(function(p){ return p.pad === i; })) out.push(i);
+    }
+    return out;
+  }
+
+  function renderPartyPopover(){
+    var html = '<div class="party-pop-title">LOCAL PARTY</div>' +
+      '<div class="party-pop-sub">Assembled here once — every mode below launches with this roster</div>' +
+      '<div class="party-row"><span class="party-dot" style="background:' + PARTY_COLORS[0] + '">1</span>' +
+      '<span class="who">You<small>Keyboard / mouse or your pad</small></span></div>';
+
+    party.forEach(function(p, k){
+      html += '<div class="party-row"><span class="party-dot" style="background:' + PARTY_COLORS[(k + 1) % 6] + '">' + (k + 2) + '</span>' +
+        '<span class="who">Player ' + (k + 2) + '<small>Pad ' + (p.pad + 1) + '</small></span>' +
+        '<button class="leave" data-pad="' + p.pad + '" title="Remove from party">&times;</button></div>';
+    });
+
+    var joinable = connectedJoinablePads();
+    if (joinable.length){
+      joinable.forEach(function(i){
+        html += '<div class="party-join-hint"><span class="party-dot"></span>Press A on Pad ' + (i + 1) + ' to join</div>';
+      });
+    } else if (!party.length){
+      html += '<div class="party-empty-note">Connect a gamepad and press A to add a local player.</div>';
+    }
+
+    html += '<div class="party-online-note">Online party invites — coming soon</div>';
+    $partyPopover.innerHTML = html;
+
+    [].forEach.call($partyPopover.querySelectorAll('.leave'), function(btn){
+      btn.addEventListener('click', function(){
+        removeFromParty(parseInt(btn.dataset.pad, 10));
+      });
+    });
+  }
+
+  function positionPartyPopover(){
+    var r = $partyChip.getBoundingClientRect();
+    $partyPopover.style.top = (r.bottom + 8) + 'px';
+    $partyPopover.style.left = Math.max(12, r.right - 300) + 'px';
+  }
+
+  function openPartyPopover(){
+    partyPopoverOpen = true;
+    renderPartyPopover();
+    positionPartyPopover();
+    $partyPopover.classList.add('show');
+    $partyPopover.setAttribute('aria-hidden', 'false');
+    $partyChip.classList.add('open');
+    $partyChip.setAttribute('aria-expanded', 'true');
+  }
+  function closePartyPopover(){
+    partyPopoverOpen = false;
+    $partyPopover.classList.remove('show');
+    $partyPopover.setAttribute('aria-hidden', 'true');
+    $partyChip.classList.remove('open');
+    $partyChip.setAttribute('aria-expanded', 'false');
+  }
+  function togglePartyPopover(){ if (partyPopoverOpen) closePartyPopover(); else openPartyPopover(); }
+
+  function addToParty(padIndex){
+    if (party.some(function(p){ return p.pad === padIndex; })) return;
+    party.push({ pad: padIndex, team: 'A' }); // defaults to P1's side; reassigned per-mode in the confirm overlay
+    renderPartyChip();
+    if (partyPopoverOpen) renderPartyPopover();
+    toast('PLAYER ' + (party.length + 1) + ' JOINED — PAD ' + (padIndex + 1));
+  }
+  function removeFromParty(padIndex){
+    var i = party.findIndex(function(p){ return p.pad === padIndex; });
+    if (i < 0) return;
+    party.splice(i, 1);
+    renderPartyChip();
+    if (partyPopoverOpen) renderPartyPopover();
+  }
+
+  // gamepads can vanish mid-session (unplugged); drop any party member
+  // whose pad is no longer present so the roster never lies
+  function pruneDisconnectedParty(){
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var before = party.length;
+    party = party.filter(function(p){ return !!pads[p.pad]; });
+    if (party.length !== before){
+      renderPartyChip();
+      if (partyPopoverOpen) renderPartyPopover();
+    }
+  }
+
+  // scans every connected pad except slot 0 for a fresh A-button press and
+  // joins it — runs alongside the existing single-pad menu-nav polling
+  // (pollPad), independent of which pad is driving menu navigation
+  function pollPartyJoins(){
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (var i = 1; i < pads.length; i++){
+      var p = pads[i];
+      if (!p) { delete partyPadPrev[i]; continue; }
+      var prev = partyPadPrev[i] || [];
+      var pressed = p.buttons[0] && p.buttons[0].pressed;
+      if (pressed && !prev[0] && !party.some(function(m){ return m.pad === i; })) addToParty(i);
+      var snap = [];
+      for (var b = 0; b < p.buttons.length; b++) snap[b] = p.buttons[b] && p.buttons[b].pressed;
+      partyPadPrev[i] = snap;
+    }
+    pruneDisconnectedParty();
+  }
+
   /* ---------------- keyboard ---------------- */
   function onKeydown(e){
     if (overlayOpen()){
@@ -389,6 +565,7 @@
       if (e.key === 'Escape'){ closeConfirm(); e.preventDefault(); }
       return;
     }
+    if (partyPopoverOpen && e.key === 'Escape'){ closePartyPopover(); e.preventDefault(); return; }
     switch (e.key){
       case 'ArrowUp':    moveItem(-1); e.preventDefault(); break;
       case 'ArrowDown':  moveItem(1);  e.preventDefault(); break;
@@ -456,6 +633,7 @@
     var dt = Math.min((now - lastFrameTime) / 1000, 0.05);
     lastFrameTime = now;
     pollPad(dt);
+    pollPartyJoins();
     requestAnimationFrame(padLoop);
   }
 
@@ -486,6 +664,7 @@
     buildTabs();
     setTab(tabIdx);
     buildWidgets();
+    renderPartyChip();
     $toast.classList.remove('show');
 
     window.addEventListener('keydown', onKeydown);
@@ -494,9 +673,16 @@
     window.addEventListener('resize', function(){
       placeTabIndicator();
       placeMenuRail();
+      if (partyPopoverOpen) positionPartyPopover();
     });
     $confirmOverlay.addEventListener('click', function(e){
       if (e.target === $confirmOverlay) closeConfirm(); // click on the dimmed backdrop cancels
+    });
+    $partyChip.addEventListener('click', togglePartyPopover);
+    document.addEventListener('click', function(e){
+      if (!partyPopoverOpen) return;
+      if ($partyPopover.contains(e.target) || $partyChip.contains(e.target)) return;
+      closePartyPopover();
     });
 
     // a gamepad may already be connected before this script ran
