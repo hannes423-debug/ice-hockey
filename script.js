@@ -446,13 +446,30 @@
     $partyChip.classList.toggle('has-extra', party.length > 0);
   }
 
+  // true when no *other* pad is sharing the controller slot with pad 0 —
+  // i.e. pad 0 is the only physical controller connected right now
+  function isSoloPad0(pads){
+    if (!pads[0]) return false;
+    for (var i = 1; i < pads.length; i++) if (pads[i]) return false;
+    return true;
+  }
+
   function connectedJoinablePads(){
-    // any gamepad other than slot 0 (reserved for the menu-nav pad / P1,
-    // same convention game.html itself uses) that isn't already in the party
+    // any gamepad other than slot 0 (reserved for the menu-nav pad / P1)
+    // that isn't already in the party. Slot 0 is normally excluded on the
+    // assumption it's P1's own device — but when it's the ONLY controller
+    // connected at all (P1 on keyboard/mouse, one pad for a second local
+    // player), that assumption is wrong and it must be joinable too. That
+    // case is still ambiguous with "solo pad-only player just pressing A
+    // to start," so it's gated on the popover being open — an explicit
+    // "I'm managing local co-op" gesture — rather than joinable always.
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
     var out = [];
     for (var i = 1; i < pads.length; i++){
       if (pads[i] && !party.some(function(p){ return p.pad === i; })) out.push(i);
+    }
+    if (isSoloPad0(pads) && partyPopoverOpen && !party.some(function(p){ return p.pad === 0; })){
+      out.unshift(0);
     }
     return out;
   }
@@ -544,7 +561,10 @@
   // (pollPad), independent of which pad is driving menu navigation
   function pollPartyJoins(){
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (var i = 1; i < pads.length; i++){
+    // see connectedJoinablePads(): pad 0 only counts as a join target when
+    // it's the sole connected pad and the popover is open to say so
+    var start = (isSoloPad0(pads) && partyPopoverOpen) ? 0 : 1;
+    for (var i = start; i < pads.length; i++){
       var p = pads[i];
       if (!p) { delete partyPadPrev[i]; continue; }
       var prev = partyPadPrev[i] || [];
@@ -610,6 +630,16 @@
       if (hit(0)){ var el = document.activeElement; if (el && $confirmOverlay.contains(el)) el.click(); }
       if (hit(1)) closeConfirm(); // B = cancel
       for (var j = 0; j < p.buttons.length; j++) padPrev[j] = p.buttons[j].pressed;
+      return;
+    }
+
+    if (partyPopoverOpen){
+      // the popover floats over the menu grid; don't let background pad
+      // nav/activate fire underneath it (this also stops a solo pad 0's
+      // join-press from double-firing as an activate() at the same time —
+      // see connectedJoinablePads()). B closes it, same as Escape.
+      if (hit(1)) closePartyPopover();
+      for (var k = 0; k < p.buttons.length; k++) padPrev[k] = p.buttons[k].pressed;
       return;
     }
 
