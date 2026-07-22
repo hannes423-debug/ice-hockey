@@ -193,8 +193,8 @@ h1,h2,p{margin:0}
 .party-chip.open .party-caret{transform:rotate(-135deg);margin-top:3px}
 
 .party-popover{
-  position:fixed;z-index:11;width:min(300px,90vw);
-  padding:16px 16px 14px;display:none;
+  position:fixed;z-index:11;width:min(320px,92vw);
+  padding:16px 16px 14px;display:none;max-height:80vh;overflow-y:auto;
 }
 .party-popover.show{display:block}
 .party-pop-title{font-family:var(--font-display);font-weight:700;font-size:13px;letter-spacing:.09em;color:var(--ink);margin-bottom:2px}
@@ -216,6 +216,26 @@ h1,h2,p{margin:0}
 .party-join-hint .party-dot{background:transparent;border:2px dashed var(--accent)}
 @keyframes partyPulse{0%,100%{opacity:.55}50%{opacity:1}}
 .party-empty-note{font-size:11px;color:var(--ink-faint);padding:4px 0 2px}
+.party-row .reorder{display:flex;flex-direction:column;flex:none;gap:1px}
+.party-row .reorder button{
+  width:18px;height:11px;border-radius:3px;border:1px solid var(--line-strong);background:rgba(255,255,255,.04);
+  color:var(--ink-dim);font-size:9px;line-height:1;padding:0;
+}
+.party-row .reorder button:hover:not(:disabled){color:var(--ink);background:rgba(255,255,255,.08)}
+.party-row .reorder button:disabled{opacity:.25}
+.party-p1-title{
+  margin-top:12px;padding-top:12px;border-top:1px solid var(--line);
+  font-family:var(--font-display);font-weight:700;font-size:11px;letter-spacing:.09em;color:var(--ink);
+}
+.party-p1-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.p1opt{
+  padding:5px 10px;border-radius:7px;border:1px solid var(--line-strong);background:rgba(255,255,255,.04);
+  font-family:var(--font-display);font-weight:600;font-size:10.5px;letter-spacing:.04em;color:var(--ink-dim);
+}
+.p1opt:hover{color:var(--ink);background:rgba(255,255,255,.08)}
+.p1opt.sel{color:var(--ink);background:var(--accent-soft);border-color:var(--accent)}
+.party-diag{font-size:10px;color:var(--ink-faint);letter-spacing:.02em;padding:3px 0;font-family:var(--font-mono,monospace)}
+.party-diag.warn{color:#ff9d3b}
 .party-online-note{
   margin-top:12px;padding-top:12px;border-top:1px solid var(--line);
   font-size:10.5px;color:var(--ink-faint);letter-spacing:.03em;

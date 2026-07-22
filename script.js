@@ -165,6 +165,53 @@
   var partyPopoverOpen = false;
   var partyPadPrev = {}; // padIndex -> prev-frame button states, for join edge-detection independent of the menu-nav pad
 
+  // P1 INPUT — same 'p1Input'/'p1PadIdx' localStorage keys game.html's own
+  // in-game lobby picker already reads/writes, so a choice made here (or
+  // there, on a direct game.html visit) carries over either way. This is
+  // the "who is P1 / controller order" control: 'auto' guesses (first
+  // connected pad, with the solo-pad+popover-open exception below), 'kbm'
+  // locks P1 to keyboard/mouse and frees every pad to join, 'pad' locks P1
+  // to one specific chosen pad index regardless of connection order.
+  function readP1Input(){
+    try { var v = localStorage.getItem('p1Input'); return (v === 'kbm' || v === 'pad') ? v : 'auto'; }
+    catch (e) { return 'auto'; }
+  }
+  function readP1PadIdx(){
+    try { return Math.max(0, parseInt(localStorage.getItem('p1PadIdx'), 10) || 0); }
+    catch (e) { return 0; }
+  }
+  function saveP1Input(){
+    try {
+      localStorage.setItem('p1Input', p1Input);
+      localStorage.setItem('p1PadIdx', String(p1PadIdx));
+    } catch (e) {}
+  }
+  var p1Input  = readP1Input();
+  var p1PadIdx = readP1PadIdx();
+
+  function connectedPadCount(pads){
+    var n = 0;
+    for (var i = 0; i < pads.length; i++) if (pads[i]) n++;
+    return n;
+  }
+
+  // which pad index (if any) is reserved as the menu-nav / P1 device right
+  // now. -1 means no pad is reserved (P1 is on keyboard/mouse, or no pad
+  // is connected) — every connected pad is then fair game to join.
+  function reservedPadIdx(pads){
+    if (p1Input === 'kbm') return -1;
+    if (p1Input === 'pad') return pads[p1PadIdx] ? p1PadIdx : -1;
+    // auto: assume the first connected pad is P1's — unless it's the ONLY
+    // pad connected and the party popover is open (an explicit "I'm
+    // managing local co-op" gesture), in which case nothing is reserved so
+    // that lone pad can join as a second local player instead.
+    var first = -1;
+    for (var i = 0; i < pads.length; i++) if (pads[i]) { first = i; break; }
+    if (first < 0) return -1;
+    if (connectedPadCount(pads) === 1 && partyPopoverOpen) return -1;
+    return first;
+  }
+
   var tabIdx  = 1;  // PLAY
   var itemIdx = 0;
   var tabButtons  = [];
@@ -446,43 +493,40 @@
     $partyChip.classList.toggle('has-extra', party.length > 0);
   }
 
-  // true when no *other* pad is sharing the controller slot with pad 0 —
-  // i.e. pad 0 is the only physical controller connected right now
-  function isSoloPad0(pads){
-    if (!pads[0]) return false;
-    for (var i = 1; i < pads.length; i++) if (pads[i]) return false;
-    return true;
-  }
-
   function connectedJoinablePads(){
-    // any gamepad other than slot 0 (reserved for the menu-nav pad / P1)
-    // that isn't already in the party. Slot 0 is normally excluded on the
-    // assumption it's P1's own device — but when it's the ONLY controller
-    // connected at all (P1 on keyboard/mouse, one pad for a second local
-    // player), that assumption is wrong and it must be joinable too. That
-    // case is still ambiguous with "solo pad-only player just pressing A
-    // to start," so it's gated on the popover being open — an explicit
-    // "I'm managing local co-op" gesture — rather than joinable always.
+    // any connected gamepad that isn't reserved for P1 (see reservedPadIdx)
+    // and isn't already in the party
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var reserved = reservedPadIdx(pads);
     var out = [];
-    for (var i = 1; i < pads.length; i++){
+    for (var i = 0; i < pads.length; i++){
+      if (i === reserved) continue;
       if (pads[i] && !party.some(function(p){ return p.pad === i; })) out.push(i);
-    }
-    if (isSoloPad0(pads) && partyPopoverOpen && !party.some(function(p){ return p.pad === 0; })){
-      out.unshift(0);
     }
     return out;
   }
 
+  function p1DeviceLabel(pads){
+    if (p1Input === 'kbm') return 'Keyboard / mouse';
+    if (p1Input === 'pad') return pads[p1PadIdx] ? ('Pad ' + (p1PadIdx + 1)) : 'Pad ' + (p1PadIdx + 1) + ' (disconnected)';
+    var reserved = reservedPadIdx(pads);
+    return reserved >= 0 ? ('Pad ' + (reserved + 1) + ' · auto') : 'Keyboard / mouse · auto';
+  }
+
   function renderPartyPopover(){
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
     var html = '<div class="party-pop-title">LOCAL PARTY</div>' +
       '<div class="party-pop-sub">Assembled here once — every mode below launches with this roster</div>' +
       '<div class="party-row"><span class="party-dot" style="background:' + PARTY_COLORS[0] + '">1</span>' +
-      '<span class="who">You<small>Keyboard / mouse or your pad</small></span></div>';
+      '<span class="who">You<small>' + p1DeviceLabel(pads) + '</small></span></div>';
 
     party.forEach(function(p, k){
       html += '<div class="party-row"><span class="party-dot" style="background:' + PARTY_COLORS[(k + 1) % 6] + '">' + (k + 2) + '</span>' +
         '<span class="who">Player ' + (k + 2) + '<small>Pad ' + (p.pad + 1) + '</small></span>' +
+        '<span class="reorder">' +
+          '<button class="reorder-up" data-i="' + k + '" title="Move up"' + (k === 0 ? ' disabled' : '') + '>&uarr;</button>' +
+          '<button class="reorder-down" data-i="' + k + '" title="Move down"' + (k === party.length - 1 ? ' disabled' : '') + '>&darr;</button>' +
+        '</span>' +
         '<button class="leave" data-pad="' + p.pad + '" title="Remove from party">&times;</button></div>';
     });
 
@@ -495,12 +539,56 @@
       html += '<div class="party-empty-note">Connect a gamepad and press A to add a local player.</div>';
     }
 
+    // P1 CONTROL — who's in the driver's seat. Same choice game.html's own
+    // in-game picker offers, surfaced here since the front-menu autostart
+    // flow skips that lobby screen entirely.
+    html += '<div class="party-p1-title">P1 CONTROL</div><div class="party-p1-row">' +
+      '<button class="p1opt' + (p1Input === 'auto' ? ' sel' : '') + '" data-mode="auto">AUTO</button>' +
+      '<button class="p1opt' + (p1Input === 'kbm' ? ' sel' : '') + '" data-mode="kbm">KB/M</button>';
+    for (var i = 0; i < pads.length; i++){
+      if (pads[i] && !party.some(function(p){ return p.pad === i; })){
+        html += '<button class="p1opt' + (p1Input === 'pad' && p1PadIdx === i ? ' sel' : '') + '" data-mode="pad" data-pad="' + i + '">PAD ' + (i + 1) + '</button>';
+      }
+    }
+    html += '</div>';
+
+    // diagnostics — raw connected-pad info, so a controller that Chrome
+    // isn't recognizing as a standard layout (buttons won't line up right)
+    // is visible without opening devtools
+    var anyPad = false;
+    for (var d = 0; d < pads.length; d++){
+      if (!pads[d]) continue;
+      anyPad = true;
+      var nonStandard = pads[d].mapping !== 'standard';
+      html += '<div class="party-diag' + (nonStandard ? ' warn' : '') + '">Pad ' + (d + 1) + ': ' +
+        (pads[d].id || 'unknown') + (nonStandard ? ' — NON-STANDARD MAPPING, buttons may be off' : ' — OK') + '</div>';
+    }
+    if (!anyPad) html += '<div class="party-diag">No controller detected by the browser yet.</div>';
+
     html += '<div class="party-online-note">Online party invites — coming soon</div>';
     $partyPopover.innerHTML = html;
 
     [].forEach.call($partyPopover.querySelectorAll('.leave'), function(btn){
       btn.addEventListener('click', function(){
         removeFromParty(parseInt(btn.dataset.pad, 10));
+      });
+    });
+    [].forEach.call($partyPopover.querySelectorAll('.reorder-up'), function(btn){
+      btn.addEventListener('click', function(){
+        var i = parseInt(btn.dataset.i, 10);
+        swapPartyOrder(i, i - 1);
+      });
+    });
+    [].forEach.call($partyPopover.querySelectorAll('.reorder-down'), function(btn){
+      btn.addEventListener('click', function(){
+        var i = parseInt(btn.dataset.i, 10);
+        swapPartyOrder(i, i + 1);
+      });
+    });
+    [].forEach.call($partyPopover.querySelectorAll('.p1opt'), function(btn){
+      btn.addEventListener('click', function(){
+        var mode = btn.dataset.mode;
+        setP1Input(mode, mode === 'pad' ? parseInt(btn.dataset.pad, 10) : p1PadIdx);
       });
     });
   }
@@ -544,6 +632,29 @@
     if (partyPopoverOpen) renderPartyPopover();
   }
 
+  // reorder two party seats (controller order / who's P2 vs P3 etc — does
+  // not touch who's P1, that's setP1Input below)
+  function swapPartyOrder(i, j){
+    if (i < 0 || j < 0 || i >= party.length || j >= party.length) return;
+    var tmp = party[i]; party[i] = party[j]; party[j] = tmp;
+    renderPartyChip();
+    if (partyPopoverOpen) renderPartyPopover();
+  }
+
+  // promotes keyboard/mouse or a specific pad into the P1 seat. Persists via
+  // the same localStorage keys game.html's own P1 picker uses, so the choice
+  // carries straight into the game whether launched via autostart or not.
+  function setP1Input(mode, padIdx){
+    p1Input = mode;
+    if (mode === 'pad'){
+      p1PadIdx = padIdx;
+      removeFromParty(padIdx); // can't be a party member and P1 at once
+    }
+    saveP1Input();
+    renderPartyChip();
+    if (partyPopoverOpen) renderPartyPopover();
+  }
+
   // gamepads can vanish mid-session (unplugged); drop any party member
   // whose pad is no longer present so the roster never lies
   function pruneDisconnectedParty(){
@@ -556,15 +667,16 @@
     }
   }
 
-  // scans every connected pad except slot 0 for a fresh A-button press and
-  // joins it — runs alongside the existing single-pad menu-nav polling
-  // (pollPad), independent of which pad is driving menu navigation
-  function pollPartyJoins(){
+  // scans every connected pad except whichever is reserved for P1 (see
+  // reservedPadIdx) for a fresh A-button press and joins it — runs alongside
+  // the existing single-pad menu-nav polling (pollPad), independent of which
+  // pad is driving menu navigation
+  var partyPopoverRefreshT = 0;
+  function pollPartyJoins(dt){
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    // see connectedJoinablePads(): pad 0 only counts as a join target when
-    // it's the sole connected pad and the popover is open to say so
-    var start = (isSoloPad0(pads) && partyPopoverOpen) ? 0 : 1;
-    for (var i = start; i < pads.length; i++){
+    var reserved = reservedPadIdx(pads);
+    for (var i = 0; i < pads.length; i++){
+      if (i === reserved) { delete partyPadPrev[i]; continue; }
       var p = pads[i];
       if (!p) { delete partyPadPrev[i]; continue; }
       var prev = partyPadPrev[i] || [];
@@ -575,6 +687,12 @@
       partyPadPrev[i] = snap;
     }
     pruneDisconnectedParty();
+    // keep the join hints + diagnostics live while the popover is open —
+    // a newly connected pad wouldn't otherwise appear until reopened
+    if (partyPopoverOpen){
+      partyPopoverRefreshT -= (dt || 0);
+      if (partyPopoverRefreshT <= 0){ partyPopoverRefreshT = 0.4; renderPartyPopover(); }
+    }
   }
 
   /* ---------------- keyboard ---------------- */
@@ -618,7 +736,14 @@
 
   function pollPad(dt){
     var pads = navigator.getGamepads ? navigator.getGamepads() : [];
-    var p = pads[0];
+    var navIdx = reservedPadIdx(pads);
+    var p = navIdx >= 0 ? pads[navIdx] : null;
+    if (!p && partyPopoverOpen){
+      // no pad is reserved for nav right now (kb/mouse P1, or the lone pad
+      // that's free to join) — still let a connected pad close the popover
+      // with B, using whichever slot it's actually sitting in
+      for (var s = 0; s < pads.length; s++) if (pads[s]) { p = pads[s]; break; }
+    }
     if (!p) return;
     var hit = function(i){ return p.buttons[i] && p.buttons[i].pressed && !padPrev[i]; };
 
@@ -663,7 +788,7 @@
     var dt = Math.min((now - lastFrameTime) / 1000, 0.05);
     lastFrameTime = now;
     pollPad(dt);
-    pollPartyJoins();
+    pollPartyJoins(dt);
     requestAnimationFrame(padLoop);
   }
 
