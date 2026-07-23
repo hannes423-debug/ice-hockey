@@ -325,6 +325,16 @@
       if (item.t === 'Practice'){ openConfirm('practice'); return; }
       if (item.t === 'Match Mode'){ openConfirm('match'); return; }
     }
+    // CUSTOMIZE hands off to the standalone Locker Room equipment editor —
+    // Player/Equipment/Jerseys/Sticks all live in that one tool (its own
+    // sidebar splits them into Team Uniform vs Player categories), so any
+    // of those items opens the same page. Celebrations isn't built there
+    // yet, so it stays a toast placeholder like every other unbuilt tab.
+    if (TABS[tabIdx].id === 'customize' && item.t !== 'Celebrations'){
+      toast('OPENING — LOCKER ROOM');
+      setTimeout(function(){ location.href = 'ice-hockey-customize.html'; }, 260);
+      return;
+    }
     toast('LAUNCHING — ' + item.t.toUpperCase());
   }
 
