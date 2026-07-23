@@ -163,9 +163,14 @@ renderer.domElement.addEventListener('pointerdown',e=>{
   }
   if(paintModeOn){
     dragMode='paint';
-    paintUndoSnapshot=paintCtx.getImageData(0,0,paintCanvas.width,paintCanvas.height);
+    // one drag = one layer: points accumulate on currentStroke (drawn live,
+    // fast, exactly like before) and only land in the persisted paintStrokes
+    // list on pointerup — see redrawPaintLayer() for why storing POINTS
+    // instead of raw pixels is what makes strokes individually deletable/
+    // reorderable/hideable and finally savable into presets+undo.
+    currentStroke={id:'PS'+Date.now(),target:paintTarget,color:paintBrushColor,size:paintBrushSize,opacity:paintBrushOpacity,visible:true,points:[]};
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){paintStamp(uv,null);lastPaintUV=uv;}
+    if(uv){currentStroke.points.push({x:uv.x,y:uv.y});paintStamp(uv,null);lastPaintUV=uv;}
     return;
   }
   if(decalMoveModeOn&&selectedDecalIdx>=0){
@@ -179,7 +184,7 @@ renderer.domElement.addEventListener('pointerdown',e=>{
 renderer.domElement.addEventListener('pointermove',e=>{
   if(dragMode==='paint'){
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
+    if(uv){if(currentStroke)currentStroke.points.push({x:uv.x,y:uv.y});paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
   }else if(dragMode==='decal'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -189,7 +194,14 @@ renderer.domElement.addEventListener('pointermove',e=>{
     camState.yaw=camGoal.yaw;camState.pitch=camGoal.pitch; // direct while dragging, no lag
   }
 });
-addEventListener('pointerup',()=>{dragMode=null;lastPaintUV=null;});
+addEventListener('pointerup',()=>{
+  if(dragMode==='paint'&&currentStroke&&currentStroke.points.length){
+    paintStrokes.push(currentStroke);
+    renderPaintLayersList();
+    pushHistory();
+  }
+  currentStroke=null;dragMode=null;lastPaintUV=null;
+});
 renderer.domElement.addEventListener('wheel',e=>{
   e.preventDefault();
   if(paintModeOn||decalMoveModeOn){
@@ -515,9 +527,12 @@ function redrawNameNumber(){
    refreshSwatches) and both name/number inputs already funnel through, so
    hooking the save in here covers every edit site with a single call —
    no need to instrument each one separately. Logos/freehand paint are
-   deliberately NOT included: the editor itself doesn't persist those into
-   presets/undo either (see the Freehand Paint panel's own note), so there
-   is nothing durable yet to hand off to the game. */
+   still NOT included here: they now DO persist properly inside the editor
+   (paintStrokes/placedDecals round-trip through presets/undo as of the
+   layers system), but wiring them into actual gameplay is a separate,
+   bigger step — game.html would need its own logoMap/paintMap samplers
+   and redraw pipeline ported over, the same way nameNumberMap was, and
+   that hasn't happened yet. */
 const GAME_LOADOUT_KEY='ihGameLoadout_v1';
 function saveGameLoadout(){
   if(!bodyZM||!stickZM||!neckZone)return;
@@ -548,7 +563,14 @@ function sanitizeNumber(raw){
 }
 
 /* ----- freehand paint (raycast screen -> UV -> canvas brush stamp) ----- */
-let paintModeOn=false,lastPaintUV=null,paintUndoSnapshot=null;
+let paintModeOn=false,lastPaintUV=null;
+/* paintStrokes: one entry per completed drag ("layer"), each storing its own
+   UV point path + the brush settings it was drawn with — NOT raw pixels.
+   That's what makes strokes individually deletable/reorderable/hideable
+   (redrawPaintLayer replays only the visible ones, in order) and, as a
+   bonus, small enough to round-trip through JSON — so paint finally saves
+   into presets and undo/redo instead of living only in the live canvas. */
+let paintStrokes=[],currentStroke=null,selectedStrokeIdx=-1;
 let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1;
 const raycaster=new THREE.Raycaster();
 const pointerNDC=new THREE.Vector2();
@@ -601,18 +623,46 @@ function raycastUV(clientX,clientY){
    than a small fraction of the texture as a seam crossing and stamp the new
    point in isolation instead of connecting it. */
 const SEAM_JUMP_UV=0.08;
+/* shared by live stamping AND layer replay so the two can never draw the
+   seam-jump logic differently — takes explicit style params rather than
+   reading the live brush globals, since replay draws OLD strokes with
+   THEIR OWN recorded color/size/opacity, not whatever the brush is set to
+   right now. */
+function stampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
+  ctx.globalAlpha=opacity;
+  ctx.fillStyle=color;ctx.strokeStyle=color;
+  ctx.lineWidth=size;ctx.lineCap='round';ctx.lineJoin='round';
+  if(px!=null&&!seamJump){
+    ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();
+  }else{
+    ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();
+  }
+}
 function paintStamp(uv,prevUV){
   const x=uv.x*DECAL_SIZE,y=uv.y*DECAL_SIZE;
-  paintCtx.globalAlpha=paintBrushOpacity;
-  paintCtx.fillStyle=paintBrushColor;paintCtx.strokeStyle=paintBrushColor;
-  paintCtx.lineWidth=paintBrushSize;paintCtx.lineCap='round';paintCtx.lineJoin='round';
   const seamJump=prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV;
-  if(prevUV&&!seamJump){
-    const px=prevUV.x*DECAL_SIZE,py=prevUV.y*DECAL_SIZE;
-    paintCtx.beginPath();paintCtx.moveTo(px,py);paintCtx.lineTo(x,y);paintCtx.stroke();
-  }else{
-    paintCtx.beginPath();paintCtx.arc(x,y,paintBrushSize/2,0,Math.PI*2);paintCtx.fill();
-  }
+  stampSegment(paintCtx,x,y,prevUV?prevUV.x*DECAL_SIZE:null,prevUV?prevUV.y*DECAL_SIZE:null,
+    paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump);
+  syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
+}
+/* Full reconstruction from the stored stroke list — needed any time the
+   STACK changes shape (delete/reorder/hide/undo), as opposed to live
+   dragging which just stamps incrementally onto the existing canvas. */
+function redrawPaintLayer(){
+  if(!paintCtx)return;
+  paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  paintStrokes.forEach(s=>{
+    if(s.visible===false)return;
+    let prev=null;
+    s.points.forEach(p=>{
+      const x=p.x*DECAL_SIZE,y=p.y*DECAL_SIZE;
+      const seamJump=prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV;
+      stampSegment(paintCtx,x,y,prev?prev.x*DECAL_SIZE:null,prev?prev.y*DECAL_SIZE:null,
+        s.size,s.color,s.opacity,seamJump);
+      prev=p;
+    });
+  });
+  paintCtx.globalAlpha=1;
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
 }
 
@@ -677,7 +727,7 @@ let currentEditorMode='team';
 const CATEGORIES=[
   {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',mode:'team',
    note:'This low-poly rig shares one uniform texture across jersey, pants, gloves and helmet — Primary / Secondary / Trim recolor the whole kit at once. Independent per-piece textures are the next asset pass.'},
-  {id:'decals',label:'Name & Decals', icon:'🎨',cam:'upper',group:'decals',mode:'team'},
+  {id:'decals',label:'Decals & Paint', icon:'🎨',cam:'upper',group:'decals',mode:'team'},
   {id:'helmet',label:'Helmet', icon:'⛑️',cam:'helmet',group:'body',mode:'team'},
   {id:'gloves',label:'Gloves', icon:'🧤',cam:'gloves',group:'body',mode:'team'},
   {id:'pants', label:'Pants',  icon:'🩳',cam:'pants', group:'body',mode:'team'},
@@ -687,6 +737,16 @@ const CATEGORIES=[
   {id:'skin',  label:'Skin',   icon:'🧑',cam:'helmet',group:'skin',mode:'player',
    note:'This model has no separate face/skin texture — the helmet+cage cover the whole head with no exposed geometry behind the bars. "Skin" recolors the one real stand-in this rig has: the neck/collar-trim sliver between helmet and jersey.'},
   {id:'stick', label:'Stick',  icon:'🏑',cam:'stick', group:'stick',mode:'player'},
+  /* Name & number belong to the PERSON, not the jersey — a player keeps
+     their name/number when traded to a different team/uniform. Moved out
+     of Player mode's Skin/Stick company for a real roster reason: a team
+     can only field one of each number, so ownership needs to sit with
+     whoever's actually being customized (the player), with the team layer
+     (once a real roster exists) allowed to veto/reassign a conflicting
+     number — see the note rendered in this category for the honest
+     current-vs-intended state (no roster/conflict system exists yet, this
+     is a single player being edited, not a squad). */
+  {id:'nameplate',label:'Name & Number', icon:'🔢',cam:'upper',group:'nameplate',mode:'player'},
 ];
 const SKIN_TONES=['#3d2314','#5c3a21','#8d5a34','#c68863','#e0ac69','#f1c27d','#ffdbac','#f5dbc5'];
 const QUICK_PALETTES=[
@@ -803,21 +863,28 @@ function renderRightPanel(){
     });
     return;
   }
-  if(cat.group==='decals'){
-    html+=`<p class="rp-sub">Custom nameplate, number, and freehand paint — right on the jersey, no Apply button.</p>`;
+  if(cat.group==='nameplate'){
+    html+=`<p class="rp-sub">Belongs to you, not the jersey — carries over no matter which team uniform you're wearing.</p>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Nameplate</div>
-      <input id="nameInput" placeholder="LAST NAME" maxlength="20" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:15px;font-weight:700;letter-spacing:.03em;padding:10px 12px;">
-      <div style="font-size:11px;color:var(--text-faint);margin-top:6px;">A–Z, space, hyphen only · max 11 characters (NHL-style nameplate limit — tell me if your league's rule is different)</div>
+      <input id="nameInput" placeholder="LAST NAME" maxlength="20" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;letter-spacing:.03em;padding:10px 12px;">
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">A–Z, space, hyphen only · max 11 characters (NHL-style nameplate limit — tell me if your league's rule is different)</div>
     </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Number</div>
-      <input id="numberInput" type="number" min="1" max="99" placeholder="—" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:15px;font-weight:700;padding:10px 12px;">
-      <div style="font-size:11px;color:var(--text-faint);margin-top:6px;">1–99</div>
+    html+=`<div class="rp-section"><div class="rp-section-title">Preferred Number</div>
+      <input id="numberInput" type="number" min="1" max="99" placeholder="—" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;padding:10px 12px;">
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">1–99</div>
     </div>`;
+    html+=`<div class="rp-note">This is your PREFERRED number, not a guaranteed one — a real roster can only field one of each number, so a team admin gets final say and can reassign you if it's already taken. There's no actual multi-player roster/conflict-checking here yet (this editor customizes one player at a time), so nothing enforces uniqueness today; treat this field as "what I'd pick," not "what I'm locked into."</div>`;
+    rp.innerHTML=html;
+    wireNameplatePanel();
+    return;
+  }
+  if(cat.group==='decals'){
+    html+=`<p class="rp-sub">Freehand paint, quick shapes, and logos — right on the jersey, no Apply button. Name &amp; number moved to the Player tab.</p>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Paint Target</div>
       <div class="preset-strip" id="paintTargetStrip" style="flex-wrap:wrap;">${PAINT_TARGET_LIST.map(t=>
         `<div class="cam-btn paint-target-btn" data-ptarget="${t.id}" style="flex:none;">${t.icon} ${t.label}</div>`).join('')}
       </div>
-      <div style="font-size:11px;color:var(--text-faint);margin-top:6px;">Paint only affects the selected piece — pick one before you drag.</div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Paint only affects the selected piece — pick one before you drag.</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Freehand Paint</div>
       <div class="zone-row" id="paintColorRow"><div class="zone-swatch" id="paintColorSwatch" style="background:${paintBrushColor}"></div>
@@ -827,8 +894,8 @@ function renderRightPanel(){
       <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
         <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
       <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
-      <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear Paint</div></div>
-      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Paint isn't saved into presets/undo yet (only color zones and name/number are).</div>
+      <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
+      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo.</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
       <div class="lc-shape-grid" id="quickShapeGrid">
@@ -839,14 +906,20 @@ function renderRightPanel(){
         <div class="lc-shape-btn" data-qshape="hexagon" title="Hexagon">⬡</div>
         <div class="lc-shape-btn" data-qshape="shield" title="Shield">🛡</div>
       </div>
-      <div style="font-size:11px;color:var(--text-faint);margin-top:6px;">Stamps a Forza-style decal straight onto the selected paint target — drag/scale/rotate it below, just like a placed logo. Use the Logo Creator for multi-layer text+shape combos.</div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps a Forza-style decal straight onto the selected paint target — drag/scale/rotate it below, just like a placed logo. Use the Logo Creator for multi-layer text+shape combos.</div>
     </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:11px;">+ Create Logo</span></div>
+    html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
       <div class="palette-grid" id="logoLibraryGrid"></div>
       <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
-      <div class="rp-section-title" style="margin-top:14px;">Placed on Model</div>
+    </div>`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Layers<span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${(paintStrokes.length+placedDecals.length)} total</span></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;">Decals (logos/shapes) and paint strokes are separate stacks — within each, later = drawn on top; paint always renders above decals overall. Reorder/hide/delete either independently.</div>
+      <div class="rp-section-title" style="margin-top:2px;">🖼 Decals</div>
       <div id="placedDecalsList"></div>
       <div id="placedDecalControls"></div>
+      <div class="rp-section-title" style="margin-top:14px;">🖌 Paint Strokes</div>
+      <div id="paintLayersList"></div>
+      <div id="paintLayerControls"></div>
     </div>`;
     rp.innerHTML=html;
     wireDecalsPanel();
@@ -939,7 +1012,7 @@ function refreshSwatches(){
   }
   redrawNameNumber(); // the name/number badge fills track Primary/Secondary/Trim
 }
-function wireDecalsPanel(){
+function wireNameplatePanel(){
   const nameInput=document.getElementById('nameInput');
   nameInput.value=jerseyName;
   nameInput.addEventListener('input',()=>{
@@ -957,7 +1030,8 @@ function wireDecalsPanel(){
     redrawNameNumber();
   });
   numberInput.addEventListener('change',pushHistory);
-
+}
+function wireDecalsPanel(){
   document.querySelectorAll('.paint-target-btn').forEach(el=>{
     el.classList.toggle('active',el.dataset.ptarget===paintTarget);
     el.addEventListener('click',()=>{
@@ -995,10 +1069,11 @@ function wireDecalsPanel(){
   });
 
   document.getElementById('undoStrokeBtn').addEventListener('click',()=>{
-    if(paintUndoSnapshot){paintCtx.putImageData(paintUndoSnapshot,0,0);syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);showToast('Stroke undone');}
+    if(paintStrokes.length){paintStrokes.pop();selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();pushHistory();showToast('Stroke undone');}
+    else showToast('No strokes to undo');
   });
   document.getElementById('clearPaintBtn').addEventListener('click',()=>{
-    paintCtx.clearRect(0,0,paintCanvas.width,paintCanvas.height);syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);showToast('Paint cleared');
+    paintStrokes=[];selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();pushHistory();showToast('Paint cleared');
   });
 
   document.querySelectorAll('#quickShapeGrid .lc-shape-btn').forEach(b=>{
@@ -1007,6 +1082,8 @@ function wireDecalsPanel(){
   renderLogoLibraryGrid();
   renderPlacedDecalsList();
   renderPlacedDecalControls();
+  renderPaintLayersList();
+  renderPaintLayerControls();
   document.getElementById('openLogoCreatorBtn').addEventListener('click',openLogoCreator);
   document.getElementById('importLogoFile').addEventListener('change',e=>{
     const file=e.target.files[0];if(!file)return;
@@ -1085,6 +1162,11 @@ function applyLive(){
     if(L){L.color=currentHex();const sw=document.getElementById('lcColorSwatch');if(sw)sw.style.background=L.color;renderLogoCreatorCanvas();}
     return;
   }
+  if(cpState.mgrKey==='paintstroke'){
+    const s=paintStrokes[cpState.idx];
+    if(s){s.color=currentHex();const sw=document.getElementById('strokeColorSwatch');if(sw)sw.style.background=s.color;redrawPaintLayer();renderPaintLayersList();}
+    return;
+  }
   const mgr=cpState.mgrKey==='body'?bodyZM:stickZM;
   mgr.setZoneColor(cpState.idx,currentHex());
   refreshSwatches();
@@ -1095,6 +1177,7 @@ function openColorPicker(anchorEl,mgrKey,idx){
   if(mgrKey==='paint')startHex=paintBrushColor;
   else if(mgrKey==='neck')startHex='#'+neckZone.color.getHexString();
   else if(mgrKey==='lclayer')startHex=(lcLayers[lcSelectedIdx]&&lcLayers[lcSelectedIdx].color)||'#7c5cff';
+  else if(mgrKey==='paintstroke')startHex=(paintStrokes[idx]&&paintStrokes[idx].color)||'#7c5cff';
   else startHex='#'+(mgrKey==='body'?bodyZM:stickZM).zones[idx].color.getHexString();
   const rgb=hexToRgb(startHex);
   const hsv=rgbToHsv(rgb.r,rgb.g,rgb.b);
@@ -1410,6 +1493,7 @@ function redrawLogoLayer(){
   if(!logoCtx)return;
   logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
   placedDecals.forEach(d=>{
+    if(d.visible===false)return;
     const lib=logoLibrary.find(l=>l.id===d.logoId);
     if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
     const cx=d.u*DECAL_SIZE,cy=d.v*DECAL_SIZE,size=DECAL_SIZE*d.scale;
@@ -1442,11 +1526,12 @@ function placeDecal(logoId){
     const hits=raycaster.intersectObjects(meshes,false);
     if(hits.length&&hits[0].uv)uv=hits[0].uv;
   }
-  placedDecals.push({id:'D'+Date.now(),logoId,u:uv.x,v:uv.y,scale:0.15,rotation:0,target:paintTarget});
+  placedDecals.push({id:'D'+Date.now(),logoId,u:uv.x,v:uv.y,scale:0.15,rotation:0,target:paintTarget,visible:true});
   selectedDecalIdx=placedDecals.length-1;
   redrawLogoLayer();
   renderPlacedDecalsList();
   renderPlacedDecalControls();
+  pushHistory();
   showToast('Logo placed — drag on the model or use the sliders');
 }
 /* one-click Forza-style shape stamp: skips the Logo Creator round-trip
@@ -1483,7 +1568,7 @@ function moveSelectedDecal(uv){
    delete. This list shows every placed decal with its own delete button,
    independent of which one (if any) is currently selected. */
 function selectDecal(idx){
-  selectedDecalIdx=idx;
+  selectedDecalIdx=(selectedDecalIdx===idx)?-1:idx;
   renderPlacedDecalsList();
   renderPlacedDecalControls();
 }
@@ -1496,32 +1581,141 @@ function deleteDecal(idx){
   redrawLogoLayer();
   renderPlacedDecalsList();
   renderPlacedDecalControls();
+  pushHistory();
+}
+/* Swaps array-adjacent entries — since redrawLogoLayer draws placedDecals in
+   array order (later = on top), this is a genuine z-order reorder within
+   the decal stack, not just a list-display reshuffle. */
+function reorderDecal(idx,dir){
+  const j=idx+dir;
+  if(j<0||j>=placedDecals.length)return;
+  [placedDecals[idx],placedDecals[j]]=[placedDecals[j],placedDecals[idx]];
+  if(selectedDecalIdx===idx)selectedDecalIdx=j;else if(selectedDecalIdx===j)selectedDecalIdx=idx;
+  redrawLogoLayer();
+  renderPlacedDecalsList();
+  renderPlacedDecalControls();
+  pushHistory();
+}
+function toggleDecalVisible(idx){
+  const d=placedDecals[idx];if(!d)return;
+  d.visible=d.visible===false;
+  redrawLogoLayer();
+  renderPlacedDecalsList();
+  pushHistory();
+}
+function updateLayersTotalBadge(){
+  const b=document.getElementById('layersTotalBadge');
+  if(b)b.textContent=(paintStrokes.length+placedDecals.length)+' total';
 }
 function renderPlacedDecalsList(){
+  updateLayersTotalBadge();
   const el=document.getElementById('placedDecalsList');
   if(!el)return;
   if(!placedDecals.length){el.innerHTML='<div class="rp-note">No logos placed on the model yet — click one above to stamp it on.</div>';return;}
   el.innerHTML=placedDecals.map((d,i)=>{
     const lib=logoLibrary.find(l=>l.id===d.logoId);
     const thumb=lib?lib.dataURL:'';
-    const active=i===selectedDecalIdx;
-    return`<div class="placed-decal-row" data-idx="${i}" style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;border-radius:8px;cursor:pointer;background:${active?'var(--bg2)':'transparent'};border:1px solid ${active?'var(--line)':'transparent'};">
-      <div style="width:28px;height:28px;border-radius:6px;background:#14151c url(${thumb}) center/contain no-repeat;flex:none;"></div>
-      <div style="flex:1;font-size:12px;color:var(--text-faint);">${lib?lib.name:'Logo'} — ${d.target}</div>
-      <div class="btn ghost" data-del-idx="${i}" style="flex:none;padding:4px 8px;font-size:11px;">🗑</div>
+    const active=i===selectedDecalIdx,hidden=d.visible===false;
+    return`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
+      <div class="layer-thumb" style="background:#14151c url(${thumb}) center/contain no-repeat;"></div>
+      <div class="layer-label">${lib?lib.name:'Logo'} — ${d.target}</div>
+      <div class="layer-btn" data-vis-idx="${i}" title="${hidden?'Show':'Hide'}">${hidden?'🚫':'👁'}</div>
+      <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===placedDecals.length-1?' disabled':''}>↑</div>
+      <div class="layer-btn" data-down-idx="${i}" title="Move down"${i===0?' disabled':''}>↓</div>
+      <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
     </div>`;
   }).join('');
-  el.querySelectorAll('.placed-decal-row').forEach(row=>{
+  el.querySelectorAll('.layer-row').forEach(row=>{
     row.addEventListener('click',e=>{
-      if(e.target.closest('[data-del-idx]'))return;
+      if(e.target.closest('.layer-btn'))return;
       selectDecal(+row.dataset.idx);
     });
   });
-  el.querySelectorAll('[data-del-idx]').forEach(btn=>{
-    btn.addEventListener('click',e=>{
-      e.stopPropagation();
-      deleteDecal(+btn.dataset.delIdx);
+  el.querySelectorAll('[data-vis-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();toggleDecalVisible(+btn.dataset.visIdx);}));
+  el.querySelectorAll('[data-up-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderDecal(+btn.dataset.upIdx,1);}));
+  el.querySelectorAll('[data-down-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderDecal(+btn.dataset.downIdx,-1);}));
+  el.querySelectorAll('[data-del-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();deleteDecal(+btn.dataset.delIdx);}));
+}
+/* ----- paint-stroke layers (same list/reorder/hide/delete pattern as decals above) ----- */
+function selectStroke(idx){
+  selectedStrokeIdx=(selectedStrokeIdx===idx)?-1:idx;
+  renderPaintLayersList();
+  renderPaintLayerControls();
+}
+function deleteStroke(idx){
+  if(idx<0||idx>=paintStrokes.length)return;
+  paintStrokes.splice(idx,1);
+  if(selectedStrokeIdx===idx)selectedStrokeIdx=-1;
+  else if(selectedStrokeIdx>idx)selectedStrokeIdx--;
+  redrawPaintLayer();
+  renderPaintLayersList();
+  renderPaintLayerControls();
+  pushHistory();
+}
+function reorderStroke(idx,dir){
+  const j=idx+dir;
+  if(j<0||j>=paintStrokes.length)return;
+  [paintStrokes[idx],paintStrokes[j]]=[paintStrokes[j],paintStrokes[idx]];
+  if(selectedStrokeIdx===idx)selectedStrokeIdx=j;else if(selectedStrokeIdx===j)selectedStrokeIdx=idx;
+  redrawPaintLayer();
+  renderPaintLayersList();
+  renderPaintLayerControls();
+  pushHistory();
+}
+function toggleStrokeVisible(idx){
+  const s=paintStrokes[idx];if(!s)return;
+  s.visible=s.visible===false;
+  redrawPaintLayer();
+  renderPaintLayersList();
+  pushHistory();
+}
+function renderPaintLayersList(){
+  updateLayersTotalBadge();
+  const el=document.getElementById('paintLayersList');
+  if(!el)return;
+  if(!paintStrokes.length){el.innerHTML='<div class="rp-note">No paint strokes yet — enable Paint Mode above and drag on the model.</div>';return;}
+  el.innerHTML=paintStrokes.map((s,i)=>{
+    const active=i===selectedStrokeIdx,hidden=s.visible===false;
+    return`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
+      <div class="layer-thumb" style="background:${s.color};"></div>
+      <div class="layer-label">Stroke — ${s.target} · ${s.points.length}pt</div>
+      <div class="layer-btn" data-vis-idx="${i}" title="${hidden?'Show':'Hide'}">${hidden?'🚫':'👁'}</div>
+      <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===paintStrokes.length-1?' disabled':''}>↑</div>
+      <div class="layer-btn" data-down-idx="${i}" title="Move down"${i===0?' disabled':''}>↓</div>
+      <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.layer-row').forEach(row=>{
+    row.addEventListener('click',e=>{
+      if(e.target.closest('.layer-btn'))return;
+      selectStroke(+row.dataset.idx);
     });
+  });
+  el.querySelectorAll('[data-vis-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();toggleStrokeVisible(+btn.dataset.visIdx);}));
+  el.querySelectorAll('[data-up-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderStroke(+btn.dataset.upIdx,1);}));
+  el.querySelectorAll('[data-down-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderStroke(+btn.dataset.downIdx,-1);}));
+  el.querySelectorAll('[data-del-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();deleteStroke(+btn.dataset.delIdx);}));
+}
+function renderPaintLayerControls(){
+  const el=document.getElementById('paintLayerControls');
+  if(!el)return;
+  const s=paintStrokes[selectedStrokeIdx];
+  if(!s){el.innerHTML='';return;}
+  el.innerHTML=`<div class="rp-section-title" style="margin-top:14px;">Selected Stroke</div>
+    <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="strokeOpVal"></b></div>
+      <input type="range" id="strokeOpSlider" min="0.05" max="1" step="0.05"></div>
+    <div class="zone-row" id="strokeColorRow"><div class="zone-swatch" id="strokeColorSwatch" style="background:${s.color}"></div>
+      <div class="zone-info"><div class="zone-name">Recolor Stroke</div></div></div>
+    <div class="btn-row" style="margin-top:8px;"><div class="btn" id="strokeDeleteBtn">🗑 Delete Stroke</div></div>`;
+  const opSlider=document.getElementById('strokeOpSlider');
+  opSlider.value=s.opacity;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';
+  opSlider.addEventListener('input',()=>{s.opacity=+opSlider.value;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';redrawPaintLayer();});
+  opSlider.addEventListener('change',pushHistory);
+  document.getElementById('strokeColorRow').addEventListener('click',()=>{
+    openColorPicker(document.getElementById('strokeColorSwatch'),'paintstroke',selectedStrokeIdx);
+  });
+  document.getElementById('strokeDeleteBtn').addEventListener('click',()=>{
+    deleteStroke(selectedStrokeIdx);
   });
 }
 function renderPlacedDecalControls(){
@@ -1569,6 +1763,10 @@ function captureState(){
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
     name:jerseyName,number:jerseyNumber,
+    // vector data (points/target/style), not raw pixels — cheap enough to
+    // snapshot on every history push, see redrawPaintLayer's own note.
+    paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
+    placedDecals:JSON.parse(JSON.stringify(placedDecals)),
   };
 }
 function pushHistory(){
@@ -1584,6 +1782,13 @@ function applyState(s){
   jerseyName=s.name||'';jerseyNumber=s.number||'';
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
+  // ||[] guards presets/history saved before paint/decal layers existed
+  paintStrokes=JSON.parse(JSON.stringify(s.paintStrokes||[]));
+  placedDecals=JSON.parse(JSON.stringify(s.placedDecals||[]));
+  selectedStrokeIdx=-1;selectedDecalIdx=-1;
+  redrawPaintLayer();redrawLogoLayer();
+  renderPlacedDecalsList();renderPlacedDecalControls();
+  renderPaintLayersList();renderPaintLayerControls();
   refreshSwatches();
 }
 function undo(){if(historyIdx>0){historyIdx--;applyState(history[historyIdx]);showToast('Undo');}}
@@ -1606,6 +1811,8 @@ function promptSavePreset(){
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
     jname:jerseyName,jnumber:jerseyNumber,
+    paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
+    placedDecals:JSON.parse(JSON.stringify(placedDecals)),
   });
   savePresets(presets);renderRightPanel();showToast('Preset saved');
 }
@@ -1617,6 +1824,12 @@ function applyPreset(id){
   jerseyName=p.jname||'';jerseyNumber=p.jnumber||'';
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
+  paintStrokes=JSON.parse(JSON.stringify(p.paintStrokes||[]));
+  placedDecals=JSON.parse(JSON.stringify(p.placedDecals||[]));
+  selectedStrokeIdx=-1;selectedDecalIdx=-1;
+  redrawPaintLayer();redrawLogoLayer();
+  renderPlacedDecalsList();renderPlacedDecalControls();
+  renderPaintLayersList();renderPaintLayerControls();
   refreshSwatches();pushHistory();showToast(p.name+' loaded');
 }
 
@@ -1632,6 +1845,15 @@ document.getElementById('toggleRotate').addEventListener('click',e=>{
 document.getElementById('toggleReflection').addEventListener('click',e=>{
   reflectionOn=!reflectionOn;e.currentTarget.classList.toggle('active',reflectionOn);
   if(reflectionClone)reflectionClone.visible=reflectionOn;
+});
+/* every edit already autosaves (saveGameLoadout runs off redrawNameNumber,
+   the one function every color/name/number change funnels through) — this
+   button exists for the explicit "I'm done" moment: force one last save,
+   confirm it, then hand off back to the site menu. */
+document.getElementById('saveExitBtn').addEventListener('click',()=>{
+  saveGameLoadout();
+  showToast('Saved — returning to menu…');
+  setTimeout(()=>{ location.href='index.html'; },550);
 });
 
 /* ============================== BOOT ============================== */
