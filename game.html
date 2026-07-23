@@ -9374,6 +9374,247 @@ addEventListener('resize',handleViewportChange);
 addEventListener('orientationchange',()=>{setTimeout(handleViewportChange,300);});
 if(screen.orientation)screen.orientation.addEventListener('change',()=>{setTimeout(handleViewportChange,300);});
 
+/* ============================== LOCKER ROOM INTEGRATION ==============================
+   Reads the loadout saved by the separate "Locker Room" equipment editor
+   (~/Lataukset/ice-hockey-customize.html, same hasa1992 model/GLB asset) out of
+   localStorage and applies it to the HUMAN PLAYER's own model only — jersey/pants/
+   gloves/helmet/skates zone colors (all one shared mesh+material on this asset,
+   "Cube001" — see the editor's own note), stick shaft/blade/tape colors ("Plane001"/
+   "Plane002"/"Plane005"), neck/skin ("Cube"), and the jersey name/number plate.
+   Bots/goalie/other pool skaters are untouched (separate loader.parse calls = fully
+   independent materials) — they keep the existing flat tintTeam() lerp; a personal
+   Locker Room loadout only ever applies to P1's own body+stick.
+   Zone colors are recovered the SAME way the editor derives them in the first place —
+   k-means-ish clustering of the mesh's own baked texture into its N most common
+   colors — so with no saved loadout yet, the player renders with the texture's own
+   original colors (zero visual regression) and an empty name/number plate (same
+   "transparent until set" decal behavior the editor uses).
+   NOT ported: logos and freehand paint. The editor itself doesn't persist those into
+   saved loadouts either (see its Freehand Paint panel's own note) — there's nothing
+   durable yet to hand off. Revisit if/when the editor gains logo/paint persistence. */
+const IH_LOADOUT_KEY='ihGameLoadout_v1';
+const IH_DECAL_SIZE=2048;
+const IH_NAME_RECT={x:200,y:1400,w:400,h:150};
+const IH_NUMBER_RECT={x:240,y:1530,w:340,h:230};
+let ihBodyColors=null,ihNeckColors=null,ihStickShaftBlade=null,ihGripTapeMat=null,ihBladeTapeMat=null;
+let ihNameCanvas,ihNameCtx,ihNameTexture;
+
+function ihGetImageDataFromTexture(tex){
+  const img=tex.image;
+  const cvs=document.createElement('canvas');cvs.width=img.width;cvs.height=img.height;
+  const ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
+  return ctx.getImageData(0,0,cvs.width,cvs.height);
+}
+function ihExtractPalette(imgData,maxClusters,sampleStride){
+  const data=imgData.data;const buckets=new Map();const Q=20;
+  for(let i=0;i<data.length;i+=4*sampleStride){
+    const a=data[i+3];if(a<20)continue;
+    const r=data[i],g=data[i+1],b=data[i+2];
+    const key=(Math.round(r/Q)*Q)+','+(Math.round(g/Q)*Q)+','+(Math.round(b/Q)*Q);
+    let e=buckets.get(key);if(!e){e={count:0,r:0,g:0,b:0};buckets.set(key,e);}
+    e.count++;e.r+=r;e.g+=g;e.b+=b;
+  }
+  let arr=Array.from(buckets.values()).map(e=>({count:e.count,color:[e.r/e.count,e.g/e.count,e.b/e.count]}));
+  arr.sort((a,b)=>b.count-a.count);
+  const merged=[];
+  for(const c of arr){
+    const dupe=merged.find(m=>{const dr=m.color[0]-c.color[0],dg=m.color[1]-c.color[1],db=m.color[2]-c.color[2];return dr*dr+dg*dg+db*db<1600;});
+    if(dupe)dupe.count+=c.count;else merged.push({count:c.count,color:c.color});
+    if(merged.length>=maxClusters*4)break;
+  }
+  merged.sort((a,b)=>b.count-a.count);
+  return merged.map(c=>c.color);
+}
+function ihBuildMaskTexture(imgData,recolor,fixed){
+  const w=imgData.width,h=imgData.height,src=imgData.data;
+  const out=new Uint8Array(w*h*4);
+  const all=recolor.map((color,idx)=>({color,idx})).concat(fixed.map(color=>({color,idx:-1})));
+  for(let p=0;p<w*h;p++){
+    const o=p*4,a=src[o+3];
+    if(a<20)continue;
+    const r=src[o],g=src[o+1],b=src[o+2];
+    let best=all[0],bestD=Infinity;
+    for(const c of all){const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;best=c;}}
+    if(best.idx===0)out[o]=255;else if(best.idx===1)out[o+1]=255;else if(best.idx===2)out[o+2]=255;
+    out[o+3]=255;
+  }
+  const tex=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
+  tex.flipY=false;tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;tex.needsUpdate=true;
+  return tex;
+}
+/* Same DataTexture-not-CanvasTexture + customProgramCacheKey approach the
+   editor's own onBeforeCompile patch had to land on — a CanvasTexture sampler
+   silently never reached the GPU in this exact onBeforeCompile setup, and
+   three.js's program cache doesn't factor onBeforeCompile's own logic into
+   its key, so two zone materials could silently share one compiled program
+   and one of them would lose its extra uniforms.
+   The recolor mix is applied at `#include <dithering_fragment>` (post-lighting,
+   on gl_FragColor) rather than `#include <map_fragment>` (pre-lighting, on
+   diffuseColor — what the editor itself uses, and what this started as here
+   too). On the body/neck materials either insertion point works, but on the
+   stick's material specifically, a diffuseColor-stage mix got fully washed
+   out somewhere between map_fragment and the final output — confirmed by
+   bisecting the standard MeshStandardMaterial chunk chain with a forced
+   override at each candidate insertion point until only the post-lighting
+   one visibly took effect. Post-lighting mixing loses a little PBR shading
+   nuance (the recolored tint doesn't itself interact with lights) but is
+   reliable across every material variant this rig's meshes use — worth
+   revisiting if a real root cause surfaces, but not worth blocking on. */
+function ihInstallRecolorShader(material,maskTexture,zoneColors,nameNumberMap){
+  material.customProgramCacheKey=()=>'ihZoneMaterial_'+material.uuid+(nameNumberMap?'_nn':'');
+  material.onBeforeCompile=(shader)=>{
+    shader.uniforms.maskMap={value:maskTexture};
+    shader.uniforms.zoneColor0={value:zoneColors[0]};
+    shader.uniforms.zoneColor1={value:zoneColors[1]};
+    shader.uniforms.zoneColor2={value:zoneColors[2]};
+    let extraUniforms='',extraCode='';
+    if(nameNumberMap){
+      shader.uniforms.nameNumberMap={value:nameNumberMap};
+      extraUniforms='\nuniform sampler2D nameNumberMap;';
+      extraCode=`
+          vec4 nn = texture2D( nameNumberMap, vUv );
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, nn.rgb, nn.a );`;
+    }
+    shader.fragmentShader=shader.fragmentShader
+      .replace('#include <common>','#include <common>\nuniform sampler2D maskMap;\nuniform vec3 zoneColor0;\nuniform vec3 zoneColor1;\nuniform vec3 zoneColor2;'+extraUniforms)
+      .replace('#include <dithering_fragment>',`
+        {
+          vec4 zmask = texture2D( maskMap, vUv );
+          vec3 recolored = zoneColor0*zmask.r + zoneColor1*zmask.g + zoneColor2*zmask.b;
+          float rw = clamp(zmask.r+zmask.g+zmask.b, 0.0, 1.0);
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, recolored, rw );${extraCode}
+        }
+        #include <dithering_fragment>`);
+  };
+  material.needsUpdate=true;
+}
+function ihSetupZoneMaterial(material,maxZones,nameNumberMap){
+  const imgData=ihGetImageDataFromTexture(material.map);
+  const clusters=ihExtractPalette(imgData,maxZones+2,4);
+  const recolor=clusters.slice(0,maxZones);
+  const fixed=clusters.slice(maxZones);
+  const mask=ihBuildMaskTexture(imgData,recolor,fixed);
+  const zoneColors=recolor.map(c=>new THREE.Color(c[0]/255,c[1]/255,c[2]/255));
+  while(zoneColors.length<3)zoneColors.push(new THREE.Color(0,0,0));
+  ihInstallRecolorShader(material,mask,zoneColors,nameNumberMap);
+  return zoneColors;
+}
+function ihFillRoundedRect(ctx,x,y,w,h,r,color){
+  ctx.fillStyle=color;
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();ctx.fill();
+}
+function ihFitText(ctx,text,maxWidth,startSize,minSize){
+  let size=startSize;
+  ctx.font=`bold ${size}px Arial`;
+  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px Arial`;}
+  return size;
+}
+let ihNameFontSizeCache=null,ihNumberFontSizeCache=null;
+function ihFixedNameSize(ctx,maxWidth){
+  if(ihNameFontSizeCache==null)ihNameFontSizeCache=ihFitText(ctx,'W'.repeat(11),maxWidth,96,22);
+  return ihNameFontSizeCache;
+}
+function ihFixedNumberSize(ctx,maxWidth){
+  if(ihNumberFontSizeCache==null)ihNumberFontSizeCache=ihFitText(ctx,'99',maxWidth,220,40);
+  return ihNumberFontSizeCache;
+}
+function ihRedrawNameNumber(name,number){
+  if(!ihNameCtx)return;
+  const ctx=ihNameCtx;
+  ctx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  const primary='#'+ihBodyColors[0].getHexString();
+  const secondary='#'+ihBodyColors[1].getHexString();
+  const trim='#'+ihBodyColors[2].getHexString();
+  if(name){
+    const r=IH_NAME_RECT;
+    ihFillRoundedRect(ctx,r.x,r.y,r.w,r.h,18,secondary);
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    const maxSize=ihFixedNameSize(ctx,r.w-40);
+    const size=ihFitText(ctx,name,r.w-40,maxSize,22);
+    ctx.font=`bold ${size}px Arial`;
+    ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
+    ctx.strokeText(name,r.x+r.w/2,r.y+r.h/2+2);
+    ctx.fillStyle=trim;ctx.fillText(name,r.x+r.w/2,r.y+r.h/2+2);
+  }
+  if(number){
+    const r=IH_NUMBER_RECT;
+    ctx.fillStyle=primary;ctx.fillRect(r.x,r.y,r.w,r.h);
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    const maxSize=ihFixedNumberSize(ctx,r.w-30);
+    const size=ihFitText(ctx,number,r.w-30,maxSize,40);
+    ctx.font=`bold ${size}px Arial`;
+    ctx.lineJoin='round';ctx.lineWidth=Math.max(6,size*0.09);ctx.strokeStyle=secondary;
+    ctx.strokeText(number,r.x+r.w/2,r.y+r.h/2+4);
+    ctx.fillStyle=trim;ctx.fillText(number,r.x+r.w/2,r.y+r.h/2+4);
+  }
+  const imgData=ihNameCtx.getImageData(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  ihNameTexture.image.data.set(imgData.data);
+  ihNameTexture.needsUpdate=true;
+}
+/* One-time: builds the zone-recolor shaders + decal canvas on the player's own
+   meshes (expensive-ish — texture clustering — so this runs once, not per apply). */
+function ihSetupLockerRoomMaterials(){
+  const bodyMesh=player.visual.getObjectByName('Cube001');
+  const neckMesh=player.visual.getObjectByName('Cube');
+  const meshMain=stickGroup.getObjectByName('Plane001');
+  const meshBladeTape=stickGroup.getObjectByName('Plane002');
+  const meshGripTape=stickGroup.getObjectByName('Plane005');
+  if(!bodyMesh||!neckMesh||!meshMain||!meshBladeTape||!meshGripTape)return false;
+
+  ihNameCanvas=document.createElement('canvas');
+  ihNameCanvas.width=ihNameCanvas.height=IH_DECAL_SIZE;
+  ihNameCtx=ihNameCanvas.getContext('2d');
+  ihNameTexture=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
+  ihNameTexture.flipY=false;
+
+  ihBodyColors=ihSetupZoneMaterial(bodyMesh.material,3,ihNameTexture);
+
+  neckMesh.material=neckMesh.material.clone();
+  ihNeckColors=ihSetupZoneMaterial(neckMesh.material,1,null);
+  ihNeckColors[0].set('#c68863'); // same realistic default the editor uses
+
+  meshBladeTape.material=meshBladeTape.material.clone();
+  meshGripTape.material=meshGripTape.material.clone();
+  ihStickShaftBlade=ihSetupZoneMaterial(meshMain.material,2,null); // [0]=Blade,[1]=Shaft (cluster-frequency order, matches the editor)
+  ihGripTapeMat=meshGripTape.material;
+  ihBladeTapeMat=meshBladeTape.material;
+  return true;
+}
+/* Cheap: just reads localStorage and pushes color/name/number values into the
+   already-built shader uniforms — safe to call again any time the loadout changes. */
+function ihApplySavedLoadout(){
+  if(!ihBodyColors)return;
+  let name='',number='';
+  try{
+    const raw=localStorage.getItem(IH_LOADOUT_KEY);
+    if(raw){
+      const lo=JSON.parse(raw);
+      if(lo.body&&lo.body.length===3)lo.body.forEach((hex,i)=>ihBodyColors[i].set(hex));
+      if(lo.neck)ihNeckColors[0].set(lo.neck);
+      if(lo.stick&&lo.stick.length===4){
+        ihStickShaftBlade[1].set(lo.stick[0]); // Shaft
+        ihStickShaftBlade[0].set(lo.stick[1]); // Blade
+        ihGripTapeMat.color.set(lo.stick[2]);
+        ihBladeTapeMat.color.set(lo.stick[3]);
+      }
+      name=lo.name||'';number=lo.number||'';
+    }
+  }catch(e){console.warn('Locker Room loadout failed to load',e);}
+  ihRedrawNameNumber(name,number);
+}
+function applyLockerRoomLoadout(){
+  if(!player||!player.visual||!stickGroup)return;
+  if(!ihSetupLockerRoomMaterials())return;
+  ihApplySavedLoadout();
+  // debug/test hook, same convention as window.__poseFrozen etc — `let`
+  // top-level globals aren't reachable from outside this script's scope.
+  window.__ihLoadoutDebug={bodyColors:ihBodyColors,neckColors:ihNeckColors,stickShaftBlade:ihStickShaftBlade,gripTapeMat:ihGripTapeMat,bladeTapeMat:ihBladeTapeMat};
+}
+// live-updates if the Locker Room editor is open+edited in another tab while the game is running
+addEventListener('storage',e=>{if(e.key===IH_LOADOUT_KEY)ihApplySavedLoadout();});
+
 /* ----- boot ----- */
 buildRoom();
 buildGoal();
@@ -9396,6 +9637,7 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
     err=>console.error('bot load failed',err));
   loader.parse(b64ToBuf(STICK_B64),'',sgltf=>{
     stickGroup=sgltf.scene;stickGroup.visible=false;scene.add(stickGroup);
+    applyLockerRoomLoadout();
     puck=createPuck();
     camera.position.copy(player.pos).addScaledVector(fwd(camYaw),-CONFIG.camDist).addScaledVector(up,CONFIG.camHeight);
     camera.lookAt(player.pos.x,CONFIG.camLook,player.pos.z);

@@ -505,6 +505,32 @@ function redrawNameNumber(){
     ctx.fillStyle=trim;ctx.fillText(jerseyNumber,r.x+r.w/2,r.y+r.h/2+4);
   }
   syncCanvasToDataTexture(nameNumberCtx,nameNumberCanvas,nameNumberTexture);
+  saveGameLoadout();
+}
+/* ----- Game integration: push the live loadout to ice_hockey.html -----
+   The game (game.html / ~/Lataukset/ice_hockey.html) reads this key on boot
+   and applies it ONLY to the human player's own model — bots/goalie keep
+   their existing flat team-tint. redrawNameNumber() is the one function
+   every color-edit path (drag/hex/RGB/swatch/preset/randomize, all via
+   refreshSwatches) and both name/number inputs already funnel through, so
+   hooking the save in here covers every edit site with a single call —
+   no need to instrument each one separately. Logos/freehand paint are
+   deliberately NOT included: the editor itself doesn't persist those into
+   presets/undo either (see the Freehand Paint panel's own note), so there
+   is nothing durable yet to hand off to the game. */
+const GAME_LOADOUT_KEY='ihGameLoadout_v1';
+function saveGameLoadout(){
+  if(!bodyZM||!stickZM||!neckZone)return;
+  try{
+    localStorage.setItem(GAME_LOADOUT_KEY,JSON.stringify({
+      v:1,
+      body:bodyZM.zones.map(z=>'#'+z.color.getHexString()),
+      neck:'#'+neckZone.color.getHexString(),
+      stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
+      name:jerseyName,
+      number:jerseyNumber,
+    }));
+  }catch(e){}
 }
 function sanitizeName(raw){
   let s=(raw||'').toUpperCase().replace(/[^A-Z -]/g,'');
