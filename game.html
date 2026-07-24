@@ -6345,9 +6345,10 @@ let bot=null;
 function createBot(gltf){
   const ent=createPlayer(gltf);
   ent.pos.set(6,0,10);ent.heading=Math.PI;
-  ent.visual.traverse(o=>{if(o.isMesh&&o.material){
-    o.material=o.material.clone();
-    if(o.material.color)o.material.color.lerp(new THREE.Color(0xd23a3a),0.35);}});
+  // body appearance (randomized zone-recolor, not a flat tint) is applied by
+  // the caller via ihApplyBotZoneRecolor once the entity's TEAM is known —
+  // the single default practice/1v1 `bot` right after this returns, MATCH
+  // pool bots at team-assignment time in startMatch/startFreeSkate.
   const stickMat=new THREE.MeshStandardMaterial({color:0x241304,roughness:0.75});
   const grp=new THREE.Group();
   const shaft=new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,1.35,8),stickMat);
@@ -6611,17 +6612,12 @@ function ensureRing(e,colorHex){
   }
   e.pRing.material.color.setHex(colorHex);e.pRing.visible=true;
 }
-function tintTeam(e,team){
-  /* re-tintable: the ORIGINAL color is cached per mesh on first tint, so a
-     body reused on the other team next game re-tints from base instead of
-     compounding lerps (practice teammates can become match opponents) */
-  if(e.teamTinted===team)return;
-  const col=new THREE.Color(team==='A'?0x3f6fd2:0xd23a3a);
-  e.visual.traverse(o=>{if(o.isMesh&&o.material&&o.material.color){
-    if(!o.userData.tintBase){o.material=o.material.clone();o.userData.tintBase=o.material.color.clone();}
-    o.material.color.copy(o.userData.tintBase).lerp(col,0.45);}});
-  e.teamTinted=team;
-}
+/* Team coloring for pool skaters used to live here as a flat single-hue
+   tint (tintTeam) — replaced by ihApplyBotZoneRecolor (defined in the Locker
+   Room integration section below), which gives each skater its own
+   randomized-but-team-family zone-recolor instead of making every
+   teammate a visual clone of every other teammate. See its own comment
+   for the re-tint-safety pattern (was tintTeam's whole reason to exist). */
 function ensureBodies(n,cb){
   if(MATCH.pool.length>=n){cb();return;}
   loader.parse(b64ToBuf(PLAYER_B64),'',g=>{
@@ -6633,7 +6629,9 @@ function ensureGoalieB(cb){
   if(MATCH.goalieB){cb();return;}
   loader.parse(b64ToBuf(PLAYER_B64),'',g=>{
     remapBoneNames(g.scene);
-    MATCH.goalieB=createGoalie(g);MATCH.goalieB.root.visible=false;cb();
+    MATCH.goalieB=createGoalie(g);MATCH.goalieB.root.visible=false;
+    ihApplyBotZoneRecolor(MATCH.goalieB,'B'); // defends GOAL_B, team B's own net
+    cb();
   },()=>cb());
 }
 function startMatch(){
@@ -6659,7 +6657,7 @@ function startMatch(){
       MATCH.skaters.push({ent:MATCH.pool[pi++],team:'B',ctrl:'ai',
         ai:{pos:AI_POS[MATCH.botsB-1][i],side:i%2?-1:1}});
     for(let i=pi;i<MATCH.pool.length;i++){MATCH.pool[i].root.visible=false;MATCH.pool[i].hasPuck=false;}
-    for(const s of MATCH.skaters)if(s.ent!==player)tintTeam(s.ent,s.team);
+    for(const s of MATCH.skaters)if(s.ent!==player)ihApplyBotZoneRecolor(s.ent,s.team);
     if(typeof dummy!=='undefined'&&dummy&&dummy.group)dummy.group.visible=false;
     if(typeof bot!=='undefined'&&bot){bot.root.visible=false;bot.hasPuck=false;}
     MATCH.goalieB.root.visible=true;
@@ -6709,7 +6707,7 @@ function startFreeSkate(){
         ai:{pos:AI_POS[MATCH.botsO-1][i],side:i%2?-1:1}});
     }
     for(let i=pi;i<MATCH.pool.length;i++){MATCH.pool[i].root.visible=false;MATCH.pool[i].hasPuck=false;}
-    for(const s of MATCH.skaters)if(s.ent!==player)tintTeam(s.ent,s.team);
+    for(const s of MATCH.skaters)if(s.ent!==player)ihApplyBotZoneRecolor(s.ent,s.team);
     MATCH.freeSkate=true;
     flashMsg('PRACTICE — '+(MATCH.skaters.length)+' SKATERS');
   });
@@ -9381,9 +9379,13 @@ if(screen.orientation)screen.orientation.addEventListener('change',()=>{setTimeo
    gloves/helmet/skates zone colors (all one shared mesh+material on this asset,
    "Cube001" — see the editor's own note), stick shaft/blade/tape colors ("Plane001"/
    "Plane002"/"Plane005"), neck/skin ("Cube"), and the jersey name/number plate.
-   Bots/goalie/other pool skaters are untouched (separate loader.parse calls = fully
-   independent materials) — they keep the existing flat tintTeam() lerp; a personal
-   Locker Room loadout only ever applies to P1's own body+stick.
+   Bots/goalie/other pool skaters are untouched by THIS loadout (separate
+   loader.parse calls = fully independent materials) — a personal Locker
+   Room loadout only ever applies to P1's own body+stick. They DO get their
+   own independent, randomized zone-recolor via ihApplyBotZoneRecolor
+   further down (see the BOT/GOALIE APPEARANCE VARIATION section) so no two
+   skaters on the ice look like identical clones — that's a separate
+   per-entity system, not this one.
    Zone colors are recovered the SAME way the editor derives them in the first place —
    k-means-ish clustering of the mesh's own baked texture into its N most common
    colors — so with no saved loadout yet, the player renders with the texture's own
@@ -9488,6 +9490,16 @@ function ihInstallRecolorShader(material,maskTexture,zoneColors,nameNumberMap){
   };
   material.needsUpdate=true;
 }
+/* Cached once and reused by every bot/goalie's own zone-recolor setup below —
+   the mask is purely a function of the shared PLAYER_B64 texture's PIXEL
+   DATA (which cluster of pixels is which zone), not of any one entity's
+   mesh/material instance, so re-deriving it per-bot (a real cost — image
+   readback + k-means-ish clustering over a 2048x2048 atlas) would be pure
+   waste when a full match can spawn 10+ skaters. Only the BODY (3-zone,
+   the case that passes a nameNumberMap) populates this — stick/neck don't
+   need a bot-side equivalent since bots/goalie use their own procedural
+   stick and gear, not this rig's GLTF stick or the neck zone. */
+let ihBodyMaskCache=null;
 function ihSetupZoneMaterial(material,maxZones,nameNumberMap){
   const imgData=ihGetImageDataFromTexture(material.map);
   const clusters=ihExtractPalette(imgData,maxZones+2,4);
@@ -9497,7 +9509,63 @@ function ihSetupZoneMaterial(material,maxZones,nameNumberMap){
   const zoneColors=recolor.map(c=>new THREE.Color(c[0]/255,c[1]/255,c[2]/255));
   while(zoneColors.length<3)zoneColors.push(new THREE.Color(0,0,0));
   ihInstallRecolorShader(material,mask,zoneColors,nameNumberMap);
+  if(nameNumberMap)ihBodyMaskCache=mask;
   return zoneColors;
+}
+/* ============================== BOT/GOALIE APPEARANCE VARIATION ==============================
+   Bots used to all get the exact same flat single-hue tint (tintTeam's
+   0.45 lerp toward one of two fixed team colors) — every teammate was a
+   visually identical clone of every other teammate, distinguishable only
+   by position. This reuses the SAME proven zone-recolor pipeline the
+   human player's Locker Room loadout uses (same shader, same mesh
+   identity, same mask-sharing trick above) but with randomized-per-entity
+   Primary/Secondary/Trim colors, biased toward a hue family per team so
+   "who's on my side" still reads at a glance while no two skaters on the
+   ice look like copies of each other. */
+const IH_TEAM_HUE={A:212,B:4}; // matches tintTeam's old fixed colors: 0x3f6fd2 (blue, team A) / 0xd23a3a (red, team B)
+function ihRandomBotZoneColors(hueCenter){
+  const jitter=()=>(Math.random()*2-1)*32;
+  const hue=h=>(((hueCenter+h+jitter())%360)+360)%360/360;
+  return[
+    new THREE.Color().setHSL(hue(0),  0.45+Math.random()*0.35, 0.22+Math.random()*0.16), // Primary
+    new THREE.Color().setHSL(hue(150),0.35+Math.random()*0.35, 0.30+Math.random()*0.20), // Secondary (contrast accent)
+    new THREE.Color().setHSL(Math.random(),0.05+Math.random()*0.25,0.84+Math.random()*0.12), // Trim (usually near-white, like real jerseys)
+  ];
+}
+/* Sets up (once) or re-rolls (on a team change) an entity's own zone-recolor,
+   mirroring tintTeam's re-tint-safety pattern (cached per-entity state, not
+   compounding) — this is the direct replacement for tintTeam() on any
+   entity that gets this treatment. bodyMesh.userData.ihZoneColors holds the
+   live THREE.Color objects the installed shader's uniforms reference, so
+   mutating them in place (via .setHSL, not reassigning the array) is what
+   makes a re-roll actually show up without reinstalling the shader. */
+function ihApplyBotZoneRecolor(ent,team){
+  if(!ent||!ent.visual)return;
+  const bodyMesh=ent.visual.getObjectByName('Cube001');
+  if(!bodyMesh||!bodyMesh.material||!bodyMesh.material.map)return;
+  if(bodyMesh.userData.ihTeam===team)return; // already correctly colored for this team
+  const fresh=ihRandomBotZoneColors(IH_TEAM_HUE[team]||IH_TEAM_HUE.B);
+  if(!bodyMesh.userData.ihZoneColors){
+    bodyMesh.material=bodyMesh.material.clone(); // detach from Cube002-007's shared reference before patching
+    const mask=ihBodyMaskCache||ihGetBodyMask(bodyMesh.material);
+    ihInstallRecolorShader(bodyMesh.material,mask,fresh,null);
+    bodyMesh.userData.ihZoneColors=fresh;
+  }else{
+    const live=bodyMesh.userData.ihZoneColors;
+    live[0].copy(fresh[0]);live[1].copy(fresh[1]);live[2].copy(fresh[2]);
+  }
+  bodyMesh.userData.ihTeam=team;
+}
+/* Fallback path for the rare case a bot's body zone-recolor gets requested
+   before the human player has ever set one up (so ihBodyMaskCache is still
+   empty) — computes+caches the mask directly, same as ihSetupZoneMaterial's
+   body branch does. */
+function ihGetBodyMask(material){
+  if(ihBodyMaskCache)return ihBodyMaskCache;
+  const imgData=ihGetImageDataFromTexture(material.map);
+  const clusters=ihExtractPalette(imgData,5,4);
+  ihBodyMaskCache=ihBuildMaskTexture(imgData,clusters.slice(0,3),clusters.slice(3));
+  return ihBodyMaskCache;
 }
 function ihFillRoundedRect(ctx,x,y,w,h,r,color){
   ctx.fillStyle=color;
@@ -9631,10 +9699,12 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
   buildTrail();
   buildGoalieUI();
   buildStartMenu();
-  loader.parse(b64ToBuf(PLAYER_B64),'',ggltf=>{remapBoneNames(ggltf.scene);goalie=createGoalie(ggltf);},
-    err=>console.error('goalie load failed',err));
-  loader.parse(b64ToBuf(PLAYER_B64),'',bgltf=>{remapBoneNames(bgltf.scene);bot=createBot(bgltf);},
-    err=>console.error('bot load failed',err));
+  loader.parse(b64ToBuf(PLAYER_B64),'',ggltf=>{remapBoneNames(ggltf.scene);goalie=createGoalie(ggltf);
+    ihApplyBotZoneRecolor(goalie,'A'); // defends the original net — team A's own goalie in match mode
+  },err=>console.error('goalie load failed',err));
+  loader.parse(b64ToBuf(PLAYER_B64),'',bgltf=>{remapBoneNames(bgltf.scene);bot=createBot(bgltf);
+    ihApplyBotZoneRecolor(bot,'B'); // the practice/1v1 opponent
+  },err=>console.error('bot load failed',err));
   loader.parse(b64ToBuf(STICK_B64),'',sgltf=>{
     stickGroup=sgltf.scene;stickGroup.visible=false;scene.add(stickGroup);
     applyLockerRoomLoadout();
