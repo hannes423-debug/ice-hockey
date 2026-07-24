@@ -235,6 +235,26 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
   background:var(--bg3);border:1px solid var(--line-lit);border-radius:10px;padding:10px 18px;
   font-size:14px;font-weight:600;opacity:0;transition:all .25s var(--ease);pointer-events:none;z-index:200;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+/* ----- team context bar ----- */
+.tb-ctx{display:flex;align-items:center;gap:8px;}
+.tb-ctx-label{font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--text-faint);}
+.tb-select{background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);
+  font-size:13.5px;font-weight:700;padding:7px 10px;cursor:pointer;max-width:190px;}
+.tb-select:hover{border-color:var(--line-lit);}
+.tb-roletoggle{display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:9px;overflow:hidden;}
+.tb-role{padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;color:var(--text-faint);
+  transition:all .15s;white-space:nowrap;}
+.tb-role.active{background:var(--accent,#7c5cff);color:#fff;}
+.tb-role:not(.active):hover{color:var(--text);}
+/* ----- locks + number status chips ----- */
+.zone-row.locked{opacity:.62;cursor:not-allowed;}
+.zone-row.locked .zone-swatch{filter:saturate(.6);}
+.num-chip{display:inline-block;background:var(--bg3);border:1px solid var(--line-lit);border-radius:20px;
+  padding:4px 12px;font-size:12.5px;font-weight:700;color:var(--text-faint);}
+.num-chip.ok{color:#5fd68a;border-color:#2c5a3c;}
+.num-chip.pend{color:#e8c35a;border-color:#5a4c2c;}
+.num-chip.rej{color:#e86a6a;border-color:#5a2c2c;}
 </style>
 </head>
 <body>
@@ -243,13 +263,21 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
   <div id="topbar">
     <div class="tb-title">LOCKER ROOM<small>Equipment Editor — Realtime Preview</small></div>
     <div class="tb-sep"></div>
-    <div class="tb-stat"><b id="tbName">SNIPER92</b><span>Player</span></div>
-    <div class="tb-stat"><b>92</b><span>Overall</span></div>
-    <div class="tb-stat"><b>C</b><span>Position</span></div>
-    <div class="tb-stat"><b>Wolves HC</b><span>Club</span></div>
+    <div class="tb-stat"><b id="tbName">—</b><span>Player</span></div>
+    <div class="tb-stat"><b id="tbTeam">—</b><span>Team</span></div>
+    <div class="tb-sep"></div>
+    <div class="tb-ctx">
+      <span class="tb-ctx-label">TEAM</span>
+      <select id="ctxTeamSel" class="tb-select"></select>
+      <span class="tb-ctx-label">JERSEY</span>
+      <select id="ctxJerseySel" class="tb-select"></select>
+      <div class="tb-pill" id="favBtn" title="Make this team + jersey your favourite look — the default character on the main menu and in-game">☆ Make favourite</div>
+    </div>
     <div class="spacer"></div>
-    <div class="tb-pill">💰 12,450</div>
-    <div class="tb-pill">🔔 Locker Room v0.1</div>
+    <div class="tb-roletoggle" id="roleToggle" title="Same person, two hats: the player customizes within team rules; the team admin sets the uniform, numbers and rules">
+      <div class="tb-role active" data-role="player">🧑 Player</div>
+      <div class="tb-role" data-role="admin">🛡️ Team Admin</div>
+    </div>
     <div class="tb-pill action" id="saveExitBtn" title="Save is already continuous — this just confirms and takes you back">✓ Save &amp; Exit</div>
   </div>
 
@@ -363,6 +391,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="ice-hockey-customize-data.js"></script>
+<script src="ice-hockey-customize-core.js"></script>
 <script src="ice-hockey-customize-app.js"></script>
 </body>
 </html>

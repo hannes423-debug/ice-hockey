@@ -34,23 +34,10 @@ function hsvToRgb(h,s,v){const c=v*s,x=c*(1-Math.abs((h/60)%2-1)),m=v-c;let r,g,
   return{r:(r+m)*255,g:(g+m)*255,b:(b+m)*255};}
 
 /* ============================== ASSET LOADER ============================== */
-function b64ToBuf(b64){const bin=atob(b64);const buf=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);return buf.buffer;}
-
-/* hasa1992's Blender human-metarig bone names don't matter here (this viewer
-   does no IK), but we still normalize them for the idle-sway bones (spine_03,
-   head) and so this loader stays consistent with the main game's. */
-function remapBoneNames(root){
-  const RENAME_EXACT={'spine':'spine_01','spine1':'spine_02','spine2':'spine_03','neck1':'neck_01'};
-  const RENAME_SIDED={'upper_arm':'upperarm','forearm':'lowerarm','hand':'hand','thigh':'thigh','shin':'calf','foot':'foot'};
-  root.traverse(o=>{
-    const n=o.name;if(!n)return;
-    if(RENAME_EXACT[n]){o.name=RENAME_EXACT[n];return;}
-    for(const base in RENAME_SIDED){
-      if(n===base+'L'||n===base+'.L'){o.name=RENAME_SIDED[base]+'_l';return;}
-      if(n===base+'R'||n===base+'.R'){o.name=RENAME_SIDED[base]+'_r';return;}
-    }
-  });
-}
+/* b64ToBuf + remapBoneNames + the whole recolor pipeline + the name/number
+   plate renderer now live in ice-hockey-customize-core.js (loaded before this
+   file), shared verbatim with the main menu's player preview so the two can
+   never drift apart. */
 
 /* ============================== SCENE MANAGER ============================== */
 const viewportEl=document.getElementById('viewport');
@@ -279,165 +266,15 @@ function loadCharacter(cb){
 /* ============================== MATERIAL MANAGER ============================== */
 /* This is the seam a future paint-layer / decal system replaces: right now
    setZoneColor() writes a flat color into a shader uniform. Later, the same
-   call site could instead recomposite a layer stack into the mask texture. */
-function getImageDataFromTexture(tex){
-  const img=tex.image;
-  const cvs=document.createElement('canvas');cvs.width=img.width;cvs.height=img.height;
-  const ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
-  return ctx.getImageData(0,0,cvs.width,cvs.height);
-}
-function extractPalette(imgData,maxClusters,sampleStride){
-  const data=imgData.data;const buckets=new Map();const Q=20;
-  for(let i=0;i<data.length;i+=4*sampleStride){
-    const a=data[i+3];if(a<20)continue;
-    const r=data[i],g=data[i+1],b=data[i+2];
-    const key=(Math.round(r/Q)*Q)+','+(Math.round(g/Q)*Q)+','+(Math.round(b/Q)*Q);
-    let e=buckets.get(key);if(!e){e={count:0,r:0,g:0,b:0};buckets.set(key,e);}
-    e.count++;e.r+=r;e.g+=g;e.b+=b;
-  }
-  let arr=Array.from(buckets.values()).map(e=>({count:e.count,color:[e.r/e.count,e.g/e.count,e.b/e.count]}));
-  arr.sort((a,b)=>b.count-a.count);
-  const merged=[];
-  for(const c of arr){
-    const dupe=merged.find(m=>{const dr=m.color[0]-c.color[0],dg=m.color[1]-c.color[1],db=m.color[2]-c.color[2];return dr*dr+dg*dg+db*db<1600;});
-    if(dupe)dupe.count+=c.count;else merged.push({count:c.count,color:c.color});
-    if(merged.length>=maxClusters*4)break;
-  }
-  merged.sort((a,b)=>b.count-a.count);
-  const total=merged.reduce((s,c)=>s+c.count,0)||1;
-  return merged.map(c=>({color:c.color,share:c.count/total}));
-}
-function buildMaskTexture(imgData,recolor,fixed){
-  const w=imgData.width,h=imgData.height,src=imgData.data;
-  const out=new Uint8Array(w*h*4);
-  const all=recolor.map((c,i)=>({color:c.color,idx:i})).concat(fixed.map(c=>({color:c.color,idx:-1})));
-  for(let p=0;p<w*h;p++){
-    const o=p*4,a=src[o+3];
-    if(a<20)continue;
-    const r=src[o],g=src[o+1],b=src[o+2];
-    let best=all[0],bestD=Infinity;
-    for(const c of all){const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;best=c;}}
-    if(best.idx===0)out[o]=255;else if(best.idx===1)out[o+1]=255;else if(best.idx===2)out[o+2]=255;
-    out[o+3]=255;
-  }
-  const tex=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
-  tex.flipY=false;tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;tex.needsUpdate=true;
-  return tex;
-}
-function installRecolorShader(material,maskTexture,zoneColors,decals){
-  /* three.js's WebGLProgram cache doesn't factor onBeforeCompile's own logic
-     into its cache key by default — two materials that look identical on
-     "standard" properties (same map, same skinning/defines) can silently
-     share one compiled program, so whichever material's onBeforeCompile
-     didn't "win" the cache silently loses its extra uniforms (this is
-     exactly what was happening: nameNumberMap/paintMap were declared and
-     wired correctly but never got uploaded, because a cached program
-     compiled from a different onBeforeCompile call — one without those
-     samplers — was being reused for this material's draw calls). A unique
-     customProgramCacheKey per material instance forces its own cache entry. */
-  material.customProgramCacheKey=()=>'zoneMaterial_'+material.uuid+(decals?'_decals':'');
-  material.onBeforeCompile=(shader)=>{
-    shader.uniforms.maskMap={value:maskTexture};
-    shader.uniforms.zoneColor0={value:zoneColors[0]};
-    shader.uniforms.zoneColor1={value:zoneColors[1]};
-    shader.uniforms.zoneColor2={value:zoneColors[2]};
-    let extraUniforms='',extraCode='';
-    if(decals){
-      shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
-      shader.uniforms.logoMap={value:decals.logoMap};
-      shader.uniforms.paintMap={value:decals.paintMap};
-      shader.uniforms.uMirrorPaint={value:1.0};
-      extraUniforms='\nuniform sampler2D nameNumberMap;\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
-      /* Mirror ON (default, unchanged behavior): sample logoMap/paintMap at
-         the raw (shared/mirrored) UV — whatever's painted/placed on one leg
-         shows on both, same as it always has. Mirror OFF: the canvas is
-         packed into left/right HALVES by paintCanvasXY() (see its own
-         comment) — sample whichever half matches this fragment's real side
-         (vIhSide, the per-fragment counterpart to the JS-side raycast hit
-         test used while painting/placing) instead of the raw shared UV.
-         Logos share the exact same mirrored-UV problem paint had (confirmed:
-         a decal placed once showed up on both legs) so they use the exact
-         same remap/uniform — no separate "mirror decals" toggle. */
-      extraCode=`
-          vec4 nn = texture2D( nameNumberMap, vUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );
-          vec2 pUv = vUv;
-          if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
-          vec4 lg = texture2D( logoMap, pUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
-          vec4 pt = texture2D( paintMap, pUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
-      /* vIhSide: which real-world side of the (bind-pose-symmetric) body a
-         fragment belongs to, from the raw pre-skin `position` attribute —
-         verified with a forced hard-override render (solid red/blue split
-         cleanly down the anatomical midline) before trusting it for the
-         real feature. Requires patching the VERTEX shader too, which
-         nothing else in this file has needed before. */
-      shader.vertexShader=shader.vertexShader
-        .replace('#include <common>','#include <common>\nvarying float vIhSide;')
-        .replace('#include <begin_vertex>','#include <begin_vertex>\nvIhSide = position.x;');
-    }
-    shader.fragmentShader=shader.fragmentShader
-      .replace('#include <common>','#include <common>\nuniform sampler2D maskMap;\nuniform vec3 zoneColor0;\nuniform vec3 zoneColor1;\nuniform vec3 zoneColor2;'+extraUniforms)
-      .replace('#include <map_fragment>',`#include <map_fragment>
-        {
-          vec4 zmask = texture2D( maskMap, vUv );
-          vec3 recolored = zoneColor0*zmask.r + zoneColor1*zmask.g + zoneColor2*zmask.b;
-          float rw = clamp(zmask.r+zmask.g+zmask.b, 0.0, 1.0);
-          diffuseColor.rgb = mix( diffuseColor.rgb, recolored, rw );${extraCode}
-        }`);
-    material.userData.shaderRef=shader;
-  };
-  material.needsUpdate=true;
-}
-function setupZoneMaterial(material,maxZones,labels,decals){
-  const imgData=getImageDataFromTexture(material.map);
-  const clusters=extractPalette(imgData,maxZones+2,4);
-  const recolor=clusters.slice(0,maxZones);
-  const fixed=clusters.slice(maxZones);
-  const mask=buildMaskTexture(imgData,recolor,fixed);
-  const zoneColors=recolor.map(c=>new THREE.Color(c.color[0]/255,c.color[1]/255,c.color[2]/255));
-  while(zoneColors.length<3)zoneColors.push(new THREE.Color(0,0,0));
-  installRecolorShader(material,mask,zoneColors,decals);
-  const zones=recolor.map((c,i)=>{
-    const colorObj=zoneColors[i];
-    return{
-      label:(labels&&labels[i])||('Zone '+(i+1)),
-      color:colorObj,
-      original:'#'+colorObj.getHexString(),
-      share:c.share,
-      setColor(hex){colorObj.set(hex);},
-    };
-  });
-  return{
-    material,
-    fixedShare:fixed.reduce((s,c)=>s+c.share,0),
-    zones,
-    setZoneColor(i,hex){ if(this.zones[i])this.zones[i].setColor(hex); },
-  };
-}
-/* Simple single-color tint zone for small dedicated-mesh parts (stick tape) —
-   no mask/classification needed since the whole mesh IS the zone; material.color
-   multiplies the existing map, so any tape-pattern detail baked into the texture
-   still shows through the tint (matches how real tape striping looks). */
-function setupTintZone(material,label){
-  return{
-    label,
-    color:material.color,
-    original:'#'+material.color.getHexString(),
-    share:1,
-    setColor(hex){material.color.set(hex);},
-  };
-}
-
+   call site could instead recomposite a layer stack into the mask texture.
+   getImageDataFromTexture/extractPalette/buildMaskTexture/installRecolorShader/
+   setupZoneMaterial/setupTintZone moved to ice-hockey-customize-core.js. */
 /* ----- Name/Number decal + freehand paint layers (jersey/body material only) -----
    Both are separate always-on-top canvases composited in the same shader patch
    as the zone recolor (see installRecolorShader's `decals` argument): fully
    transparent until something is drawn, so the original baked "PLAYER"/"10"
-   text stays visible until the user sets a custom name/number. */
-const DECAL_SIZE=2048;
-const NAME_RECT={x:200,y:1400,w:400,h:150};
-const NUMBER_RECT={x:240,y:1530,w:340,h:230};
+   text stays visible until the user sets a custom name/number.
+   DECAL_SIZE/NAME_RECT/NUMBER_RECT + the plate drawing live in core now. */
 let nameNumberCanvas,nameNumberCtx,nameNumberTexture;
 let logoCanvas,logoCtx,logoTexture;
 let paintCanvas,paintCtx,paintTexture;
@@ -476,118 +313,112 @@ function setupDecalCanvases(){
   paintCtx=paintCanvas.getContext('2d');
   paintTexture=makeDecalDataTexture();
 }
-function fillRoundedRect(ctx,x,y,w,h,r,color){
-  ctx.fillStyle=color;
-  ctx.beginPath();
-  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
-  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();ctx.fill();
-}
-/* Only web-safe/OS-level font families — no @font-face loading, so no
-   network dependency, load-time delay, or licensing question. Canvas text
-   silently falls back to a default sans-serif if a name isn't actually
-   installed, so these are deliberately common cross-platform choices. */
-const JERSEY_FONTS=[
-  {id:'Arial',label:'Arial — Standard'},
-  {id:'Impact',label:'Impact — Bold Block'},
-  {id:'"Arial Narrow",sans-serif',label:'Arial Narrow — Condensed'},
-  {id:'"Courier New",monospace',label:'Courier — Retro Blocky'},
-  {id:'Georgia,serif',label:'Georgia — Classic Serif'},
-  {id:'"Trebuchet MS",sans-serif',label:'Trebuchet — Modern'},
-];
 let jerseyFont='Arial';
 function setJerseyFont(font){
   jerseyFont=font;
-  nameFontSizeCache=null;numberFontSizeCache=null; // stale for the OLD font's metrics
   redrawNameNumber();
   pushHistory();
 }
-function fitText(ctx,text,maxWidth,startSize,minSize){
-  let size=startSize;
-  ctx.font=`bold ${size}px ${jerseyFont}`;
-  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px ${jerseyFont}`;}
-  return size;
-}
-/* fitText only ever shrinks to fit the CURRENT text, and gets called fresh
-   per name/number — so a short name ("ORR") never triggers a shrink and
-   renders at the full startSize while a long one ("VANDERBILT") shrinks a
-   lot, making letter height swing with name length on the same jersey.
-   Real jerseys use one constant letter height regardless of name length —
-   only the plate's used width changes. Fix: size the font ONCE against the
-   longest text this field can ever hold (sanitizeName/sanitizeNumber's own
-   max-length, in the widest Latin capital "W"/digit) and reuse that fixed
-   size for every name/number. The per-text fitText call still runs as a
-   safety net afterward, but with maxLenSize as its startSize it can only
-   shrink further if some edge case still overflows — it can never grow a
-   short string past the fixed size. */
-let nameFontSizeCache=null,numberFontSizeCache=null;
-function fixedNameSize(ctx,maxWidth){
-  if(nameFontSizeCache==null)nameFontSizeCache=fitText(ctx,'W'.repeat(11),maxWidth,96,22);
-  return nameFontSizeCache;
-}
-function fixedNumberSize(ctx,maxWidth){
-  if(numberFontSizeCache==null)numberFontSizeCache=fitText(ctx,'99',maxWidth,220,40);
-  return numberFontSizeCache;
-}
 function redrawNameNumber(){
   if(!nameNumberCtx)return;
-  const ctx=nameNumberCtx;
-  ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  const primary='#'+bodyZM.zones[0].color.getHexString();
-  const secondary='#'+bodyZM.zones[1].color.getHexString();
-  const trim='#'+bodyZM.zones[2].color.getHexString();
-  if(jerseyName){
-    const r=NAME_RECT;
-    fillRoundedRect(ctx,r.x,r.y,r.w,r.h,18,secondary);
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    const maxSize=fixedNameSize(ctx,r.w-40);
-    const size=fitText(ctx,jerseyName,r.w-40,maxSize,22);
-    ctx.font=`bold ${size}px ${jerseyFont}`;
-    ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
-    ctx.strokeText(jerseyName,r.x+r.w/2,r.y+r.h/2+2);
-    ctx.fillStyle=trim;ctx.fillText(jerseyName,r.x+r.w/2,r.y+r.h/2+2);
-  }
-  if(jerseyNumber){
-    const r=NUMBER_RECT;
-    ctx.fillStyle=primary;ctx.fillRect(r.x,r.y,r.w,r.h);
-    ctx.textAlign='center';ctx.textBaseline='middle';
-    const maxSize=fixedNumberSize(ctx,r.w-30);
-    const size=fitText(ctx,jerseyNumber,r.w-30,maxSize,40);
-    ctx.font=`bold ${size}px ${jerseyFont}`;
-    ctx.lineJoin='round';ctx.lineWidth=Math.max(6,size*0.09);ctx.strokeStyle=secondary;
-    ctx.strokeText(jerseyNumber,r.x+r.w/2,r.y+r.h/2+4);
-    ctx.fillStyle=trim;ctx.fillText(jerseyNumber,r.x+r.w/2,r.y+r.h/2+4);
-  }
+  ihcDrawNameNumber(nameNumberCtx,{
+    name:jerseyName,number:jerseyNumber,font:jerseyFont,
+    primary:'#'+bodyZM.zones[0].color.getHexString(),
+    secondary:'#'+bodyZM.zones[1].color.getHexString(),
+    trim:'#'+bodyZM.zones[2].color.getHexString(),
+  });
   syncCanvasToDataTexture(nameNumberCtx,nameNumberCanvas,nameNumberTexture);
-  saveGameLoadout();
+  saveToStore();
 }
-/* ----- Game integration: push the live loadout to ice_hockey.html -----
-   The game (game.html / ~/Lataukset/ice_hockey.html) reads this key on boot
-   and applies it ONLY to the human player's own model — bots/goalie keep
-   their existing flat team-tint. redrawNameNumber() is the one function
-   every color-edit path (drag/hex/RGB/swatch/preset/randomize, all via
-   refreshSwatches) and both name/number inputs already funnel through, so
-   hooking the save in here covers every edit site with a single call —
-   no need to instrument each one separately. Logos/freehand paint are
-   still NOT included here: they now DO persist properly inside the editor
-   (paintStrokes/placedDecals round-trip through presets/undo as of the
-   layers system), but wiring them into actual gameplay is a separate,
-   bigger step — game.html would need its own logoMap/paintMap samplers
-   and redraw pipeline ported over, the same way nameNumberMap was, and
-   that hasn't happened yet. */
-const GAME_LOADOUT_KEY='ihGameLoadout_v1';
-function saveGameLoadout(){
-  if(!bodyZM||!stickZM||!neckZone)return;
-  try{
-    localStorage.setItem(GAME_LOADOUT_KEY,JSON.stringify({
-      v:1,
-      body:bodyZM.zones.map(z=>'#'+z.color.getHexString()),
-      neck:'#'+neckZone.color.getHexString(),
-      stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
-      name:jerseyName,
-      number:jerseyNumber,
-      font:jerseyFont,
-    }));
-  }catch(e){}
+
+/* ============================== TEAM CONTEXT ============================== */
+/* The editor always works on ONE context: (team, jersey set, acting role).
+   TEAM-owned state (jersey colors, lettering font, team paint/decal layers,
+   mirror convention) round-trips with the team store; PLAYER-owned state
+   (name, skin, stick, personal accent layers) round-trips with the player
+   kit. The game keeps reading the same flat ihGameLoadout_v1 snapshot it
+   always has — ihtWriteGameLoadout() (core) recomputes it from the FAVOURITE
+   context on every save, so editing a non-favourite team never changes what
+   you wear in-game until you star it. */
+let TSTORE=ihtLoad(),PKIT=ihtLoadKit();
+let ctxTeamId=TSTORE.favourite.teamId,ctxJerseyId=TSTORE.favourite.jerseyId;
+let actingRole='player';
+/* the OTHER party's layers for the current role: replayed underneath (team
+   design) or on top (player accents) but never selectable/editable */
+let basePaintStrokes=[],baseDecals=[];
+let suppressStore=false;
+function ctxTeam(){return ihtTeam(TSTORE,ctxTeamId);}
+function ctxJersey(){return ihtJersey(ctxTeam(),ctxJerseyId);}
+function ctxKit(){
+  const key=ihtContextKey(ctxTeamId,ctxJerseyId);
+  return PKIT.contexts[key]||(PKIT.contexts[key]={});
+}
+function catAllowed(catId){return ihtAllowed(TSTORE,ctxTeam(),catId);}
+function catLockLabel(catId){return ihtLockSource(TSTORE,ctxTeam(),catId);}
+/* Every edit path already funnels through redrawNameNumber (colors, name,
+   number, font via refreshSwatches) or pushHistory (paint, decals, mirror),
+   and both call this — one save covers every edit site. Written back by
+   ASSIGNMENT (not shared array references) because applyState/undo replaces
+   the live arrays wholesale. */
+function saveToStore(){
+  if(suppressStore||!bodyZM||!stickZM||!neckZone)return;
+  const j=ctxJersey(),kctx=ctxKit();
+  if(actingRole==='admin'){
+    j.design.body=bodyZM.zones.map(z=>'#'+z.color.getHexString());
+    j.design.font=jerseyFont;
+    j.design.paintStrokes=paintStrokes;
+    j.design.decals=placedDecals;
+    j.design.paintMirrorOn=paintMirrorOn;
+  }else{
+    PKIT.name=jerseyName;
+    PKIT.skin='#'+neckZone.color.getHexString();
+    kctx.stick=stickZM.zones.map(z=>'#'+z.color.getHexString());
+    kctx.accStrokes=paintStrokes;
+    kctx.accDecals=placedDecals;
+  }
+  ihtSaveStore(TSTORE);ihtSaveKit(PKIT);
+  ihtWriteGameLoadout(TSTORE,PKIT);
+}
+/* Pull one context's stored state into the live editor (zones, plate, layer
+   stacks), pointing the editable stacks at whichever party the role owns. */
+function loadContext(){
+  const t=ctxTeam(),j=ctxJersey(),kctx=ctxKit();
+  suppressStore=true;
+  j.design.body.forEach((h,i)=>bodyZM.setZoneColor(i,h));
+  const stick=kctx.stick||PKIT.defaultStick||IHT_DEFAULT_STICK;
+  stick.forEach((h,i)=>stickZM.setZoneColor(i,h));
+  neckZone.setColor(PKIT.skin||'#c68863');
+  jerseyName=PKIT.name||'';
+  jerseyFont=j.design.font||'Arial';
+  jerseyNumber=ihtEffectiveNumber(t);
+  paintMirrorOn=j.design.paintMirrorOn!==false;
+  applyPaintMirrorUniform();
+  if(actingRole==='admin'){
+    paintStrokes=j.design.paintStrokes||[];
+    placedDecals=j.design.decals||[];
+    basePaintStrokes=kctx.accStrokes||[];
+    baseDecals=kctx.accDecals||[];
+  }else{
+    paintStrokes=kctx.accStrokes||(kctx.accStrokes=[]);
+    placedDecals=kctx.accDecals||(kctx.accDecals=[]);
+    basePaintStrokes=j.design.paintStrokes||[];
+    baseDecals=j.design.decals||[];
+  }
+  selectedStrokeIdx=-1;selectedDecalIdx=-1;paintModeOn=false;decalMoveModeOn=false;
+  redrawPaintLayer();redrawLogoLayer();
+  suppressStore=false;
+  refreshSwatches(); // also redraws the plate + saves the store once
+  history.length=0;historyIdx=-1;pushHistory();
+  updateContextBar();
+  buildEditorModeTabs();buildSidebar();
+  selectCategory(categoriesForMode(currentEditorMode)[0].id);
+}
+function switchContext(teamId,jerseyId,role){
+  ctxTeamId=teamId;ctxJerseyId=jerseyId;
+  if(role)actingRole=role;
+  const modes=editorModesForRole();
+  if(!modes.some(m=>m.id===currentEditorMode))currentEditorMode=modes[0].id;
+  loadContext();
 }
 function sanitizeName(raw){
   let s=(raw||'').toUpperCase().replace(/[^A-Z -]/g,'');
@@ -653,6 +484,20 @@ const PAINT_TARGET_LIST=[
   {id:'skates',icon:'⛸️',label:'Skates',cam:'skates'},
 ];
 let paintTarget='jersey';
+/* Which pieces the CURRENT role may paint/decal. Admin designs the whole
+   uniform. A player only ever gets small personal-accent surfaces — never
+   the jersey body/logo/numbers — and each surface is policy-gated by its
+   own category so teams/leagues can carve freedom as finely as they like:
+   pants+gloves ride the 'accents' policy, helmet the 'helmetStyle' policy,
+   skates the 'skates' policy. */
+function availablePaintTargets(){
+  if(actingRole==='admin')return PAINT_TARGET_LIST;
+  const ids=[];
+  if(catAllowed('accents'))ids.push('pants','gloves');
+  if(catAllowed('helmetStyle'))ids.push('helmet');
+  if(catAllowed('skates'))ids.push('skates');
+  return PAINT_TARGET_LIST.filter(t=>ids.includes(t.id));
+}
 function getPaintTargetMeshes(){
   const names=PAINT_TARGET_MESHES[paintTarget]||[];
   return names.map(n=>player.visual.getObjectByName(n)).filter(Boolean);
@@ -674,49 +519,11 @@ function raycastUV(clientX,clientY){
   uv.side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
   return uv;
 }
-/* A straight line between two consecutive drag samples is only valid when
-   the UV mapping is CONTINUOUS between them. Crossing a UV seam — a normal
-   thing on any textured mesh (sleeve-to-torso, front-to-back, etc.) — means
-   two 3D-adjacent points can land far apart in texture space; connecting
-   them drew a long streak clear across the atlas, showing up as paint on
-   completely unrelated parts of the model ("bleeding"). Confirmed by dumping
-   the raw paint canvas after a single continuous chest-to-sleeve drag: a
-   long diagonal streak, not the traced path. Fix: treat any UV jump bigger
-   than a small fraction of the texture as a seam crossing and stamp the new
-   point in isolation instead of connecting it. */
-const SEAM_JUMP_UV=0.08;
-/* shared by live stamping AND layer replay so the two can never draw the
-   seam-jump logic differently — takes explicit style params rather than
-   reading the live brush globals, since replay draws OLD strokes with
-   THEIR OWN recorded color/size/opacity, not whatever the brush is set to
-   right now. */
-function stampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
-  ctx.globalAlpha=opacity;
-  ctx.fillStyle=color;ctx.strokeStyle=color;
-  ctx.lineWidth=size;ctx.lineCap='round';ctx.lineJoin='round';
-  if(px!=null&&!seamJump){
-    ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();
-  }else{
-    ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();
-  }
-}
-/* Where a UV point actually lands on the paint canvas. Mirror ON (default):
-   raw UV, unchanged — both sides share the same canvas region, which is
-   exactly what makes the mirroring happen "for free" via the mesh's own
-   mirrored UV layout. Mirror OFF: the canvas is split into left/right
-   HALVES by u — a point's real side (from raycastUV/stored on the stroke
-   point) decides which half it lands in, so painting one side can no
-   longer bleed onto the other. The shader's pUv remap (in
-   installRecolorShader) must stay in exact agreement with this or the
-   painted pixels and the sampled pixels would disagree about which half
-   means which side. */
-function paintCanvasXY(uv,side,mirrorOn){
-  if(mirrorOn)return{x:uv.x*DECAL_SIZE,y:uv.y*DECAL_SIZE};
-  return{x:(uv.x*0.5+(side>=0?0.5:0))*DECAL_SIZE,y:uv.y*DECAL_SIZE};
-}
+/* stampSegment/ihcPaintCanvasXY/SEAM_JUMP_UV + stroke/decal replay moved to
+   core (the menu preview replays the exact same stored layers). */
 function paintStamp(uv,prevUV){
-  const xy=paintCanvasXY(uv,uv.side,paintMirrorOn);
-  const prevXY=prevUV?paintCanvasXY(prevUV,prevUV.side,paintMirrorOn):null;
+  const xy=ihcPaintCanvasXY(uv,uv.side,paintMirrorOn);
+  const prevXY=prevUV?ihcPaintCanvasXY(prevUV,prevUV.side,paintMirrorOn):null;
   // a side change mid-drag (e.g. dragging across the crotch from one leg to
   // the other) is ALWAYS a seam crossing when unmirrored, even if the raw
   // UV looks continuous — the two sides land on opposite canvas halves.
@@ -726,25 +533,19 @@ function paintStamp(uv,prevUV){
     paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump);
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
 }
-/* Full reconstruction from the stored stroke list — needed any time the
-   STACK changes shape (delete/reorder/hide/undo), as opposed to live
-   dragging which just stamps incrementally onto the existing canvas. */
+/* Full reconstruction from the stored stroke lists — needed any time a STACK
+   changes shape (delete/reorder/hide/undo), as opposed to live dragging which
+   just stamps incrementally onto the existing canvas. Draw order is fixed by
+   OWNERSHIP, not by who's editing: team design strokes first, the player's
+   personal accents on top of them — so both roles see the same jersey. */
+function paintStackOrder(active,base){
+  return actingRole==='admin'?[active,base]:[base,active];
+}
 function redrawPaintLayer(){
   if(!paintCtx)return;
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  paintStrokes.forEach(s=>{
-    if(s.visible===false)return;
-    let prevXY=null,prev=null;
-    s.points.forEach(p=>{
-      const xy=paintCanvasXY(p,p.side,paintMirrorOn);
-      const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV)||
-        (!paintMirrorOn&&prev&&prev.side!==p.side);
-      stampSegment(paintCtx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-        s.size,s.color,s.opacity,seamJump);
-      prevXY=xy;prev=p;
-    });
-  });
-  paintCtx.globalAlpha=1;
+  paintStackOrder(paintStrokes,basePaintStrokes)
+    .forEach(list=>ihcReplayStrokes(paintCtx,list,paintMirrorOn));
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
 }
 
@@ -802,9 +603,18 @@ function buildMaterialManagers(){
    to one individual and stay with them regardless of which team/jersey
    they're wearing. */
 const EDITOR_MODES=[
-  {id:'team', label:'Team Uniform',icon:'🎽'},
-  {id:'player',label:'Player',     icon:'🧑'},
+  {id:'team',  label:'Team Uniform',icon:'🎽'},
+  {id:'player',label:'Player',      icon:'🧑'},
+  {id:'admin', label:'Team Admin',  icon:'🛡️'},
 ];
+/* Acting as PLAYER you see the uniform (mostly view-only, per policy) and
+   your personal tab; acting as TEAM ADMIN you edit the uniform and run the
+   team (numbers, policies) — but you never touch the player's personal gear. */
+function editorModesForRole(){
+  return actingRole==='admin'
+    ?EDITOR_MODES.filter(m=>m.id!=='player')
+    :EDITOR_MODES.filter(m=>m.id!=='admin');
+}
 let currentEditorMode='team';
 const CATEGORIES=[
   {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',mode:'team',
@@ -829,6 +639,9 @@ const CATEGORIES=[
      current-vs-intended state (no roster/conflict system exists yet, this
      is a single player being edited, not a squad). */
   {id:'nameplate',label:'Name & Number', icon:'🔢',cam:'upper',group:'nameplate',mode:'player'},
+  /* Team Admin tools — only reachable while acting as admin. */
+  {id:'roster',  label:'Numbers & Roster', icon:'🔢',cam:'upper',group:'roster',  mode:'admin'},
+  {id:'policies',label:'Player Freedom',   icon:'⚖️',cam:'full', group:'policies',mode:'admin'},
 ];
 const SKIN_TONES=['#3d2314','#5c3a21','#8d5a34','#c68863','#e0ac69','#f1c27d','#ffdbac','#f5dbc5'];
 const QUICK_PALETTES=[
@@ -845,7 +658,7 @@ function categoriesForMode(mode){return CATEGORIES.filter(c=>c.mode===mode);}
 function buildEditorModeTabs(){
   const wrap=document.getElementById('editorModeTabs');
   wrap.innerHTML='';
-  EDITOR_MODES.forEach(m=>{
+  editorModesForRole().forEach(m=>{
     const el=document.createElement('div');
     el.className='editor-mode-tab'+(m.id===currentEditorMode?' active':'');
     el.dataset.mode=m.id;
@@ -858,9 +671,20 @@ function selectEditorMode(mode){
   if(mode===currentEditorMode)return;
   currentEditorMode=mode;
   document.querySelectorAll('.editor-mode-tab').forEach(el=>el.classList.toggle('active',el.dataset.mode===mode));
-  document.getElementById('sbHeading').textContent=mode==='team'?'Team Uniform':'Player';
+  document.getElementById('sbHeading').textContent=
+    mode==='team'?'Team Uniform':mode==='admin'?'Team Admin':'Player';
   buildSidebar();
   selectCategory(categoriesForMode(mode)[0].id);
+}
+/* Is this category actually editable in the current role/policy context? */
+function categoryEditable(cat){
+  if(actingRole==='admin')return cat.mode==='team'||cat.mode==='admin';
+  if(cat.mode==='player'){
+    if(cat.id==='stick')return catAllowed('stick');
+    return true; // skin + nameplate are always the player's own
+  }
+  if(cat.id==='decals')return availablePaintTargets().length>0;
+  return false; // uniform design is team-controlled
 }
 function buildSidebar(){
   const list=document.getElementById('sbList');
@@ -869,7 +693,8 @@ function buildSidebar(){
     const el=document.createElement('div');
     el.className='sb-item'+(cat.id===currentCategory.id?' active':'');
     el.dataset.cat=cat.id;
-    el.innerHTML=`<div class="sb-icon">${cat.icon}</div><div class="sb-label">${cat.label}</div>`;
+    const chip=categoryEditable(cat)?'':'<div class="sb-chip">🔒</div>';
+    el.innerHTML=`<div class="sb-icon">${cat.icon}</div><div class="sb-label">${cat.label}</div>${chip}`;
     el.addEventListener('click',()=>selectCategory(cat.id));
     list.appendChild(el);
   });
@@ -892,11 +717,12 @@ function selectCategory(id){
   renderRightPanel();
 }
 
-function zoneRowHTML(zone,idx,mgr){
-  return `<div class="zone-row" data-idx="${idx}" data-mgr="${mgr}">
+function zoneRowHTML(zone,idx,mgr,locked){
+  return `<div class="zone-row${locked?' locked':''}" data-idx="${idx}" data-mgr="${mgr}"${locked?' data-locked="1"':''}>
     <div class="zone-swatch" id="swatch-${mgr}-${idx}" style="background:#${zone.color.getHexString()}"></div>
     <div class="zone-info"><div class="zone-name">${zone.label}</div>
       <div class="zone-hex" id="hex-${mgr}-${idx}">#${zone.color.getHexString().toUpperCase()}</div></div>
+    ${locked?'<div style="font-size:15px;opacity:.6;">🔒</div>':''}
   </div>`;
 }
 function paletteHTML(){
@@ -946,32 +772,53 @@ function renderRightPanel(){
     return;
   }
   if(cat.group==='nameplate'){
-    html+=`<p class="rp-sub">Belongs to you, not the jersey — carries over no matter which team uniform you're wearing.</p>`;
+    const t=ctxTeam(),nb=t.number||{};
+    html+=`<p class="rp-sub">Your name belongs to you and carries across every team. Your NUMBER is per-team — you request it, the team admin has the final say.</p>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Nameplate</div>
       <input id="nameInput" placeholder="LAST NAME" maxlength="20" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;letter-spacing:.03em;padding:10px 12px;">
       <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">A–Z, space, hyphen only · max 11 characters (NHL-style nameplate limit — tell me if your league's rule is different)</div>
     </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Preferred Number</div>
-      <input id="numberInput" type="number" min="1" max="99" placeholder="—" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;padding:10px 12px;">
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">1–99</div>
+    const statusChip=
+      nb.status==='approved'?`<span class="num-chip ok">✓ #${nb.assigned} approved</span>`:
+      nb.status==='pending' ?`<span class="num-chip pend">⏳ #${nb.preferred} pending approval</span>`:
+      nb.status==='rejected'?`<span class="num-chip rej">✗ #${nb.preferred} rejected${nb.assigned?` — wearing #${nb.assigned}`:''}</span>`:
+      `<span class="num-chip">no number requested yet</span>`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Number — ${t.name}</div>
+      <div style="margin-bottom:10px;">${statusChip}</div>
+      <div style="display:flex;gap:8px;">
+        <input id="numberInput" type="number" min="1" max="99" placeholder="—" value="${nb.preferred||''}" style="flex:1;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;padding:10px 12px;">
+        <div class="btn primary" id="requestNumberBtn" style="flex:none;">Request</div>
+      </div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;" id="numberTakenHint">1–99 · taken on this roster: ${(t.numbersTaken||[]).join(', ')||'—'}</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Lettering Font</div>
-      <select id="fontSelect" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:600;padding:10px 12px;">
-        ${JERSEY_FONTS.map(f=>`<option value='${f.id}'>${f.label}</option>`).join('')}
-      </select>
+      <div class="rp-note">${(JERSEY_FONTS.find(f=>f.id===jerseyFont)||JERSEY_FONTS[0]).label} — part of the team's uniform design, set by the team admin (Jersey category).</div>
     </div>`;
-    html+=`<div class="rp-note">This is your PREFERRED number, not a guaranteed one — a real roster can only field one of each number, so a team admin gets final say and can reassign you if it's already taken. There's no actual multi-player roster/conflict-checking here yet (this editor customizes one player at a time), so nothing enforces uniqueness today; treat this field as "what I'd pick," not "what I'm locked into."</div>`;
+    html+=`<div class="rp-note">Only an admin-ASSIGNED number appears on the jersey and in-game — a pending or rejected request never renders. Switch to Team Admin (top bar) to approve it yourself.</div>`;
     rp.innerHTML=html;
     wireNameplatePanel();
     return;
   }
   if(cat.group==='decals'){
-    html+=`<p class="rp-sub">Freehand paint, quick shapes, and logos — right on the jersey, no Apply button. Name &amp; number moved to the Player tab.</p>`;
+    const targets=availablePaintTargets();
+    if(!targets.length){
+      // player role, everything locked out by league/team policy
+      const src=catLockLabel('accents')||catLockLabel('helmetStyle')||catLockLabel('skates')||ctxTeam().name;
+      html+=`<p class="rp-sub">Personal accents</p>
+        <div class="rp-note">🔒 ${src} does not allow personal paint or decals on this uniform. The team's own design layers still show on the model — they're just not yours to edit. Switch to Team Admin (top bar) to change the policy.</div>`;
+      rp.innerHTML=html;return;
+    }
+    if(!targets.some(t=>t.id===paintTarget))paintTarget=targets[0].id;
+    if(actingRole==='admin'){
+      html+=`<p class="rp-sub">TEAM design layers — every player on the roster wears these. The player's own accents (if policy allows any) draw on top and aren't editable from here.</p>`;
+    }else{
+      html+=`<p class="rp-sub">YOUR personal accent layers — they draw on top of the team's design, which stays locked underneath. Allowed surfaces are set by team/league policy.</p>`;
+    }
     html+=`<div class="rp-section"><div class="rp-section-title">Paint Target</div>
-      <div class="preset-strip" id="paintTargetStrip" style="flex-wrap:wrap;">${PAINT_TARGET_LIST.map(t=>
+      <div class="preset-strip" id="paintTargetStrip" style="flex-wrap:wrap;">${targets.map(t=>
         `<div class="cam-btn paint-target-btn" data-ptarget="${t.id}" style="flex:none;">${t.icon} ${t.label}</div>`).join('')}
       </div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Paint only affects the selected piece — pick one before you drag.</div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Paint only affects the selected piece — pick one before you drag.${actingRole!=='admin'?' The jersey itself is team-controlled and never paintable by players.':''}</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Freehand Paint</div>
       <div class="zone-row" id="paintColorRow"><div class="zone-swatch" id="paintColorSwatch" style="background:${paintBrushColor}"></div>
@@ -980,7 +827,7 @@ function renderRightPanel(){
         <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
       <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
         <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
+      ${actingRole==='admin'?`<div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>`:''}
       <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
       <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
       <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint & Decals mirrors both freehand strokes AND placed logos across symmetric parts (pants, gloves) — turn it off to decorate each side independently; flipping it re-splits every existing stroke/decal, so it's simplest to decide before you start a side. With Mirror off, a logo placed right at dead-center (near a belt/waistband seam) can land in an odd spot — drag it onto the leg/arm proper with "Move on Model" and it'll behave.</div>
@@ -1013,50 +860,127 @@ function renderRightPanel(){
     wireDecalsPanel();
     return;
   }
+  if(cat.group==='roster'){
+    const t=ctxTeam(),nb=t.number||{};
+    html+=`<p class="rp-sub">${t.name} — the admin assigns numbers; a player request is just a request until it's approved here.</p>`;
+    const reqLine=
+      nb.status==='pending' ?`<b>${PKIT.name||'Your player'}</b> requests <b>#${nb.preferred}</b>${(t.numbersTaken||[]).includes(+nb.preferred)?' <span class="num-chip rej">already taken!</span>':''}`:
+      nb.status==='approved'?`<b>${PKIT.name||'Your player'}</b> wears <b>#${nb.assigned}</b> (approved)`:
+      nb.status==='rejected'?`<b>${PKIT.name||'Your player'}</b>'s request for #${nb.preferred} was rejected${nb.assigned?` — currently wears #${nb.assigned}`:''}`:
+      `No number request from ${PKIT.name||'your player'} yet.`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Number Request</div>
+      <div style="font-size:14px;margin-bottom:10px;">${reqLine}</div>
+      <div class="btn-row">
+        <div class="btn primary" id="approveNumBtn"${nb.status==='pending'?'':' style="opacity:.4;pointer-events:none;"'}>✓ Approve</div>
+        <div class="btn" id="rejectNumBtn"${nb.status==='pending'?'':' style="opacity:.4;pointer-events:none;"'}>✗ Reject</div>
+        <div class="btn" id="assignNumBtn">✎ Assign…</div>
+      </div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:8px;">Assign… overrides with any number of your choosing — admin has final say.</div>
+    </div>`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Taken Numbers</div>
+      <input id="takenNumsInput" value="${(t.numbersTaken||[]).join(', ')}" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:600;padding:10px 12px;">
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Comma-separated 1–99 — the rest of the roster's numbers. Purely informational until a real multi-player roster exists; the Approve button warns against it but doesn't hard-block.</div>
+    </div>`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Team Identity</div>
+      <input id="teamNameInput" value="${t.name}" maxlength="24" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:700;padding:10px 12px;margin-bottom:8px;">
+      <input id="teamAbbrevInput" value="${t.abbrev||''}" maxlength="3" placeholder="ABC" style="width:100px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:700;padding:10px 12px;text-transform:uppercase;">
+    </div>`;
+    rp.innerHTML=html;
+    wireRosterPanel();
+    return;
+  }
+  if(cat.group==='policies'){
+    const t=ctxTeam(),lg=ihtLeague(TSTORE,t);
+    html+=`<p class="rp-sub">How much personal freedom players on ${t.name} get. A lock at EITHER level wins — the league can forbid what a team would allow.</p>`;
+    IHT_POLICY_CATEGORIES.forEach(pc=>{
+      const lgLock=lg.policy&&lg.policy[pc.id]===false;
+      const tmLock=t.policy&&t.policy[pc.id]===false;
+      const eff=!lgLock&&!tmLock;
+      html+=`<div class="rp-section"><div class="rp-section-title">${pc.icon} ${pc.label}
+          <span class="num-chip ${eff?'ok':'rej'}" style="margin-left:auto;">${eff?'players may customize':'locked for players'}</span></div>
+        <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;">${pc.note}</div>
+        <div class="btn-row">
+          <div class="btn pol-btn${tmLock?' primary':''}" data-pol-team="${pc.id}">${tmLock?'🔒 Team: locked':'🔓 Team: allowed'}</div>
+          <div class="btn pol-btn${lgLock?' primary':''}" data-pol-league="${pc.id}">${lgLock?'🔒 League: locked':'🔓 League: allowed'}</div>
+        </div>
+      </div>`;
+    });
+    html+=`<div class="rp-note">League toggles change <b>${lg.name}</b> for EVERY team in it (${TSTORE.teams.filter(x=>x.leagueId===lg.id).map(x=>x.name).join(', ')}) — that's the point of a league rule.</div>`;
+    rp.innerHTML=html;
+    wirePoliciesPanel();
+    return;
+  }
   const mgrKey=cat.group==='stick'?'stick':'body';
   const mgr=cat.group==='stick'?stickZM:bodyZM;
+  const editable=categoryEditable(cat);
+  const lockSrc=cat.id==='stick'?catLockLabel('stick'):null;
   html+=`<p class="rp-sub">${cat.group==='stick'?'Independent material — shaft &amp; blade tape.':'Realtime color &amp; material — changes apply instantly, no Apply button.'}</p>`;
+  if(!editable){
+    html+=`<div class="rp-note">${cat.group==='stick'
+      ?`🔒 ${lockSrc||ctxTeam().name} does not allow personal stick customization — these are the colors you'll play with. Switch to Team Admin to change the policy.`
+      :`🔒 Uniform design is decided by the ${ctxTeam().name} admin — you're viewing it, not editing it. Switch to Team Admin (top bar) to redesign it, or pick another jersey set / team above.`}</div>`;
+  }
   if(cat.note)html+=`<div class="rp-note">${cat.note}</div>`;
 
   html+=`<div class="rp-section"><div class="rp-section-title">Color Zones</div>`;
-  mgr.zones.forEach((z,i)=>html+=zoneRowHTML(z,i,mgrKey));
+  mgr.zones.forEach((z,i)=>html+=zoneRowHTML(z,i,mgrKey,!editable));
   html+=`</div>`;
 
-  if(mgrKey==='body'){
+  if(editable&&cat.id==='jersey'){
+    html+=`<div class="rp-section"><div class="rp-section-title">Lettering Font</div>
+      <select id="fontSelect" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:600;padding:10px 12px;">
+        ${JERSEY_FONTS.map(f=>`<option value='${f.id}'>${f.label}</option>`).join('')}
+      </select>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Name &amp; number lettering for this jersey set — part of the team design.</div>
+    </div>`;
+  }
+
+  if(editable&&mgrKey==='body'){
     html+=`<div class="rp-section"><div class="rp-section-title">Team Colors</div>${paletteHTML()}</div>`;
   }
 
-  html+=`<div class="rp-section"><div class="rp-section-title">Material</div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Roughness</span><b id="roughVal"></b></div>
-      <input type="range" id="roughSlider" min="0" max="1" step="0.01"></div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Metallic</span><b id="metalVal"></b></div>
-      <input type="range" id="metalSlider" min="0" max="1" step="0.01"></div>
-  </div>`;
+  if(editable){
+    html+=`<div class="rp-section"><div class="rp-section-title">Material</div>
+      <div class="mat-slider-row"><div class="mat-slider-label"><span>Roughness</span><b id="roughVal"></b></div>
+        <input type="range" id="roughSlider" min="0" max="1" step="0.01"></div>
+      <div class="mat-slider-row"><div class="mat-slider-label"><span>Metallic</span><b id="metalVal"></b></div>
+        <input type="range" id="metalSlider" min="0" max="1" step="0.01"></div>
+    </div>`;
 
-  html+=`<div class="rp-section"><div class="btn-row">
-    <div class="btn" id="btnUndo">↶ Undo</div><div class="btn" id="btnRedo">↷ Redo</div>
-  </div></div>`;
-  html+=`<div class="rp-section"><div class="btn-row">
-    <div class="btn" id="btnRandom">🎲 Randomize</div><div class="btn primary" id="btnSavePreset">💾 Save Preset</div>
-  </div></div>`;
-  html+=`<div class="rp-section"><div class="btn-row">
-    <div class="btn" id="btnExportCode">📤 Export Code</div><div class="btn" id="btnImportCode">📥 Import Code</div>
-  </div>
-  <div class="rp-note" style="margin-top:10px;">Exports/imports the WHOLE loadout (colors, name/number/font, paint, decals) as a text code — for sharing or backing up outside this browser, separate from the presets below which only live here.</div></div>`;
+    html+=`<div class="rp-section"><div class="btn-row">
+      <div class="btn" id="btnUndo">↶ Undo</div><div class="btn" id="btnRedo">↷ Redo</div>
+    </div></div>`;
+    html+=`<div class="rp-section"><div class="btn-row">
+      <div class="btn" id="btnRandom">🎲 Randomize</div>${actingRole==='admin'?'<div class="btn primary" id="btnSavePreset">💾 Save Preset</div>':''}
+    </div></div>`;
+  }
 
-  html+=`<div class="rp-section"><div class="rp-section-title">Loadout Presets</div>${presetStripHTML()}</div>`;
+  if(actingRole==='admin'){
+    html+=`<div class="rp-section"><div class="btn-row">
+      <div class="btn" id="btnExportCode">📤 Export Code</div><div class="btn" id="btnImportCode">📥 Import Code</div>
+    </div>
+    <div class="rp-note" style="margin-top:10px;">Exports/imports the WHOLE loadout (colors, name/number/font, paint, decals) as a text code — for sharing or backing up outside this browser, separate from the presets below which only live here.</div></div>`;
+
+    html+=`<div class="rp-section"><div class="rp-section-title">Loadout Presets</div>${presetStripHTML()}</div>`;
+  }
 
   rp.innerHTML=html;
-  wireRightPanel(mgrKey,mgr);
+  wireRightPanel(mgrKey,mgr,editable);
 }
 
-function wireRightPanel(mgrKey,mgr){
+function wireRightPanel(mgrKey,mgr,editable){
   document.querySelectorAll('.zone-row').forEach(el=>{
     el.addEventListener('click',e=>{
+      if(el.dataset.locked){showToast('🔒 Locked — team admin controls this');return;}
       const idx=+el.dataset.idx,m=el.dataset.mgr;
       openColorPicker(el.querySelector('.zone-swatch'),m,idx);
     });
   });
+  const fontSel=document.getElementById('fontSelect');
+  if(fontSel){
+    fontSel.value=jerseyFont;
+    fontSel.addEventListener('change',()=>{setJerseyFont(fontSel.value);showToast('Lettering font applied');});
+  }
   const roughSlider=document.getElementById('roughSlider'),metalSlider=document.getElementById('metalSlider');
   if(roughSlider){
     roughSlider.value=mgr.material.roughness;
@@ -1116,18 +1040,99 @@ function wireNameplatePanel(){
   });
   nameInput.addEventListener('change',pushHistory);
 
+  /* Number is a REQUEST, not a direct edit — nothing changes on the jersey
+     until the team admin (Numbers & Roster panel) assigns it. */
   const numberInput=document.getElementById('numberInput');
-  numberInput.value=jerseyNumber;
-  numberInput.addEventListener('input',()=>{
-    jerseyNumber=sanitizeNumber(numberInput.value);
-    if(numberInput.value!==jerseyNumber)numberInput.value=jerseyNumber;
-    redrawNameNumber();
+  document.getElementById('requestNumberBtn').addEventListener('click',()=>{
+    const v=sanitizeNumber(numberInput.value);
+    if(!v){showToast('Enter a number 1–99 first');return;}
+    numberInput.value=v;
+    const t=ctxTeam();
+    t.number=t.number||{};
+    t.number.preferred=v;t.number.status='pending';
+    ihtSaveStore(TSTORE);
+    renderRightPanel();
+    showToast((t.numbersTaken||[]).includes(+v)
+      ?`#${v} requested — heads up, it's already taken on this roster`
+      :`#${v} requested — waiting for the ${t.name} admin`);
   });
-  numberInput.addEventListener('change',pushHistory);
-
-  const fontSelect=document.getElementById('fontSelect');
-  fontSelect.value=jerseyFont;
-  fontSelect.addEventListener('change',()=>setJerseyFont(fontSelect.value));
+}
+/* ----- Team Admin: number approvals + team identity ----- */
+function afterNumberChange(msg){
+  ihtSaveStore(TSTORE);
+  jerseyNumber=ihtEffectiveNumber(ctxTeam());
+  redrawNameNumber(); // re-renders the plate + refreshes the game loadout
+  renderRightPanel();
+  updateContextBar();
+  if(msg)showToast(msg);
+}
+function wireRosterPanel(){
+  const t=ctxTeam();
+  document.getElementById('approveNumBtn').addEventListener('click',()=>{
+    const nb=t.number;if(!nb||nb.status!=='pending')return;
+    if((t.numbersTaken||[]).includes(+nb.preferred)&&!confirm('#'+nb.preferred+' is on the taken list — approve anyway?'))return;
+    nb.assigned=nb.preferred;nb.status='approved';
+    afterNumberChange('#'+nb.assigned+' approved — it now renders on the jersey');
+  });
+  document.getElementById('rejectNumBtn').addEventListener('click',()=>{
+    const nb=t.number;if(!nb||nb.status!=='pending')return;
+    nb.status='rejected';
+    afterNumberChange('Request rejected'+(nb.assigned?' — player keeps #'+nb.assigned:''));
+  });
+  document.getElementById('assignNumBtn').addEventListener('click',()=>{
+    const v=sanitizeNumber(prompt('Assign number (1–99):','')||'');
+    if(!v)return;
+    t.number=t.number||{};
+    t.number.assigned=v;t.number.status='approved';
+    if(!t.number.preferred)t.number.preferred=v;
+    afterNumberChange('#'+v+' assigned by admin');
+  });
+  const taken=document.getElementById('takenNumsInput');
+  taken.addEventListener('change',()=>{
+    t.numbersTaken=taken.value.split(',').map(s=>parseInt(s.trim(),10))
+      .filter(n=>!isNaN(n)&&n>=1&&n<=99);
+    taken.value=t.numbersTaken.join(', ');
+    ihtSaveStore(TSTORE);
+    showToast('Roster numbers updated');
+  });
+  const nameIn=document.getElementById('teamNameInput');
+  nameIn.addEventListener('change',()=>{
+    const v=nameIn.value.trim().slice(0,24);
+    if(!v){nameIn.value=t.name;return;}
+    t.name=v;ihtSaveStore(TSTORE);ihtWriteGameLoadout(TSTORE,PKIT);
+    updateContextBar();showToast('Team renamed');
+  });
+  const abbrIn=document.getElementById('teamAbbrevInput');
+  abbrIn.addEventListener('change',()=>{
+    t.abbrev=abbrIn.value.trim().toUpperCase().slice(0,3);
+    abbrIn.value=t.abbrev;
+    ihtSaveStore(TSTORE);ihtWriteGameLoadout(TSTORE,PKIT);
+    updateContextBar();
+  });
+}
+/* ----- Team Admin: the league/team policy matrix ----- */
+function wirePoliciesPanel(){
+  const t=ctxTeam(),lg=ihtLeague(TSTORE,t);
+  document.querySelectorAll('[data-pol-team]').forEach(el=>{
+    el.addEventListener('click',()=>{
+      const cat=el.dataset.polTeam;
+      t.policy=t.policy||{};
+      t.policy[cat]=t.policy[cat]===false; // flip lock
+      ihtSaveStore(TSTORE);
+      renderRightPanel();
+      showToast(t.policy[cat]===false?'Locked for players on '+t.name:'Allowed for players on '+t.name);
+    });
+  });
+  document.querySelectorAll('[data-pol-league]').forEach(el=>{
+    el.addEventListener('click',()=>{
+      const cat=el.dataset.polLeague;
+      lg.policy=lg.policy||{};
+      lg.policy[cat]=lg.policy[cat]===false;
+      ihtSaveStore(TSTORE);
+      renderRightPanel();
+      showToast(lg.policy[cat]===false?'Locked league-wide by '+lg.name:'Allowed league-wide by '+lg.name);
+    });
+  });
 }
 function wireDecalsPanel(){
   document.querySelectorAll('.paint-target-btn').forEach(el=>{
@@ -1153,20 +1158,26 @@ function wireDecalsPanel(){
   document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';
   opSlider.addEventListener('input',()=>{paintBrushOpacity=+opSlider.value;document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';});
 
+  /* admin-only control (absent from the player-role panel): the mirror
+     convention is part of the TEAM design — one shader uniform governs both
+     the team layers and any player accents, so the admin decides it. */
   const mirrorBtn=document.getElementById('mirrorPaintBtn');
-  const syncMirrorBtn=()=>{
-    mirrorBtn.classList.toggle('primary',paintMirrorOn);
-    mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';
-  };
-  syncMirrorBtn();
-  mirrorBtn.addEventListener('click',()=>{
-    paintMirrorOn=!paintMirrorOn;
+  if(mirrorBtn){
+    const syncMirrorBtn=()=>{
+      mirrorBtn.classList.toggle('primary',paintMirrorOn);
+      mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';
+    };
     syncMirrorBtn();
-    applyPaintMirrorUniform();
-    redrawPaintLayer(); // re-pack every existing stroke under the new convention
-    pushHistory();
-    showToast(paintMirrorOn?'Mirror ON — both sides match':'Mirror OFF — sides decorated independently');
-  });
+    mirrorBtn.addEventListener('click',()=>{
+      paintMirrorOn=!paintMirrorOn;
+      syncMirrorBtn();
+      applyPaintMirrorUniform();
+      // re-pack every existing stroke AND decal under the new convention
+      redrawPaintLayer();redrawLogoLayer();
+      pushHistory();
+      showToast(paintMirrorOn?'Mirror ON — both sides match':'Mirror OFF — sides decorated independently');
+    });
+  }
 
   const modeBtn=document.getElementById('paintModeBtn');
   const syncModeBtn=()=>{
@@ -1624,20 +1635,9 @@ function saveLogoLibrary(){
 function redrawLogoLayer(){
   if(!logoCtx)return;
   logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  placedDecals.forEach(d=>{
-    if(d.visible===false)return;
-    const lib=logoLibrary.find(l=>l.id===d.logoId);
-    if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    // same packing helper paint uses — logos share the exact same
-    // mirrored-UV problem (confirmed: a decal placed once showed up on
-    // both legs), so they use the exact same Mirror toggle/side data.
-    const xy=paintCanvasXY({x:d.u,y:d.v},d.side,paintMirrorOn);
-    const size=DECAL_SIZE*d.scale;
-    logoCtx.save();
-    logoCtx.translate(xy.x,xy.y);logoCtx.rotate(d.rotation||0);
-    logoCtx.drawImage(lib.img,-size/2,-size/2,size,size);
-    logoCtx.restore();
-  });
+  // same ownership order as paint: team design decals under player accents
+  paintStackOrder(placedDecals,baseDecals)
+    .forEach(list=>ihcReplayDecals(logoCtx,list,logoLibrary,paintMirrorOn));
   syncCanvasToDataTexture(logoCtx,logoCanvas,logoTexture);
 }
 function renderLogoLibraryGrid(){
@@ -1929,11 +1929,12 @@ function applyState(s){
   s.body.forEach((hex,i)=>bodyZM.setZoneColor(i,hex));
   s.stick.forEach((hex,i)=>stickZM.setZoneColor(i,hex));
   if(s.neck)neckZone.setColor(s.neck);
-  jerseyName=s.name||'';jerseyNumber=s.number||'';
+  jerseyName=s.name||'';
+  // number is never undoable editor state anymore — it's whatever the team
+  // admin has assigned for the current team (request/approve flow)
+  jerseyNumber=ihtEffectiveNumber(ctxTeam());
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
-  const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
   jerseyFont=s.jerseyFont||'Arial';
-  nameFontSizeCache=null;numberFontSizeCache=null;
   const fs=document.getElementById('fontSelect');if(fs)fs.value=jerseyFont;
   // ||[] guards presets/history saved before paint/decal layers existed;
   // ??true guards history/presets saved before the mirror toggle existed
@@ -2038,27 +2039,81 @@ document.getElementById('toggleReflection').addEventListener('click',e=>{
   reflectionOn=!reflectionOn;e.currentTarget.classList.toggle('active',reflectionOn);
   if(reflectionClone)reflectionClone.visible=reflectionOn;
 });
-/* every edit already autosaves (saveGameLoadout runs off redrawNameNumber,
-   the one function every color/name/number change funnels through) — this
-   button exists for the explicit "I'm done" moment: force one last save,
-   confirm it, then hand off back to the site menu. */
+/* every edit already autosaves (saveToStore runs off redrawNameNumber and
+   pushHistory, which every edit path funnels through) — this button exists
+   for the explicit "I'm done" moment: force one last save, confirm it, then
+   hand off back to the site menu. */
 document.getElementById('saveExitBtn').addEventListener('click',()=>{
-  saveGameLoadout();
+  saveToStore();
   showToast('Saved — returning to menu…');
   setTimeout(()=>{ location.href='index.html'; },550);
 });
+
+/* ============================== CONTEXT BAR ============================== */
+/* Top-bar controls: which of MY teams' uniform am I in, which jersey set,
+   acting as player or team admin, and the ★ favourite look (= the default
+   character on the main menu and in-game). */
+function updateContextBar(){
+  const t=ctxTeam(),j=ctxJersey();
+  const teamSel=document.getElementById('ctxTeamSel');
+  teamSel.innerHTML=ihtMemberTeams(TSTORE).map(x=>
+    `<option value="${x.id}"${x.id===ctxTeamId?' selected':''}>${x.id===TSTORE.favourite.teamId?'★ ':''}${x.name}</option>`).join('');
+  const jerseySel=document.getElementById('ctxJerseySel');
+  jerseySel.innerHTML=t.jerseys.map(x=>
+    `<option value="${x.id}"${x.id===ctxJerseyId?' selected':''}>${(t.id===TSTORE.favourite.teamId&&x.id===TSTORE.favourite.jerseyId)?'★ ':''}${x.label}</option>`).join('');
+  const isFav=TSTORE.favourite.teamId===ctxTeamId&&TSTORE.favourite.jerseyId===ctxJerseyId;
+  const favBtn=document.getElementById('favBtn');
+  favBtn.textContent=isFav?'★ Favourite look':'☆ Make favourite';
+  favBtn.classList.toggle('action',isFav);
+  document.querySelectorAll('.tb-role').forEach(el=>
+    el.classList.toggle('active',el.dataset.role===actingRole));
+  const nb=t.number||{};
+  document.getElementById('tbName').textContent=(PKIT.name||'—')+(nb.assigned?' #'+nb.assigned:'');
+  document.getElementById('tbTeam').textContent=t.name;
+}
+function wireContextBar(){
+  document.getElementById('ctxTeamSel').addEventListener('change',e=>{
+    const t=ihtTeam(TSTORE,e.target.value);
+    // keep the same jersey slot (home/away/third) across teams when it exists
+    switchContext(t.id,ihtJersey(t,ctxJerseyId).id);
+    showToast('Now in the '+t.name+' locker room');
+  });
+  document.getElementById('ctxJerseySel').addEventListener('change',e=>{
+    switchContext(ctxTeamId,e.target.value);
+  });
+  document.getElementById('favBtn').addEventListener('click',()=>{
+    TSTORE.favourite={teamId:ctxTeamId,jerseyId:ctxJerseyId};
+    ihtSaveStore(TSTORE);
+    ihtWriteGameLoadout(TSTORE,PKIT);
+    updateContextBar();
+    showToast('★ Favourite look set — this is now your default character');
+  });
+  document.querySelectorAll('.tb-role').forEach(el=>{
+    el.addEventListener('click',()=>{
+      if(el.dataset.role===actingRole)return;
+      switchContext(ctxTeamId,ctxJerseyId,el.dataset.role);
+      showToast(actingRole==='admin'
+        ?'🛡️ Acting as TEAM ADMIN — uniform design, numbers and policies'
+        :'🧑 Acting as PLAYER — your gear, within team rules');
+    });
+  });
+}
 
 /* ============================== BOOT ============================== */
 handleResize();
 buildEditorModeTabs();buildSidebar();buildCamPresetButtons();
 loadCharacter(()=>{
   buildMaterialManagers();
-  redrawNameNumber();
+  // first-run: remember the asset's true stick colors so contexts the player
+  // never customized fall back to the real default look, not a guess
+  if(!PKIT.defaultStick){
+    PKIT.defaultStick=stickZM.zones.map(z=>'#'+z.color.getHexString());
+    ihtSaveKit(PKIT);
+  }
   loadLogoLibrary();
-  redrawLogoLayer();
+  wireContextBar();
+  loadContext(); // pulls favourite context into the editor + first history entry
   goToPreset('full');
-  renderRightPanel();
-  pushHistory();
   document.getElementById('loadingOverlay').style.opacity='0';
   setTimeout(()=>document.getElementById('loadingOverlay').style.display='none',520);
   const clock=new THREE.Clock();

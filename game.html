@@ -9880,7 +9880,11 @@ function ihFitText(ctx,text,maxWidth,startSize,minSize){
 }
 let ihNameFontSizeCache=null,ihNumberFontSizeCache=null;
 function ihFixedNameSize(ctx,maxWidth){
-  if(ihNameFontSizeCache==null)ihNameFontSizeCache=ihFitText(ctx,'W'.repeat(11),maxWidth,96,22);
+  // 2x the 11-W worst-case fit + horizontal condense for long names — must
+  // stay in lockstep with fixedNameSize/redrawNameNumber in the Locker Room
+  // editor (ice-hockey-customize-app.js) or editor preview and in-game jersey
+  // render different letter heights.
+  if(ihNameFontSizeCache==null)ihNameFontSizeCache=Math.min(ihFitText(ctx,'W'.repeat(11),maxWidth,96,22)*2,110);
   return ihNameFontSizeCache;
 }
 function ihFixedNumberSize(ctx,maxWidth){
@@ -9898,12 +9902,16 @@ function ihRedrawNameNumber(name,number){
     const r=IH_NAME_RECT;
     ihFillRoundedRect(ctx,r.x,r.y,r.w,r.h,18,secondary);
     ctx.textAlign='center';ctx.textBaseline='middle';
-    const maxSize=ihFixedNameSize(ctx,r.w-40);
-    const size=ihFitText(ctx,name,r.w-40,maxSize,22);
+    const size=ihFixedNameSize(ctx,r.w-40);
     ctx.font=`bold ${size}px ${ihJerseyFont}`;
+    const squeeze=Math.min(1,(r.w-40)/Math.max(1,ctx.measureText(name).width));
+    ctx.save();
+    ctx.translate(r.x+r.w/2,r.y+r.h/2+2);
+    ctx.scale(squeeze,1);
     ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
-    ctx.strokeText(name,r.x+r.w/2,r.y+r.h/2+2);
-    ctx.fillStyle=trim;ctx.fillText(name,r.x+r.w/2,r.y+r.h/2+2);
+    ctx.strokeText(name,0,0);
+    ctx.fillStyle=trim;ctx.fillText(name,0,0);
+    ctx.restore();
   }
   if(number){
     const r=IH_NUMBER_RECT;

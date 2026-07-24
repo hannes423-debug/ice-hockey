@@ -90,5 +90,13 @@
 <div class="confirm-overlay" id="confirmOverlay" aria-hidden="true"></div>
 
 <script src="script.js"></script>
+<!-- 3D player preview: your ★ favourite team+jersey look from the Locker
+     Room, rendered into #player-placeholder. Deferred so the menu itself
+     paints first; if WebGL/assets fail the stage just stays empty. -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script defer src="ice-hockey-customize-data.js"></script>
+<script defer src="ice-hockey-customize-core.js"></script>
+<script defer src="menu-player.js"></script>
 </body>
 </html>
