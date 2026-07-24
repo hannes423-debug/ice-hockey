@@ -170,7 +170,7 @@ renderer.domElement.addEventListener('pointerdown',e=>{
     // reorderable/hideable and finally savable into presets+undo.
     currentStroke={id:'PS'+Date.now(),target:paintTarget,color:paintBrushColor,size:paintBrushSize,opacity:paintBrushOpacity,visible:true,points:[]};
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){currentStroke.points.push({x:uv.x,y:uv.y});paintStamp(uv,null);lastPaintUV=uv;}
+    if(uv){currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,null);lastPaintUV=uv;}
     return;
   }
   if(decalMoveModeOn&&selectedDecalIdx>=0){
@@ -184,7 +184,7 @@ renderer.domElement.addEventListener('pointerdown',e=>{
 renderer.domElement.addEventListener('pointermove',e=>{
   if(dragMode==='paint'){
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){if(currentStroke)currentStroke.points.push({x:uv.x,y:uv.y});paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
+    if(uv){if(currentStroke)currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
   }else if(dragMode==='decal'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -346,14 +346,33 @@ function installRecolorShader(material,maskTexture,zoneColors,decals){
       shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
       shader.uniforms.logoMap={value:decals.logoMap};
       shader.uniforms.paintMap={value:decals.paintMap};
-      extraUniforms='\nuniform sampler2D nameNumberMap;\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;';
+      shader.uniforms.uMirrorPaint={value:1.0};
+      extraUniforms='\nuniform sampler2D nameNumberMap;\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
+      /* Mirror ON (default, unchanged behavior): sample paintMap at the raw
+         (shared/mirrored) UV — whatever's painted on one leg shows on both,
+         same as it always has. Mirror OFF: the canvas is packed into left/
+         right HALVES by paintCanvasXY() (see its own comment) — sample
+         whichever half matches this fragment's real side (vIhSide, the
+         per-fragment counterpart to the JS-side raycast hit test used
+         while painting) instead of the raw shared UV. */
       extraCode=`
           vec4 nn = texture2D( nameNumberMap, vUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );
           vec4 lg = texture2D( logoMap, vUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
-          vec4 pt = texture2D( paintMap, vUv );
+          vec2 pUv = vUv;
+          if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
+          vec4 pt = texture2D( paintMap, pUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
+      /* vIhSide: which real-world side of the (bind-pose-symmetric) body a
+         fragment belongs to, from the raw pre-skin `position` attribute —
+         verified with a forced hard-override render (solid red/blue split
+         cleanly down the anatomical midline) before trusting it for the
+         real feature. Requires patching the VERTEX shader too, which
+         nothing else in this file has needed before. */
+      shader.vertexShader=shader.vertexShader
+        .replace('#include <common>','#include <common>\nvarying float vIhSide;')
+        .replace('#include <begin_vertex>','#include <begin_vertex>\nvIhSide = position.x;');
     }
     shader.fragmentShader=shader.fragmentShader
       .replace('#include <common>','#include <common>\nuniform sampler2D maskMap;\nuniform vec3 zoneColor0;\nuniform vec3 zoneColor1;\nuniform vec3 zoneColor2;'+extraUniforms)
@@ -572,6 +591,19 @@ let paintModeOn=false,lastPaintUV=null;
    into presets and undo/redo instead of living only in the live canvas. */
 let paintStrokes=[],currentStroke=null,selectedStrokeIdx=-1;
 let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1;
+/* Global, not per-stroke: the shader's uMirrorPaint uniform is a single
+   value, so ALL strokes on the canvas have to agree on the same packing
+   convention (see paintCanvasXY) at any given moment — a per-stroke flag
+   would mean two strokes disagreeing about what a given canvas half means,
+   which the shader has no way to resolve per-pixel. Flipping this toggle
+   re-packs every existing stroke under the new convention (see its wiring
+   in wireDecalsPanel), which is the one honest trade-off of keeping this
+   simple: old strokes don't remember their own original mirror setting. */
+let paintMirrorOn=true;
+function applyPaintMirrorUniform(){
+  const ref=bodyZM&&bodyZM.material&&bodyZM.material.userData.shaderRef;
+  if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=paintMirrorOn?1:0;
+}
 const raycaster=new THREE.Raycaster();
 const pointerNDC=new THREE.Vector2();
 /* Paint is restricted to whichever single equipment piece is picked as the
@@ -610,7 +642,14 @@ function raycastUV(clientX,clientY){
   pointerNDC.y=-((clientY-r.top)/r.height)*2+1;
   raycaster.setFromCamera(pointerNDC,camera);
   const hits=raycaster.intersectObjects(meshes,false);
-  return(hits.length&&hits[0].uv)?hits[0].uv:null;
+  if(!hits.length||!hits[0].uv)return null;
+  const uv=hits[0].uv;
+  // JS-side counterpart to the shader's vIhSide: which real-world side of
+  // the body this hit landed on, used by the independent-sides paint
+  // feature below. Local space (not world) so it agrees with the shader's
+  // own local-space `position.x` regardless of camera orbit.
+  uv.side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
+  return uv;
 }
 /* A straight line between two consecutive drag samples is only valid when
    the UV mapping is CONTINUOUS between them. Crossing a UV seam — a normal
@@ -638,10 +677,29 @@ function stampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
     ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();
   }
 }
+/* Where a UV point actually lands on the paint canvas. Mirror ON (default):
+   raw UV, unchanged — both sides share the same canvas region, which is
+   exactly what makes the mirroring happen "for free" via the mesh's own
+   mirrored UV layout. Mirror OFF: the canvas is split into left/right
+   HALVES by u — a point's real side (from raycastUV/stored on the stroke
+   point) decides which half it lands in, so painting one side can no
+   longer bleed onto the other. The shader's pUv remap (in
+   installRecolorShader) must stay in exact agreement with this or the
+   painted pixels and the sampled pixels would disagree about which half
+   means which side. */
+function paintCanvasXY(uv,side,mirrorOn){
+  if(mirrorOn)return{x:uv.x*DECAL_SIZE,y:uv.y*DECAL_SIZE};
+  return{x:(uv.x*0.5+(side>=0?0.5:0))*DECAL_SIZE,y:uv.y*DECAL_SIZE};
+}
 function paintStamp(uv,prevUV){
-  const x=uv.x*DECAL_SIZE,y=uv.y*DECAL_SIZE;
-  const seamJump=prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV;
-  stampSegment(paintCtx,x,y,prevUV?prevUV.x*DECAL_SIZE:null,prevUV?prevUV.y*DECAL_SIZE:null,
+  const xy=paintCanvasXY(uv,uv.side,paintMirrorOn);
+  const prevXY=prevUV?paintCanvasXY(prevUV,prevUV.side,paintMirrorOn):null;
+  // a side change mid-drag (e.g. dragging across the crotch from one leg to
+  // the other) is ALWAYS a seam crossing when unmirrored, even if the raw
+  // UV looks continuous — the two sides land on opposite canvas halves.
+  const seamJump=(prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV)||
+    (!paintMirrorOn&&prevUV&&prevUV.side!==uv.side);
+  stampSegment(paintCtx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
     paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump);
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
 }
@@ -653,13 +711,14 @@ function redrawPaintLayer(){
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
   paintStrokes.forEach(s=>{
     if(s.visible===false)return;
-    let prev=null;
+    let prevXY=null,prev=null;
     s.points.forEach(p=>{
-      const x=p.x*DECAL_SIZE,y=p.y*DECAL_SIZE;
-      const seamJump=prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV;
-      stampSegment(paintCtx,x,y,prev?prev.x*DECAL_SIZE:null,prev?prev.y*DECAL_SIZE:null,
+      const xy=paintCanvasXY(p,p.side,paintMirrorOn);
+      const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV)||
+        (!paintMirrorOn&&prev&&prev.side!==p.side);
+      stampSegment(paintCtx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
         s.size,s.color,s.opacity,seamJump);
-      prev=p;
+      prevXY=xy;prev=p;
     });
   });
   paintCtx.globalAlpha=1;
@@ -893,9 +952,10 @@ function renderRightPanel(){
         <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
       <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
         <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
+      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint: ON</div></div>
       <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
       <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
-      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo.</div>
+      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint mirrors strokes across symmetric parts (pants, gloves) — turn it off to paint each side independently; flipping it re-splits every existing stroke, so it's simplest to decide before you start a side.</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
       <div class="lc-shape-grid" id="quickShapeGrid">
@@ -1054,6 +1114,21 @@ function wireDecalsPanel(){
   opSlider.value=paintBrushOpacity;
   document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';
   opSlider.addEventListener('input',()=>{paintBrushOpacity=+opSlider.value;document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';});
+
+  const mirrorBtn=document.getElementById('mirrorPaintBtn');
+  const syncMirrorBtn=()=>{
+    mirrorBtn.classList.toggle('primary',paintMirrorOn);
+    mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';
+  };
+  syncMirrorBtn();
+  mirrorBtn.addEventListener('click',()=>{
+    paintMirrorOn=!paintMirrorOn;
+    syncMirrorBtn();
+    applyPaintMirrorUniform();
+    redrawPaintLayer(); // re-pack every existing stroke under the new convention
+    pushHistory();
+    showToast(paintMirrorOn?'Mirror Paint ON — both sides match':'Mirror Paint OFF — sides painted independently');
+  });
 
   const modeBtn=document.getElementById('paintModeBtn');
   const syncModeBtn=()=>{
@@ -1767,6 +1842,10 @@ function captureState(){
     // snapshot on every history push, see redrawPaintLayer's own note.
     paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
     placedDecals:JSON.parse(JSON.stringify(placedDecals)),
+    // captured alongside the strokes so undo/redo can't land the mirror
+    // toggle and the stroke data out of sync with each other — see
+    // paintCanvasXY's note on why they have to agree.
+    paintMirrorOn,
   };
 }
 function pushHistory(){
@@ -1782,9 +1861,14 @@ function applyState(s){
   jerseyName=s.name||'';jerseyNumber=s.number||'';
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
-  // ||[] guards presets/history saved before paint/decal layers existed
+  // ||[] guards presets/history saved before paint/decal layers existed;
+  // ??true guards history/presets saved before the mirror toggle existed
   paintStrokes=JSON.parse(JSON.stringify(s.paintStrokes||[]));
   placedDecals=JSON.parse(JSON.stringify(s.placedDecals||[]));
+  paintMirrorOn=s.paintMirrorOn??true;
+  applyPaintMirrorUniform();
+  const mb=document.getElementById('mirrorPaintBtn');
+  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';}
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();
@@ -1813,6 +1897,7 @@ function promptSavePreset(){
     jname:jerseyName,jnumber:jerseyNumber,
     paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
     placedDecals:JSON.parse(JSON.stringify(placedDecals)),
+    paintMirrorOn,
   });
   savePresets(presets);renderRightPanel();showToast('Preset saved');
 }
@@ -1826,6 +1911,10 @@ function applyPreset(id){
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
   paintStrokes=JSON.parse(JSON.stringify(p.paintStrokes||[]));
   placedDecals=JSON.parse(JSON.stringify(p.placedDecals||[]));
+  paintMirrorOn=p.paintMirrorOn??true;
+  applyPaintMirrorUniform();
+  const mb=document.getElementById('mirrorPaintBtn');
+  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';}
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();
