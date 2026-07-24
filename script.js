@@ -356,8 +356,9 @@
     for (var k in d) out[k] = d[k];
     return out;
   }
+  var SCHEMES = ['hybrid', 'classic', 'prostick', 'allstar']; // must match game.html's PAD_SCHEMES
   function readScheme(){
-    try { return localStorage.getItem(SCHEME_KEY) === 'classic' ? 'classic' : 'hybrid'; }
+    try { var v = localStorage.getItem(SCHEME_KEY); return SCHEMES.indexOf(v) >= 0 ? v : 'hybrid'; }
     catch (e) { return 'hybrid'; }
   }
 
@@ -422,6 +423,8 @@
         '<div class="confirm-row"><span>CONTROL SCHEME</span><div class="scheme-toggle">' +
           '<button data-scheme="hybrid" class="' + (pendingScheme === 'hybrid' ? 'sel' : '') + '">HYBRID</button>' +
           '<button data-scheme="classic" class="' + (pendingScheme === 'classic' ? 'sel' : '') + '">CLASSIC</button>' +
+          '<button data-scheme="prostick" class="' + (pendingScheme === 'prostick' ? 'sel' : '') + '">PRO STICK</button>' +
+          '<button data-scheme="allstar" class="' + (pendingScheme === 'allstar' ? 'sel' : '') + '">ALL-STAR</button>' +
         '</div></div>' +
         renderConfirmPartyRows(isMatch) +
         '<div class="confirm-actions">' +

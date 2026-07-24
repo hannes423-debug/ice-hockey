@@ -4350,9 +4350,16 @@ const scoreEl=document.createElement('div');
 let GAME={mode:'practice',botSkill:1,whistleT:0,whistleFn:null,attacker:null,
   needClear:{p:false,b:false},scoreP:0,scoreB:0,lastOwner:null,bannerEl:null,menuEl:null};
 function whistle(t,fn){GAME.whistleT=t;GAME.whistleFn=fn;}
-/* gamepad control scheme: 'hybrid' (skill stick + trigger aim) or
-   'classic' (EA-Hybrid face buttons, auto-aim) — picked in the start menu */
-let padScheme=(function(){try{return localStorage.getItem('padScheme')==='classic'?'classic':'hybrid';}catch(e){return 'hybrid';}})();
+/* gamepad control scheme, picked in the start menu:
+   'hybrid'   — this game's original (RS skill stick, R2 windup + RS aim)
+   'classic'  — EA-Hybrid face buttons with auto-aim
+   'prostick' — faithful EA Skill Stick: RS shoots (up = wrist, down→up =
+                slap windup), LS aims, RT pass / RB saucer, LB deke mod,
+                LT vision control; defense RS = push/shoulder checks
+   'allstar'  — PRO STICK core + the EA-Hybrid face buttons on top
+                (X wrist, B slap, A pass) */
+const PAD_SCHEMES={hybrid:'HYBRID',classic:'CLASSIC',prostick:'PRO STICK',allstar:'ALL-STAR'};
+let padScheme=(function(){try{const v=localStorage.getItem('padScheme');return PAD_SCHEMES[v]?v:'hybrid';}catch(e){return 'hybrid';}})();
 /* P1's input device, picked in the start menu:
    'auto' = last-input-wins between pad and mouse/kb (original behavior),
    'kbm'  = P1 is keyboard/mouse ONLY — every pad is free to join as P2+,
@@ -5650,7 +5657,9 @@ function buildStartMenu(){
     '</div>'+
     '<div id="smCtrlRow" style="margin-bottom:16px;font-size:11px;opacity:.95;">GAMEPAD CONTROLS<br>'+
       '<button id="smHyb" class="smOpt" style="padding:6px 14px;font-size:11px;margin-top:6px;">HYBRID<br><span style="font-size:9px;opacity:.7">SKILL STICK + AIM</span></button> '+
-      '<button id="smCla" class="smOpt" style="padding:6px 14px;font-size:11px;margin-top:6px;">CLASSIC<br><span style="font-size:9px;opacity:.7">FACE BUTTONS, AUTO-AIM</span></button>'+
+      '<button id="smCla" class="smOpt" style="padding:6px 14px;font-size:11px;margin-top:6px;">CLASSIC<br><span style="font-size:9px;opacity:.7">FACE BUTTONS, AUTO-AIM</span></button> '+
+      '<button id="smPro" class="smOpt" style="padding:6px 14px;font-size:11px;margin-top:6px;">PRO STICK<br><span style="font-size:9px;opacity:.7">RS SHOOTS · LS AIMS</span></button> '+
+      '<button id="smAll" class="smOpt" style="padding:6px 14px;font-size:11px;margin-top:6px;">ALL-STAR<br><span style="font-size:9px;opacity:.7">PRO STICK + BUTTONS</span></button>'+
     '</div>'+
     '<div id="smP1Row" style="margin-bottom:16px;font-size:11px;opacity:.95;">P1 INPUT<br>'+
       '<span id="smP1Pick"></span>'+
@@ -5687,7 +5696,7 @@ function buildStartMenu(){
     anEl.textContent=prac?MATCH.botsP:MATCH.botsA;bnEl.textContent=prac?MATCH.botsO:MATCH.botsB;
     const dev=p1Input==='kbm'?'KB/M':p1Input==='pad'?('PAD '+(p1PadIdx+1)):
       ((PAD.claimed&&PAD.idx>=0?('PAD '+(PAD.idx+1)):'KB/M')+' · AUTO');
-    let h='<div><b style="color:'+pcHex(0)+';">P1</b> · '+dev+' · TEAM A · '+padScheme.toUpperCase()+'</div>';
+    let h='<div><b style="color:'+pcHex(0)+';">P1</b> · '+dev+' · TEAM A · '+(PAD_SCHEMES[padScheme]||padScheme.toUpperCase())+'</div>';
     MATCH.joined.forEach((j,i)=>{
       h+='<div><b style="color:'+pcHex(i+1)+';">P'+(i+2)+'</b> · PAD '+(j.pad+1)+' · '+
         '<button class="smOpt smTeamBtn" data-i="'+i+'" style="padding:1px 9px;font-size:10px;">'+
@@ -5756,10 +5765,12 @@ function buildStartMenu(){
     skillRow.style.display='block';renderRoster();};
   sel('practice');
   skill.oninput=()=>{skillVal.textContent=skill.value;};
-  const hB=card.querySelector('#smHyb'),cB=card.querySelector('#smCla');
+  const schemeBtns={hybrid:card.querySelector('#smHyb'),classic:card.querySelector('#smCla'),
+    prostick:card.querySelector('#smPro'),allstar:card.querySelector('#smAll')};
   const selScheme=s=>{padScheme=s;try{localStorage.setItem('padScheme',s);}catch(e){}
-    hB.classList.toggle('sel',s==='hybrid');cB.classList.toggle('sel',s==='classic');};
-  hB.onclick=()=>selScheme('hybrid');cB.onclick=()=>selScheme('classic');
+    for(const k in schemeBtns)schemeBtns[k].classList.toggle('sel',s===k);
+    renderRoster();};
+  for(const k in schemeBtns)schemeBtns[k].onclick=()=>selScheme(k);
   selScheme(padScheme);
   card.querySelector('#smStart').onclick=()=>{
     GAME.botSkill=parseInt(skill.value,10)/99;
@@ -8228,7 +8239,12 @@ function updateGesture(dt){
 }
 let pivotToggled=false;
 /* ---- GAMEPAD (DualShock 4 / any standard-mapping pad) ----
-   TWO SCHEMES, picked in the start menu (persisted in localStorage):
+   FOUR SCHEMES, picked in the start menu (persisted in localStorage).
+   PRO STICK / ALL-STAR are faithful EA NHL ports (Skill Stick / Hybrid,
+   renamed): RS shoots (up = wrist, down→up = slap windup), LS aims,
+   RT pass + slap pass, RB saucer, LB deke mod, LT vision control, defense
+   RS checks — see the EA CORE branch inside pollPad for the full sheet.
+   The two originals:
    CLASSIC = EA-Hybrid face buttons with auto-aim: Square wrist/backhand,
    Circle slap, Cross pass, R1 saucer (hold = power, release fires, RS only
    biases the corner), Triangle hold protect / tap reverse, Square tap in
@@ -8263,7 +8279,14 @@ let pivotToggled=false;
 const PAD={claimed:false,on:false,idx:-1,pb:[],lsX:0,lsY:0,rsX:0,rsY:0,rsMag:0,
   prevOn:false,ownSpace:false,ownCtrl:false,ownC:false,triT:-1,cHold:0,
   prevCarrying:false,forceOffense:false,tieTarget:null,
-  gSweep:0,gPrevAng:null,gPeak:0,gPrevType:'none',gPrevX:0,gPrevY:0};
+  gSweep:0,gPrevAng:null,gPeak:0,gPrevType:'none',gPrevX:0,gPrevY:0,
+  /* EA-core (PRO STICK / ALL-STAR) state: the RS shot machine
+     ('none'|'slap'|'wrist' + one-frame 'slapfire'/'wristfire'), center-drift
+     fake timer, defense RS check edge/pulse, LT pivot-hold bookkeeping, and
+     the per-frame flags that gate stickhandling/toe-drag off the RS while
+     it's busy being the shooting stick. */
+  eaShot:'none',eaCenterT:0,eaPrevUp:false,eaPushT:0,eaSauce:false,
+  eaPivotHeld:false,eaPivotRestore:false,rsHandle:true,dekeMod:false};
 const _pcAim=new THREE.Vector3(); // classic one-timer aim scratch
 addEventListener('gamepadconnected',e=>{
   if(p1Input!=='pad'&&PAD.idx<0)PAD.idx=e.gamepad.index;
@@ -8413,6 +8436,30 @@ function padShotAimPoint(out){
     else{const F=fwd(player.heading);out.set(player.pos.x+F.x*14,CONFIG.iceHeight,player.pos.z+F.z*14);}
     return;
   }
+  if(padScheme==='prostick'||padScheme==='allstar'){
+    /* EA aiming: the LEFT stick aims — it's also the skating stick, and
+       aiming while striding is exactly the EA skill. O-zone: auto-net with
+       LS picking the corner (LS X is flipped here for the same reason RS X
+       is flipped at the source: screen-right = world -x) and LS-up lifting
+       the shot. Elsewhere: shots dump along the skater's facing. Passes go
+       along the facing too (skate where you pass); the slap pass overrides
+       its own aim at the moment of release (see eaSlapPass). */
+    if(player.shotType==='pass'){
+      const F=fwd(player.heading);
+      out.set(player.pos.x+F.x*12,CONFIG.iceHeight,player.pos.z+F.z*12);
+      return;
+    }
+    if(g&&player.pos.z>CONFIG.blueLineZ-0.5){
+      const m=Math.hypot(PAD.lsX,PAD.lsY),dead=m<0.25;
+      const nx=dead?0:clamp(-PAD.lsX,-1,1)*0.8;
+      const ny=dead?0:clamp(-PAD.lsY,0,1)*0.9; // stick up = top shelf, neutral/down = along the ice
+      out.set(nx*g.halfW,CONFIG.iceHeight+ny*g.height,g.z);
+    }else{
+      const F=fwd(player.heading);
+      out.set(player.pos.x+F.x*16,CONFIG.iceHeight,player.pos.z+F.z*16);
+    }
+    return;
+  }
   if(g&&player.pos.z>CONFIG.blueLineZ-0.5){
     // offensive zone: RS is a picker over the goal mouth
     const dead=PAD.rsMag<0.16;
@@ -8427,6 +8474,41 @@ function padShotAimPoint(out){
             CONFIG.iceHeight,
             player.pos.z+(F.z*Math.cos(a)+Rp.z*Math.sin(a))*dist);
   }
+}
+/* SLAP PASS (EA, PRO STICK/ALL-STAR): a slap windup released with RT still
+   held becomes a hard flat feed to the best teammate instead of a shot —
+   the receiver (bot or human) gets it in the wheelhouse for a tip or
+   one-timer. Target = nearest teammate roughly ahead of the play, led by a
+   beat of their speed. Returns false (→ the slap just fires normally) when
+   there's nobody to feed — solo practice, 1v1, or everyone behind you. */
+function eaSlapPass(){
+  if(!(puck&&puck.possessed))return false;
+  let best=null,bs=1e9;
+  const F=fwd(player.heading);
+  for(const s of MATCH.skaters){
+    if(!s||s.ent===player||s.team!=='A'||!s.ent.root||!s.ent.root.visible)continue;
+    const dx=s.ent.pos.x-player.pos.x,dz=s.ent.pos.z-player.pos.z;
+    const d=Math.hypot(dx,dz);
+    if(d<2||d>42)continue;
+    const dot=(dx*F.x+dz*F.z)/(d||1);
+    if(dot<-0.25)continue;            // never rocket it straight backwards
+    const score=d*(1.7-dot);          // near + in front wins
+    if(score<bs){bs=score;best=s.ent;}
+  }
+  if(!best)return false;
+  const cf=clamp((player.slapChargeT||0)/CONFIG.slapWindupTime,0,1);
+  currentAim.set(best.pos.x+(best.vel?best.vel.x*0.25:0),CONFIG.iceHeight,
+                 best.pos.z+(best.vel?best.vel.z*0.25:0));
+  /* kill the live windup BEFORE firing so fireShot reads currentAim (the
+     teammate) instead of re-deriving the net aim from padShotAimPoint —
+     and mark the still-held RT as a spent trigger, not a fresh windup */
+  player.shotType='none';shootHeld=false;player.shotSuppressed=true;resetGesture();
+  fireShot('pass',undefined,{curved:false,curve:0,pow:0.75+0.25*cf});
+  player.slapChargeT=0;
+  if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
+  flashMsg('SLAP PASS!');
+  padRumble(0.5,0.35,150);
+  return true;
 }
 /* stickhandle target while no windup is held: RS deflection inside the
    same reach envelope the mouse ice-reticle is clamped to */
@@ -8536,6 +8618,8 @@ function pollPad(dt){
   const carrying=!!(puck&&puck.possessed);
   if(carrying&&!PAD.prevCarrying)PAD.forceOffense=false; // got the puck: back to automatic layering
   PAD.prevCarrying=carrying;
+  const eaCore=padScheme==='prostick'||padScheme==='allstar';
+  PAD.rsHandle=true;PAD.dekeMod=false; // per-frame defaults; the EA core overrides below
   let offense;
   if(padScheme==='classic'){
     /* ---- CLASSIC (EA-Hybrid face buttons, auto-aim) ----
@@ -8551,10 +8635,14 @@ function pollPad(dt){
       mmbHeld=false;
       const cst=player.shotType||'none';
       if(cst!=='none'){
-        if(PAD.gPrevType==='none')PAD.cHold=0;
+        if(PAD.gPrevType==='none'){PAD.cHold=0;PAD.eaSauce=false;}
+        if(b(5))PAD.eaSauce=true;
         PAD.cHold=(PAD.cHold||0)+(dt||0);
-        /* hold time = power; R1 marks the pass as a saucer */
-        gest.fire={curved:b(5)&&cst==='pass',curve:0.45,
+        /* hold time = power; R1 marks the pass as a saucer — LATCHED for
+           the whole windup, because on the very release frame R1 is
+           already up and a live re-read demoted every saucer to a flat
+           pass (found by the EA-core headless suite, same bug there) */
+        gest.fire={curved:PAD.eaSauce&&cst==='pass',curve:0.45,
           pow:0.5+0.5*clamp(PAD.cHold/1.0,0,1)};
       }
       PAD.gPrevType=cst;
@@ -8579,6 +8667,127 @@ function pollPad(dt){
       }
       if(PAD.ownC){keys['c']=false;PAD.ownC=false;}
     }
+  }else if(eaCore){
+    /* ---- EA CORE (PRO STICK / ALL-STAR) ----
+       Faithful EA NHL Skill Stick: the RIGHT STICK is the stick.
+       Offense — RS lateral = stickhandle; RS up = wrist windup (fires when
+       the stick snaps back toward center); RS down = slap WINDUP
+       (slapChargeT builds while held; swinging up through center fires);
+       letting a slap windup drift to dead center ~0.4s = fake. AIM comes
+       from the LEFT STICK (padShotAimPoint's EA branch: auto-net in the
+       O-zone, LS biases corner/height; heading-dump elsewhere).
+       RT = pass (hold = power) · RB = saucer · SLAP PASS: RT held at the
+       instant a slap windup fires = hard feed to the best teammate for a
+       tip/one-timer (eaSlapPass) instead of the shot.
+       LB = deke modifier (hold: RS is pure stickhandle + toe-drag gesture,
+       shooting disarmed) · LT = vision control (carrying: protect puck;
+       otherwise: pivot facing-lock while held) · L3 = hustle (shared).
+       Defense — RS down = shoulder-check windup (hit charge builds), RS
+       up-flick = release / a quick push check from neutral / a one-timer
+       swat when a loose puck is in reach. LB = shot block (double-knee,
+       held). ALL-STAR face buttons: X wrist, B slap, A pass (offense) /
+       X poke sweep, Y+A stick lift, B board pin, RB charge hit (defense).
+       PRO STICK: A reverse hit, X toe drag (offense) / RB poke sweep,
+       A stick lift, Y board pin, B charge hit (defense) — EA's line
+       changes / icon passing / switch player don't exist in this game, so
+       those buttons are repurposed. X while puckless (PRO STICK) = the
+       one-timer layer override, same as HYBRID's. */
+    const allstar=padScheme==='allstar';
+    offense=carrying||PAD.forceOffense||!!(player.shotType&&player.shotType!=='none');
+    if(defenseMode!==!offense)toggleDefenseMode();
+    PAD.dekeMod=offense&&b(4);
+    /* RS shooting machine (offense only, parked while the deke mod is held) */
+    const rsUp=-PAD.rsY,vertDom=Math.abs(PAD.rsY)>=Math.abs(PAD.rsX)*0.8;
+    if(!offense||PAD.dekeMod){
+      if(PAD.eaShot==='slap'||PAD.eaShot==='wrist'){ // layer/mod flip mid-windup = clean cancel
+        player.shotType='none';shootHeld=false;player.slapChargeT=0;resetGesture();
+        if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
+      }
+      PAD.eaShot='none';PAD.eaCenterT=0;
+    }else if(PAD.eaShot==='none'){
+      if(rsUp<-0.55&&vertDom)PAD.eaShot='slap';      // pulled DOWN: wind up
+      else if(rsUp>0.5&&vertDom)PAD.eaShot='wrist';  // pushed UP: wrist windup
+    }else if(PAD.eaShot==='slap'){
+      if(rsUp>0.05)PAD.eaShot='slapfire';            // swung up through center → release
+      else if(PAD.rsMag<0.3){                        // drifted to dead center: the fake
+        PAD.eaCenterT+=(dt||0);
+        if(PAD.eaCenterT>0.4){
+          PAD.eaShot='none';PAD.eaCenterT=0;
+          player.shotType='none';shootHeld=false;player.shotSuppressed=true;
+          player.slapChargeT=0;resetGesture();
+          if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
+          flashMsg('FAKE!');
+        }
+      }else PAD.eaCenterT=0;
+    }else if(PAD.eaShot==='wrist'){
+      if(rsUp<0.3)PAD.eaShot='wristfire';            // snapped back: release
+    }
+    /* button synthesis into the shared shot state machine: lmb = shot
+       windup, rmb = pass windup, both = slap (release fires) */
+    let lmb=false,rmb=false;
+    if(offense){
+      if(PAD.ownCtrl){keys['control']=false;PAD.ownCtrl=false;} // won the puck mid-shot-block
+      rmb=b(7)||b(5);                                  // RT pass (hold = power), RB saucer
+      if(allstar){lmb=b(2)||b(1);rmb=rmb||b(1)||b(0);} // X wrist; B joins both = slap; A pass
+      if(PAD.eaShot==='slap'){lmb=true;rmb=true;}
+      else if(PAD.eaShot==='wrist')lmb=true;
+      else if(PAD.eaShot==='slapfire'){
+        /* RT held through the release = the feed. The machine state (not
+           the locked shotType) is the authority: RT held BEFORE the RS
+           pull-down type-locks the windup as 'pass', but it's still a slap
+           windup being released — EA slap-passes both orders. */
+        if(b(7))eaSlapPass();
+        lmb=false;rmb=false;                            // machine sees the release → slap fires
+        PAD.eaShot='none';
+      }else if(PAD.eaShot==='wristfire'){lmb=false;PAD.eaShot='none';}
+      if(allstar){if(carrying&&eDown(3))triggerReverseHit();}  // Y
+      else{
+        if(carrying&&eDown(0))triggerReverseHit();             // A
+        if(carrying&&eDown(2))triggerToeDrag();                // X (repurposed line change)
+      }
+    }else{
+      /* defense RS checks: down = charge (fed into the machine's rmb hit
+         path), up-flick = push check / one-timer swat; returning to center
+         releases whatever charge was wound (machine fires releaseHit) */
+      const upNow=rsUp>0.6&&vertDom,downNow=rsUp<-0.55&&vertDom;
+      /* the follow-through guard matters: a released shot drops the layer
+         to defense with the RS still up — without it, that same up-flick
+         edge would instantly swat at the player's own just-released puck */
+      if(upNow&&!PAD.eaPrevUp&&(player.shotReleaseT||0)<=0){
+        if(puck&&!puck.possessed&&Math.hypot(puck.pos.x-player.pos.x,puck.pos.z-player.pos.z)<3.5){
+          padShotAimPoint(_pcAim);currentAim.copy(_pcAim);
+          fireShot(undefined,undefined,{curved:false,curve:0,pow:0.8}); // one-timer swat
+        }else if((player.hitChargeT||0)<=0.02)PAD.eaPushT=0.12;         // quick push check
+      }
+      PAD.eaPrevUp=upNow;
+      if(PAD.eaPushT>0)PAD.eaPushT=Math.max(0,PAD.eaPushT-(dt||0));
+      lmb=allstar?b(2):b(5);                            // poke sweep: X / RB
+      rmb=downNow||PAD.eaPushT>0||(allstar?b(5):b(1));  // checks + repurposed hit button
+      if(eDown(0))triggerPoke();                        // A stick lift (both)
+      if(allstar&&eDown(3))triggerPoke();               // ALL-STAR Y stick lift per the EA sheet
+      /* LB = shot block: drop into the double-knee block while held
+         (kneelActive persists only while rmb+Ctrl stay true — own both) */
+      if(b(4)){
+        if(eDown(4))startKneel();
+        keys['control']=true;PAD.ownCtrl=true;rmb=true;
+      }else if(PAD.ownCtrl){keys['control']=false;PAD.ownCtrl=false;}
+    }
+    if(!allstar&&!carrying&&eDown(2)){
+      PAD.forceOffense=!PAD.forceOffense;
+      flashMsg(PAD.forceOffense?'ATTACK MODE — ONE-TIMER READY':'AUTO MODE');
+    }
+    /* LT = vision control: protect while carrying, pivot-hold while not */
+    const wantProt=b(6)&&carrying,wantPiv=b(6)&&!carrying;
+    if(wantProt&&!PAD.ownC){keys['c']=true;PAD.ownC=true;}
+    if(!wantProt&&PAD.ownC){keys['c']=false;PAD.ownC=false;}
+    if(wantPiv&&!PAD.eaPivotHeld){PAD.eaPivotHeld=true;PAD.eaPivotRestore=pivotToggled;if(!pivotToggled)togglePivot();}
+    if(!wantPiv&&PAD.eaPivotHeld){PAD.eaPivotHeld=false;if(pivotToggled&&!PAD.eaPivotRestore)togglePivot();}
+    /* offense keeps the defense edge tracker seeded with the live stick
+       state, so the frame the layer flips there's no stale-false edge */
+    if(offense)PAD.eaPrevUp=rsUp>0.6&&vertDom;
+    /* RS feeds stickhandling only when it isn't busy being the shot stick */
+    PAD.rsHandle=offense&&(PAD.dekeMod||(PAD.eaShot==='none'&&Math.abs(PAD.rsX)>Math.abs(PAD.rsY)));
+    lmbHeld=lmb;rmbHeld=rmb;mmbHeld=false;
   }else{
     /* ---- HYBRID ----
        offense layer = carrying, the Square override (X on Xbox), an R2
@@ -8595,12 +8804,14 @@ function pollPad(dt){
     mmbHeld=false;
   }
   if(eDown(10))toggleSprint();
-  if(eDown(4)){
-    if(!offense&&(player.hitChargeT||0)>0){startKneel();keys['control']=true;PAD.ownCtrl=true;}
-    else togglePivot();
+  if(!eaCore){ // EA core owns LB (deke mod / shot block) and LT (vision control) itself
+    if(eDown(4)){
+      if(!offense&&(player.hitChargeT||0)>0){startKneel();keys['control']=true;PAD.ownCtrl=true;}
+      else togglePivot();
+    }
+    if(eUp(4)&&PAD.ownCtrl){keys['control']=false;PAD.ownCtrl=false;}
+    if(eDown(6)){keys[' ']=true;PAD.ownSpace=true;}
   }
-  if(eUp(4)&&PAD.ownCtrl){keys['control']=false;PAD.ownCtrl=false;}
-  if(eDown(6)){keys[' ']=true;PAD.ownSpace=true;}
   if(eUp(6)&&PAD.ownSpace){keys[' ']=false;PAD.ownSpace=false;}
   if(padScheme==='hybrid'){
   /* Cross/A: offense = protect puck (pure hold); defense = stick-lift jab */
@@ -8618,8 +8829,11 @@ function pollPad(dt){
   }
   /* Triangle/Y: offense = special ability (reserved, unused for now);
      defense = TIE-UP grab-pin: hold near an opponent to lock both of you
-     up — boards pins and net-front box-outs emerge from where you do it */
-  if(!offense&&b(3)&&(player.tieCd||0)<=0){
+     up — boards pins and net-front box-outs emerge from where you do it.
+     ALL-STAR moves the pin to Circle/B (its Y is the stick lift, matching
+     the EA Hybrid sheet); every other scheme keeps it on Y. */
+  const tieBtn=padScheme==='allstar'?1:3;
+  if(!offense&&b(tieBtn)&&(player.tieCd||0)<=0){
     if(!PAD.tieTarget){
       let best=null,bd=1.6;
       const cands=[(typeof bot!=='undefined'&&bot&&bot.root&&bot.root.visible)?bot:null,
@@ -8682,6 +8896,25 @@ function pollPad(dt){
     const sw=Math.abs(PAD.gSweep);
     gest.fire={curved:sw>4.0,curve:clamp((sw-4.0)/5.0,0,1),
       pow:Math.max(0.55,clamp((PAD.gPeak-3)/9,0,1))};
+  }else if(st!=='none'&&offense&&eaCore){
+    /* EA-core windup shaping: passes take their power from the RT hold
+       (EA: longer hold = harder pass) with RB marking the saucer; shots
+       take theirs from RS flick speed (the snap of the wrist/slap release)
+       and fall back to hold time when fired off the ALL-STAR face buttons
+       (RS never moved). slapChargeT separately caps the slap's ceiling
+       exactly as everywhere else. */
+    if(PAD.gPrevType==='none'){PAD.gPeak=0;PAD.gPrevX=PAD.rsX;PAD.gPrevY=PAD.rsY;PAD.cHold=0;PAD.eaSauce=false;}
+    if(b(5))PAD.eaSauce=true; // LATCHED: on the release frame RB is already up
+    if(dt>0){
+      const spd=Math.hypot(PAD.rsX-PAD.gPrevX,PAD.rsY-PAD.gPrevY)/dt;
+      if(spd>PAD.gPeak)PAD.gPeak=spd;
+    }
+    PAD.gPrevX=PAD.rsX;PAD.gPrevY=PAD.rsY;
+    PAD.cHold=(PAD.cHold||0)+(dt||0);
+    const holdPow=0.5+0.5*clamp(PAD.cHold/1.0,0,1);
+    const flickPow=Math.max(0.55,clamp((PAD.gPeak-3)/9,0,1));
+    gest.fire={curved:PAD.eaSauce&&st==='pass',curve:0.45,
+      pow:st==='pass'?holdPow:(PAD.gPeak>3?flickPow:holdPow)};
   }
   PAD.gPrevType=st;
   snap();
@@ -9250,8 +9483,9 @@ function updatePlayer(dt){
     }else if(PAD.on&&shootHeld){
       // pad shot aim: RS -> goal-mouth picker (O-zone) / dump direction
       aimTarget=new THREE.Vector3();padShotAimPoint(aimTarget);
-    }else if(PAD.on&&PAD.rsMag>0.14){
-      // pad skill stick: RS deflection inside the reach envelope
+    }else if(PAD.on&&PAD.rsMag>0.14&&PAD.rsHandle){
+      // pad skill stick: RS deflection inside the reach envelope (rsHandle
+      // is false whenever the EA core's RS is busy being the shooting stick)
       aimTarget=padStickTarget(F,refR);
     }else{
       aimTarget=player.pos.clone().addScaledVector(F,CONFIG.iceBaseFwd).addScaledVector(up,CONFIG.iceHeight);
@@ -9269,7 +9503,7 @@ function updatePlayer(dt){
   }
   updateReticle();
   if(aimViz)aimViz.tick(dt||0);
-  if(!window.__poseFrozen&&(mouseCtl.active||(PAD.on&&padScheme==='hybrid')))toeDragGestureTrack(dt||0);
+  if(!window.__poseFrozen&&(mouseCtl.active||(PAD.on&&(padScheme==='hybrid'||PAD.dekeMod))))toeDragGestureTrack(dt||0);
   /* wrist-shot pose: a real wrister sweeps the blade low along the ice and
      drives with a front-leg weight transfer — the shooter never points the
      whole shaft up at the target the way the free 3D TPS reticle can aim.
