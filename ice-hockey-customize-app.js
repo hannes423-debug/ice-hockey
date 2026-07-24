@@ -348,20 +348,23 @@ function installRecolorShader(material,maskTexture,zoneColors,decals){
       shader.uniforms.paintMap={value:decals.paintMap};
       shader.uniforms.uMirrorPaint={value:1.0};
       extraUniforms='\nuniform sampler2D nameNumberMap;\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
-      /* Mirror ON (default, unchanged behavior): sample paintMap at the raw
-         (shared/mirrored) UV — whatever's painted on one leg shows on both,
-         same as it always has. Mirror OFF: the canvas is packed into left/
-         right HALVES by paintCanvasXY() (see its own comment) — sample
-         whichever half matches this fragment's real side (vIhSide, the
-         per-fragment counterpart to the JS-side raycast hit test used
-         while painting) instead of the raw shared UV. */
+      /* Mirror ON (default, unchanged behavior): sample logoMap/paintMap at
+         the raw (shared/mirrored) UV — whatever's painted/placed on one leg
+         shows on both, same as it always has. Mirror OFF: the canvas is
+         packed into left/right HALVES by paintCanvasXY() (see its own
+         comment) — sample whichever half matches this fragment's real side
+         (vIhSide, the per-fragment counterpart to the JS-side raycast hit
+         test used while painting/placing) instead of the raw shared UV.
+         Logos share the exact same mirrored-UV problem paint had (confirmed:
+         a decal placed once showed up on both legs) so they use the exact
+         same remap/uniform — no separate "mirror decals" toggle. */
       extraCode=`
           vec4 nn = texture2D( nameNumberMap, vUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );
-          vec4 lg = texture2D( logoMap, vUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
           vec2 pUv = vUv;
           if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
+          vec4 lg = texture2D( logoMap, pUv );
+          diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
           vec4 pt = texture2D( paintMap, pUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
       /* vIhSide: which real-world side of the (bind-pose-symmetric) body a
@@ -479,10 +482,29 @@ function fillRoundedRect(ctx,x,y,w,h,r,color){
   ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
   ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();ctx.fill();
 }
+/* Only web-safe/OS-level font families — no @font-face loading, so no
+   network dependency, load-time delay, or licensing question. Canvas text
+   silently falls back to a default sans-serif if a name isn't actually
+   installed, so these are deliberately common cross-platform choices. */
+const JERSEY_FONTS=[
+  {id:'Arial',label:'Arial — Standard'},
+  {id:'Impact',label:'Impact — Bold Block'},
+  {id:'"Arial Narrow",sans-serif',label:'Arial Narrow — Condensed'},
+  {id:'"Courier New",monospace',label:'Courier — Retro Blocky'},
+  {id:'Georgia,serif',label:'Georgia — Classic Serif'},
+  {id:'"Trebuchet MS",sans-serif',label:'Trebuchet — Modern'},
+];
+let jerseyFont='Arial';
+function setJerseyFont(font){
+  jerseyFont=font;
+  nameFontSizeCache=null;numberFontSizeCache=null; // stale for the OLD font's metrics
+  redrawNameNumber();
+  pushHistory();
+}
 function fitText(ctx,text,maxWidth,startSize,minSize){
   let size=startSize;
-  ctx.font=`bold ${size}px Arial`;
-  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px Arial`;}
+  ctx.font=`bold ${size}px ${jerseyFont}`;
+  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px ${jerseyFont}`;}
   return size;
 }
 /* fitText only ever shrinks to fit the CURRENT text, and gets called fresh
@@ -519,7 +541,7 @@ function redrawNameNumber(){
     ctx.textAlign='center';ctx.textBaseline='middle';
     const maxSize=fixedNameSize(ctx,r.w-40);
     const size=fitText(ctx,jerseyName,r.w-40,maxSize,22);
-    ctx.font=`bold ${size}px Arial`;
+    ctx.font=`bold ${size}px ${jerseyFont}`;
     ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
     ctx.strokeText(jerseyName,r.x+r.w/2,r.y+r.h/2+2);
     ctx.fillStyle=trim;ctx.fillText(jerseyName,r.x+r.w/2,r.y+r.h/2+2);
@@ -530,7 +552,7 @@ function redrawNameNumber(){
     ctx.textAlign='center';ctx.textBaseline='middle';
     const maxSize=fixedNumberSize(ctx,r.w-30);
     const size=fitText(ctx,jerseyNumber,r.w-30,maxSize,40);
-    ctx.font=`bold ${size}px Arial`;
+    ctx.font=`bold ${size}px ${jerseyFont}`;
     ctx.lineJoin='round';ctx.lineWidth=Math.max(6,size*0.09);ctx.strokeStyle=secondary;
     ctx.strokeText(jerseyNumber,r.x+r.w/2,r.y+r.h/2+4);
     ctx.fillStyle=trim;ctx.fillText(jerseyNumber,r.x+r.w/2,r.y+r.h/2+4);
@@ -563,6 +585,7 @@ function saveGameLoadout(){
       stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
       name:jerseyName,
       number:jerseyNumber,
+      font:jerseyFont,
     }));
   }catch(e){}
 }
@@ -932,6 +955,11 @@ function renderRightPanel(){
       <input id="numberInput" type="number" min="1" max="99" placeholder="—" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;padding:10px 12px;">
       <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">1–99</div>
     </div>`;
+    html+=`<div class="rp-section"><div class="rp-section-title">Lettering Font</div>
+      <select id="fontSelect" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:600;padding:10px 12px;">
+        ${JERSEY_FONTS.map(f=>`<option value='${f.id}'>${f.label}</option>`).join('')}
+      </select>
+    </div>`;
     html+=`<div class="rp-note">This is your PREFERRED number, not a guaranteed one — a real roster can only field one of each number, so a team admin gets final say and can reassign you if it's already taken. There's no actual multi-player roster/conflict-checking here yet (this editor customizes one player at a time), so nothing enforces uniqueness today; treat this field as "what I'd pick," not "what I'm locked into."</div>`;
     rp.innerHTML=html;
     wireNameplatePanel();
@@ -952,10 +980,10 @@ function renderRightPanel(){
         <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
       <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
         <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint: ON</div></div>
+      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
       <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
       <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
-      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint mirrors strokes across symmetric parts (pants, gloves) — turn it off to paint each side independently; flipping it re-splits every existing stroke, so it's simplest to decide before you start a side.</div>
+      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint & Decals mirrors both freehand strokes AND placed logos across symmetric parts (pants, gloves) — turn it off to decorate each side independently; flipping it re-splits every existing stroke/decal, so it's simplest to decide before you start a side. With Mirror off, a logo placed right at dead-center (near a belt/waistband seam) can land in an odd spot — drag it onto the leg/arm proper with "Move on Model" and it'll behave.</div>
     </div>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
       <div class="lc-shape-grid" id="quickShapeGrid">
@@ -1011,6 +1039,10 @@ function renderRightPanel(){
   html+=`<div class="rp-section"><div class="btn-row">
     <div class="btn" id="btnRandom">🎲 Randomize</div><div class="btn primary" id="btnSavePreset">💾 Save Preset</div>
   </div></div>`;
+  html+=`<div class="rp-section"><div class="btn-row">
+    <div class="btn" id="btnExportCode">📤 Export Code</div><div class="btn" id="btnImportCode">📥 Import Code</div>
+  </div>
+  <div class="rp-note" style="margin-top:10px;">Exports/imports the WHOLE loadout (colors, name/number/font, paint, decals) as a text code — for sharing or backing up outside this browser, separate from the presets below which only live here.</div></div>`;
 
   html+=`<div class="rp-section"><div class="rp-section-title">Loadout Presets</div>${presetStripHTML()}</div>`;
 
@@ -1054,6 +1086,8 @@ function wireRightPanel(mgrKey,mgr){
   if(sb)sb.addEventListener('click',promptSavePreset);
   const ub=document.getElementById('btnUndo');if(ub)ub.addEventListener('click',undo);
   const rdb=document.getElementById('btnRedo');if(rdb)rdb.addEventListener('click',redo);
+  const exb=document.getElementById('btnExportCode');if(exb)exb.addEventListener('click',exportLoadoutCode);
+  const imb=document.getElementById('btnImportCode');if(imb)imb.addEventListener('click',importLoadoutCode);
 }
 function refreshSwatches(){
   ['body','stick'].forEach(mgrKey=>{
@@ -1090,6 +1124,10 @@ function wireNameplatePanel(){
     redrawNameNumber();
   });
   numberInput.addEventListener('change',pushHistory);
+
+  const fontSelect=document.getElementById('fontSelect');
+  fontSelect.value=jerseyFont;
+  fontSelect.addEventListener('change',()=>setJerseyFont(fontSelect.value));
 }
 function wireDecalsPanel(){
   document.querySelectorAll('.paint-target-btn').forEach(el=>{
@@ -1118,7 +1156,7 @@ function wireDecalsPanel(){
   const mirrorBtn=document.getElementById('mirrorPaintBtn');
   const syncMirrorBtn=()=>{
     mirrorBtn.classList.toggle('primary',paintMirrorOn);
-    mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';
+    mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';
   };
   syncMirrorBtn();
   mirrorBtn.addEventListener('click',()=>{
@@ -1127,7 +1165,7 @@ function wireDecalsPanel(){
     applyPaintMirrorUniform();
     redrawPaintLayer(); // re-pack every existing stroke under the new convention
     pushHistory();
-    showToast(paintMirrorOn?'Mirror Paint ON — both sides match':'Mirror Paint OFF — sides painted independently');
+    showToast(paintMirrorOn?'Mirror ON — both sides match':'Mirror OFF — sides decorated independently');
   });
 
   const modeBtn=document.getElementById('paintModeBtn');
@@ -1439,7 +1477,13 @@ function renderLogoCreatorUI(){
     const L=lcLayers[i];
     const row=document.createElement('div');
     row.className='lc-layer-row'+(i===lcSelectedIdx?' active':'');
+    // list renders top-to-bottom = front-to-back (last array entry drawn
+    // last = on top = shown first here), so "move up" in this list means
+    // moving LATER in the array — same +1/-1 = up/down convention as the
+    // main Layers panel's decal/paint reorder.
     row.innerHTML=`<span class="lc-layer-label">${lcLayerLabel(L)}</span>
+      <span class="lc-layer-btn" data-act="up" data-i="${i}" title="Move up"${i===lcLayers.length-1?' style="opacity:.2;pointer-events:none;"':''}>↑</span>
+      <span class="lc-layer-btn" data-act="down" data-i="${i}" title="Move down"${i===0?' style="opacity:.2;pointer-events:none;"':''}>↓</span>
       <span class="lc-layer-btn" data-act="dup" data-i="${i}" title="Duplicate">⧉</span>
       <span class="lc-layer-btn" data-act="del" data-i="${i}" title="Delete">🗑</span>`;
     row.addEventListener('click',e=>{if(e.target.dataset.act)return;lcSelectedIdx=i;renderLogoCreatorUI();});
@@ -1454,7 +1498,20 @@ function renderLogoCreatorUI(){
     e.stopPropagation();const i=+b.dataset.i,copy=Object.assign({},lcLayers[i],{id:lcNewId(),x:lcLayers[i].x+18,y:lcLayers[i].y+18});
     lcLayers.push(copy);lcSelectedIdx=lcLayers.length-1;renderLogoCreatorUI();
   }));
+  list.querySelectorAll('[data-act="up"]').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation();lcReorderLayer(+b.dataset.i,1);
+  }));
+  list.querySelectorAll('[data-act="down"]').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation();lcReorderLayer(+b.dataset.i,-1);
+  }));
   renderLcLayerProps();
+}
+function lcReorderLayer(idx,dir){
+  const j=idx+dir;
+  if(j<0||j>=lcLayers.length)return;
+  [lcLayers[idx],lcLayers[j]]=[lcLayers[j],lcLayers[idx]];
+  if(lcSelectedIdx===idx)lcSelectedIdx=j;else if(lcSelectedIdx===j)lcSelectedIdx=idx;
+  renderLogoCreatorUI();
 }
 function renderLcLayerProps(){
   const el=document.getElementById('lcLayerProps');
@@ -1571,9 +1628,13 @@ function redrawLogoLayer(){
     if(d.visible===false)return;
     const lib=logoLibrary.find(l=>l.id===d.logoId);
     if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    const cx=d.u*DECAL_SIZE,cy=d.v*DECAL_SIZE,size=DECAL_SIZE*d.scale;
+    // same packing helper paint uses — logos share the exact same
+    // mirrored-UV problem (confirmed: a decal placed once showed up on
+    // both legs), so they use the exact same Mirror toggle/side data.
+    const xy=paintCanvasXY({x:d.u,y:d.v},d.side,paintMirrorOn);
+    const size=DECAL_SIZE*d.scale;
     logoCtx.save();
-    logoCtx.translate(cx,cy);logoCtx.rotate(d.rotation||0);
+    logoCtx.translate(xy.x,xy.y);logoCtx.rotate(d.rotation||0);
     logoCtx.drawImage(lib.img,-size/2,-size/2,size,size);
     logoCtx.restore();
   });
@@ -1595,13 +1656,16 @@ function renderLogoLibraryGrid(){
 }
 function placeDecal(logoId){
   const meshes=getPaintTargetMeshes();
-  let uv={x:0.5,y:0.5};
+  let uv={x:0.5,y:0.5},side=1;
   if(meshes.length){
     raycaster.setFromCamera(new THREE.Vector2(0,0),camera);
     const hits=raycaster.intersectObjects(meshes,false);
-    if(hits.length&&hits[0].uv)uv=hits[0].uv;
+    if(hits.length&&hits[0].uv){
+      uv=hits[0].uv;
+      side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
+    }
   }
-  placedDecals.push({id:'D'+Date.now(),logoId,u:uv.x,v:uv.y,scale:0.15,rotation:0,target:paintTarget,visible:true});
+  placedDecals.push({id:'D'+Date.now(),logoId,u:uv.x,v:uv.y,side,scale:0.15,rotation:0,target:paintTarget,visible:true});
   selectedDecalIdx=placedDecals.length-1;
   redrawLogoLayer();
   renderPlacedDecalsList();
@@ -1633,7 +1697,7 @@ function quickStampShape(shape){
 }
 function moveSelectedDecal(uv){
   const d=placedDecals[selectedDecalIdx];if(!d)return;
-  d.u=uv.x;d.v=uv.y;d.target=paintTarget;
+  d.u=uv.x;d.v=uv.y;d.side=uv.side;d.target=paintTarget;
   redrawLogoLayer();
 }
 /* selectedDecalIdx used to only ever get set by placeDecal() — once you'd
@@ -1777,11 +1841,17 @@ function renderPaintLayerControls(){
   const s=paintStrokes[selectedStrokeIdx];
   if(!s){el.innerHTML='';return;}
   el.innerHTML=`<div class="rp-section-title" style="margin-top:14px;">Selected Stroke</div>
+    <div class="mat-slider-row"><div class="mat-slider-label"><span>Thickness</span><b id="strokeSizeVal"></b></div>
+      <input type="range" id="strokeSizeSlider" min="6" max="140" step="2"></div>
     <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="strokeOpVal"></b></div>
       <input type="range" id="strokeOpSlider" min="0.05" max="1" step="0.05"></div>
     <div class="zone-row" id="strokeColorRow"><div class="zone-swatch" id="strokeColorSwatch" style="background:${s.color}"></div>
       <div class="zone-info"><div class="zone-name">Recolor Stroke</div></div></div>
     <div class="btn-row" style="margin-top:8px;"><div class="btn" id="strokeDeleteBtn">🗑 Delete Stroke</div></div>`;
+  const sizeSlider=document.getElementById('strokeSizeSlider');
+  sizeSlider.value=s.size;document.getElementById('strokeSizeVal').textContent=s.size;
+  sizeSlider.addEventListener('input',()=>{s.size=+sizeSlider.value;document.getElementById('strokeSizeVal').textContent=s.size;redrawPaintLayer();});
+  sizeSlider.addEventListener('change',pushHistory);
   const opSlider=document.getElementById('strokeOpSlider');
   opSlider.value=s.opacity;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';
   opSlider.addEventListener('input',()=>{s.opacity=+opSlider.value;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';redrawPaintLayer();});
@@ -1846,6 +1916,7 @@ function captureState(){
     // toggle and the stroke data out of sync with each other — see
     // paintCanvasXY's note on why they have to agree.
     paintMirrorOn,
+    jerseyFont,
   };
 }
 function pushHistory(){
@@ -1861,6 +1932,9 @@ function applyState(s){
   jerseyName=s.name||'';jerseyNumber=s.number||'';
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
+  jerseyFont=s.jerseyFont||'Arial';
+  nameFontSizeCache=null;numberFontSizeCache=null;
+  const fs=document.getElementById('fontSelect');if(fs)fs.value=jerseyFont;
   // ||[] guards presets/history saved before paint/decal layers existed;
   // ??true guards history/presets saved before the mirror toggle existed
   paintStrokes=JSON.parse(JSON.stringify(s.paintStrokes||[]));
@@ -1868,7 +1942,7 @@ function applyState(s){
   paintMirrorOn=s.paintMirrorOn??true;
   applyPaintMirrorUniform();
   const mb=document.getElementById('mirrorPaintBtn');
-  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';}
+  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';}
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();
@@ -1877,6 +1951,32 @@ function applyState(s){
 }
 function undo(){if(historyIdx>0){historyIdx--;applyState(history[historyIdx]);showToast('Undo');}}
 function redo(){if(historyIdx<history.length-1){historyIdx++;applyState(history[historyIdx]);showToast('Redo');}}
+
+/* ============================== EXPORT / IMPORT CODE ==============================
+   A shareable text version of the whole loadout — captureState()/applyState()
+   already define exactly the fields that make up "the whole loadout" (used
+   for undo/redo), so this is just that same snapshot base64-encoded instead
+   of kept in memory. unescape/encodeURIComponent (and its inverse) round-trip
+   non-ASCII safely through btoa/atob, which only handle Latin1 natively. */
+function exportLoadoutCode(){
+  try{
+    const json=JSON.stringify(captureState());
+    const code=btoa(unescape(encodeURIComponent(json)));
+    window.prompt('Your loadout code — copy it (Ctrl/Cmd+C) to share or back up. Paste it back in later with Import Code.',code);
+  }catch(e){showToast('Export failed');}
+}
+function importLoadoutCode(){
+  const code=window.prompt('Paste a loadout code:');
+  if(!code)return;
+  try{
+    const json=decodeURIComponent(escape(atob(code.trim())));
+    const s=JSON.parse(json);
+    if(!s||!Array.isArray(s.body)||!Array.isArray(s.stick))throw new Error('not a loadout code');
+    applyState(s);
+    pushHistory();
+    showToast('Loadout imported');
+  }catch(e){showToast('That code isn’t a valid loadout — check you copied the whole thing');}
+}
 addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!e.shiftKey){e.preventDefault();undo();}
   if((e.ctrlKey||e.metaKey)&&(e.key.toLowerCase()==='y'||(e.key.toLowerCase()==='z'&&e.shiftKey))){e.preventDefault();redo();}
@@ -1894,7 +1994,7 @@ function promptSavePreset(){
     body:bodyZM.zones.map(z=>'#'+z.color.getHexString()),
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
-    jname:jerseyName,jnumber:jerseyNumber,
+    jname:jerseyName,jnumber:jerseyNumber,jfont:jerseyFont,
     paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
     placedDecals:JSON.parse(JSON.stringify(placedDecals)),
     paintMirrorOn,
@@ -1907,6 +2007,9 @@ function applyPreset(id){
   p.stick.forEach((hex,i)=>stickZM.setZoneColor(i,hex));
   if(p.neck)neckZone.setColor(p.neck);
   jerseyName=p.jname||'';jerseyNumber=p.jnumber||'';
+  jerseyFont=p.jfont||'Arial';
+  nameFontSizeCache=null;numberFontSizeCache=null;
+  { const fs=document.getElementById('fontSelect'); if(fs)fs.value=jerseyFont; }
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
   paintStrokes=JSON.parse(JSON.stringify(p.paintStrokes||[]));
@@ -1914,7 +2017,7 @@ function applyPreset(id){
   paintMirrorOn=p.paintMirrorOn??true;
   applyPaintMirrorUniform();
   const mb=document.getElementById('mirrorPaintBtn');
-  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint: ON':'🪞 Mirror Paint: OFF';}
+  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';}
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();

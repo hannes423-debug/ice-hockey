@@ -9518,10 +9518,16 @@ function ihSetupZoneMaterial(material,maxZones,nameNumberMap){
    visually identical clone of every other teammate, distinguishable only
    by position. This reuses the SAME proven zone-recolor pipeline the
    human player's Locker Room loadout uses (same shader, same mesh
-   identity, same mask-sharing trick above) but with randomized-per-entity
-   Primary/Secondary/Trim colors, biased toward a hue family per team so
-   "who's on my side" still reads at a glance while no two skaters on the
-   ice look like copies of each other. */
+   identity, same mask-sharing trick above).
+   Real hockey teammates wear an IDENTICAL uniform, not individually
+   randomized colors (user correction after the first pass here randomized
+   per-bot) — so as of this pass, every skater on a team shares ONE
+   randomized-but-team-hue-biased Primary/Secondary/Trim palette, generated
+   once per team and reused by every entity assigned to it; each skater is
+   differentiated from teammates by NUMBER only (assigned per-entity,
+   deduped within a team where practical), exactly like a real jersey.
+   Shoulder pad size, jersey tuck, and other per-player silhouette options
+   are a deliberately later phase, not attempted here. */
 const IH_TEAM_HUE={A:212,B:4}; // matches tintTeam's old fixed colors: 0x3f6fd2 (blue, team A) / 0xd23a3a (red, team B)
 function ihRandomBotZoneColors(hueCenter){
   const jitter=()=>(Math.random()*2-1)*32;
@@ -9532,29 +9538,87 @@ function ihRandomBotZoneColors(hueCenter){
     new THREE.Color().setHSL(Math.random(),0.05+Math.random()*0.25,0.84+Math.random()*0.12), // Trim (usually near-white, like real jerseys)
   ];
 }
-/* Sets up (once) or re-rolls (on a team change) an entity's own zone-recolor,
-   mirroring tintTeam's re-tint-safety pattern (cached per-entity state, not
-   compounding) — this is the direct replacement for tintTeam() on any
-   entity that gets this treatment. bodyMesh.userData.ihZoneColors holds the
-   live THREE.Color objects the installed shader's uniforms reference, so
-   mutating them in place (via .setHSL, not reassigning the array) is what
-   makes a re-roll actually show up without reinstalling the shader. */
+/* Generated once per team, reused by every skater assigned to that team for
+   the rest of the session — this IS the "identical team uniform" behavior;
+   it's deliberately NOT regenerated later so a bot that joins mid-session
+   matches everyone already on the ice. */
+let ihTeamZoneColors={A:null,B:null};
+function ihGetTeamZoneColors(team){
+  if(!ihTeamZoneColors[team])ihTeamZoneColors[team]=ihRandomBotZoneColors(IH_TEAM_HUE[team]||IH_TEAM_HUE.B);
+  return ihTeamZoneColors[team];
+}
+/* Per-team pool so two teammates don't end up wearing the same number —
+   best-effort, not a hard guarantee (falls back to a possible repeat past
+   50 tries, which a ~5-a-side roster will never come close to hitting).
+   Not synced against the human player's own Locker Room "preferred
+   number" — that field is honestly unenforced there too (see its own
+   note), and boot-time load order between the player's loadout and the
+   first bots isn't deterministic enough to coordinate reliably. */
+let ihTeamUsedNumbers={A:new Set(),B:new Set()};
+function ihAssignBotNumber(team){
+  const used=ihTeamUsedNumbers[team]||(ihTeamUsedNumbers[team]=new Set());
+  let n=1+Math.floor(Math.random()*99);
+  for(let tries=0;tries<50&&used.has(n);tries++)n=1+Math.floor(Math.random()*99);
+  used.add(n);
+  return String(n);
+}
+/* Sets up (once) or re-syncs (on a team change) an entity's own zone-recolor
+   + number decal, mirroring tintTeam's re-tint-safety pattern (cached
+   per-entity state, not compounding) — this is the direct replacement for
+   tintTeam() on any entity that gets this treatment. bodyMesh.userData.
+   ihZoneColors holds this ENTITY's own Color objects (value-copied from the
+   team's shared palette, not shared by reference — simplest way to keep
+   "install once, mutate in place thereafter" working without needing a
+   stored shader/uniform reference) so mutating them in place is what makes
+   a team switch actually show up without reinstalling the shader. */
 function ihApplyBotZoneRecolor(ent,team){
   if(!ent||!ent.visual)return;
   const bodyMesh=ent.visual.getObjectByName('Cube001');
   if(!bodyMesh||!bodyMesh.material||!bodyMesh.material.map)return;
-  if(bodyMesh.userData.ihTeam===team)return; // already correctly colored for this team
-  const fresh=ihRandomBotZoneColors(IH_TEAM_HUE[team]||IH_TEAM_HUE.B);
+  if(bodyMesh.userData.ihTeam===team)return; // already correctly colored+numbered for this team
+  const teamColors=ihGetTeamZoneColors(team);
+  const number=ihAssignBotNumber(team);
   if(!bodyMesh.userData.ihZoneColors){
     bodyMesh.material=bodyMesh.material.clone(); // detach from Cube002-007's shared reference before patching
+    const ownColors=teamColors.map(c=>c.clone());
+    const nameCanvas=document.createElement('canvas');
+    nameCanvas.width=nameCanvas.height=IH_DECAL_SIZE;
+    const nameCtx=nameCanvas.getContext('2d');
+    const nameTexture=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
+    nameTexture.flipY=false;
     const mask=ihBodyMaskCache||ihGetBodyMask(bodyMesh.material);
-    ihInstallRecolorShader(bodyMesh.material,mask,fresh,null);
-    bodyMesh.userData.ihZoneColors=fresh;
+    ihInstallRecolorShader(bodyMesh.material,mask,ownColors,nameTexture);
+    bodyMesh.userData.ihZoneColors=ownColors;
+    bodyMesh.userData.ihNameCtx=nameCtx;
+    bodyMesh.userData.ihNameTexture=nameTexture;
   }else{
     const live=bodyMesh.userData.ihZoneColors;
-    live[0].copy(fresh[0]);live[1].copy(fresh[1]);live[2].copy(fresh[2]);
+    live[0].copy(teamColors[0]);live[1].copy(teamColors[1]);live[2].copy(teamColors[2]);
   }
+  ihDrawNumberToCanvas(bodyMesh.userData.ihNameCtx,bodyMesh.userData.ihNameTexture,
+    '#'+teamColors[0].getHexString(),'#'+teamColors[1].getHexString(),'#'+teamColors[2].getHexString(),number);
   bodyMesh.userData.ihTeam=team;
+  bodyMesh.userData.ihNumber=number;
+}
+/* Bot/goalie equivalent of ihRedrawNameNumber — number only (no nameplate;
+   AI skaters don't have a real name to show), reusing the same fixed-size
+   fit-text machinery so bot numbers scale identically to the player's own. */
+function ihDrawNumberToCanvas(ctx,texture,primary,secondary,trim,number){
+  ctx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  if(number){
+    const r=IH_NUMBER_RECT;
+    ctx.fillStyle=primary;ctx.fillRect(r.x,r.y,r.w,r.h);
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    const maxSize=ihFixedNumberSize(ctx,r.w-30);
+    const size=ihFitText(ctx,number,r.w-30,maxSize,40);
+    ctx.font=`bold ${size}px Arial`;
+    ctx.lineJoin='round';ctx.lineWidth=Math.max(6,size*0.09);ctx.strokeStyle=secondary;
+    ctx.strokeText(number,r.x+r.w/2,r.y+r.h/2+4);
+    ctx.fillStyle=trim;ctx.fillText(number,r.x+r.w/2,r.y+r.h/2+4);
+  }
+  const imgData=ctx.getImageData(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  texture.image.data.set(imgData.data);
+  texture.needsUpdate=true;
 }
 /* Fallback path for the rare case a bot's body zone-recolor gets requested
    before the human player has ever set one up (so ihBodyMaskCache is still
@@ -9573,10 +9637,11 @@ function ihFillRoundedRect(ctx,x,y,w,h,r,color){
   ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
   ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();ctx.fill();
 }
+let ihJerseyFont='Arial'; // synced from the Locker Room loadout's own font picker
 function ihFitText(ctx,text,maxWidth,startSize,minSize){
   let size=startSize;
-  ctx.font=`bold ${size}px Arial`;
-  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px Arial`;}
+  ctx.font=`bold ${size}px ${ihJerseyFont}`;
+  while(ctx.measureText(text).width>maxWidth&&size>minSize){size-=4;ctx.font=`bold ${size}px ${ihJerseyFont}`;}
   return size;
 }
 let ihNameFontSizeCache=null,ihNumberFontSizeCache=null;
@@ -9601,7 +9666,7 @@ function ihRedrawNameNumber(name,number){
     ctx.textAlign='center';ctx.textBaseline='middle';
     const maxSize=ihFixedNameSize(ctx,r.w-40);
     const size=ihFitText(ctx,name,r.w-40,maxSize,22);
-    ctx.font=`bold ${size}px Arial`;
+    ctx.font=`bold ${size}px ${ihJerseyFont}`;
     ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
     ctx.strokeText(name,r.x+r.w/2,r.y+r.h/2+2);
     ctx.fillStyle=trim;ctx.fillText(name,r.x+r.w/2,r.y+r.h/2+2);
@@ -9612,7 +9677,7 @@ function ihRedrawNameNumber(name,number){
     ctx.textAlign='center';ctx.textBaseline='middle';
     const maxSize=ihFixedNumberSize(ctx,r.w-30);
     const size=ihFitText(ctx,number,r.w-30,maxSize,40);
-    ctx.font=`bold ${size}px Arial`;
+    ctx.font=`bold ${size}px ${ihJerseyFont}`;
     ctx.lineJoin='round';ctx.lineWidth=Math.max(6,size*0.09);ctx.strokeStyle=secondary;
     ctx.strokeText(number,r.x+r.w/2,r.y+r.h/2+4);
     ctx.fillStyle=trim;ctx.fillText(number,r.x+r.w/2,r.y+r.h/2+4);
@@ -9668,6 +9733,8 @@ function ihApplySavedLoadout(){
         ihBladeTapeMat.color.set(lo.stick[3]);
       }
       name=lo.name||'';number=lo.number||'';
+      const font=lo.font||'Arial';
+      if(font!==ihJerseyFont){ihJerseyFont=font;ihNameFontSizeCache=null;ihNumberFontSizeCache=null;}
     }
   }catch(e){console.warn('Locker Room loadout failed to load',e);}
   ihRedrawNameNumber(name,number);
@@ -9680,6 +9747,19 @@ function applyLockerRoomLoadout(){
   // top-level globals aren't reachable from outside this script's scope.
   window.__ihLoadoutDebug={bodyColors:ihBodyColors,neckColors:ihNeckColors,stickShaftBlade:ihStickShaftBlade,gripTapeMat:ihGripTapeMat,bladeTapeMat:ihBladeTapeMat};
 }
+window.__ihBotDebugSnapshot=()=>{
+  const info=e=>{
+    if(!e||!e.visual)return null;
+    const m=e.visual.getObjectByName('Cube001');
+    return m?{team:m.userData.ihTeam,number:m.userData.ihNumber,colors:(m.userData.ihZoneColors||[]).map(c=>'#'+c.getHexString())}:null;
+  };
+  return{
+    bot:info(typeof bot!=='undefined'?bot:null),
+    goalie:info(typeof goalie!=='undefined'?goalie:null),
+    pool:(typeof MATCH!=='undefined'&&MATCH.pool?MATCH.pool.map(info):[]),
+    teamColors:{A:(ihTeamZoneColors.A||[]).map(c=>'#'+c.getHexString()),B:(ihTeamZoneColors.B||[]).map(c=>'#'+c.getHexString())},
+  };
+};
 // live-updates if the Locker Room editor is open+edited in another tab while the game is running
 addEventListener('storage',e=>{if(e.key===IH_LOADOUT_KEY)ihApplySavedLoadout();});
 
