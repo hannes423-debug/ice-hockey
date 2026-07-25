@@ -24,6 +24,13 @@ function b64ToBuf(b64){const bin=atob(b64);const buf=new Uint8Array(bin.length);
 /* hasa1992's Blender human-metarig bone names don't matter for static viewing
    (no IK), but we still normalize them for the idle-sway bones (spine_03,
    head) and so these loaders stay consistent with the main game's. */
+/* three.js frustum-culls against geometry.boundingSphere, which is built from
+   the BIND POSE — but posed skinned meshes render wherever the bones drag
+   them. On the stick that drift is over a metre while the tape wraps' spheres
+   are only ~0.1 radius, so both tape meshes fail the test and never draw.
+   These are a handful of always-on-screen character meshes; skip the test. */
+function ihcNoCull(root){root.traverse(o=>{if(o.isMesh)o.frustumCulled=false;});}
+
 function remapBoneNames(root){
   const RENAME_EXACT={'spine':'spine_01','spine1':'spine_02','spine2':'spine_03','neck1':'neck_01'};
   const RENAME_SIDED={'upper_arm':'upperarm','forearm':'lowerarm','hand':'hand','thigh':'thigh','shin':'calf','foot':'foot'};
@@ -82,7 +89,7 @@ function buildMaskTexture(imgData,recolor,fixed){
   tex.flipY=false;tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;tex.needsUpdate=true;
   return tex;
 }
-function installRecolorShader(material,maskTexture,zoneColors,decals){
+function installRecolorShader(material,maskTexture,zoneColors,decals,split){
   /* three.js's WebGLProgram cache doesn't factor onBeforeCompile's own logic
      into its cache key by default — two materials that look identical on
      "standard" properties (same map, same skinning/defines) can silently
@@ -99,13 +106,32 @@ function installRecolorShader(material,maskTexture,zoneColors,decals){
     shader.uniforms.zoneColor0={value:zoneColors[0]};
     shader.uniforms.zoneColor1={value:zoneColors[1]};
     shader.uniforms.zoneColor2={value:zoneColors[2]};
-    let extraUniforms='',extraCode='';
+    /* SPLIT PIECE: two equipment pieces that live on ONE mesh (pants and
+       socks are a single continuous leg mesh on this rig) get a second set
+       of zone colors, selected per-fragment by the raw bind-pose height —
+       the same trick vIhSide already uses for left/right, one axis over.
+       They deliberately SHARE the mask/palette: both halves are painted
+       from the same three texture colors, so a shared classification is
+       correct and only the color triples differ. */
+    shader.uniforms.splitZone0={value:(split?split.colors[0]:zoneColors[0])};
+    shader.uniforms.splitZone1={value:(split?split.colors[1]:zoneColors[1])};
+    shader.uniforms.splitZone2={value:(split?split.colors[2]:zoneColors[2])};
+    shader.uniforms.uSplitY={value:split?split.y:-999.0};
+    let extraUniforms='\nuniform vec3 splitZone0;\nuniform vec3 splitZone1;\nuniform vec3 splitZone2;\nuniform float uSplitY;\nvarying float vIhY;',extraCode='';
     if(decals){
-      shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
       shader.uniforms.logoMap={value:decals.logoMap};
       shader.uniforms.paintMap={value:decals.paintMap};
       shader.uniforms.uMirrorPaint={value:1.0};
-      extraUniforms='\nuniform sampler2D nameNumberMap;\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
+      extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;';
+      /* The name/number PLATE only exists on the jersey's own UV region, so
+         only the jersey's material samples it — every other piece would just
+         be paying for a sampler that can never contribute a pixel (and could
+         stamp a stray letter if some other island happened to overlap the
+         plate rect). */
+      if(decals.nameNumberMap){
+        shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
+        extraUniforms+='\nuniform sampler2D nameNumberMap;';
+      }
       /* Mirror ON (default, unchanged behavior): sample logoMap/paintMap at
          the raw (shared/mirrored) UV — whatever's painted/placed on one leg
          shows on both, same as it always has. Mirror OFF: the canvas is
@@ -116,30 +142,34 @@ function installRecolorShader(material,maskTexture,zoneColors,decals){
          Logos share the exact same mirrored-UV problem paint had (confirmed:
          a decal placed once showed up on both legs) so they use the exact
          same remap/uniform — no separate "mirror decals" toggle. */
-      extraCode=`
+      extraCode=(decals.nameNumberMap?`
           vec4 nn = texture2D( nameNumberMap, vUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );
+          diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );`:'')+`
           vec2 pUv = vUv;
           if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
           vec4 lg = texture2D( logoMap, pUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
           vec4 pt = texture2D( paintMap, pUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
-      /* vIhSide: which real-world side of the (bind-pose-symmetric) body a
-         fragment belongs to, from the raw pre-skin `position` attribute —
-         verified with a forced hard-override render (solid red/blue split
-         cleanly down the anatomical midline) before trusting it for the
-         real feature. Requires patching the VERTEX shader too. */
-      shader.vertexShader=shader.vertexShader
-        .replace('#include <common>','#include <common>\nvarying float vIhSide;')
-        .replace('#include <begin_vertex>','#include <begin_vertex>\nvIhSide = position.x;');
+      extraUniforms+='\nvarying float vIhSide;';
     }
+    /* vIhSide / vIhY: which real-world side (x) and which bind-pose height (y)
+       a fragment belongs to, from the raw pre-skin `position` attribute —
+       vIhSide was verified with a forced hard-override render (solid red/blue
+       split cleanly down the anatomical midline) before trusting it, and vIhY
+       the same way (the pants/socks boundary lands exactly on the shorts hem
+       at 0.62). Both require patching the VERTEX shader. */
+    shader.vertexShader=shader.vertexShader
+      .replace('#include <common>','#include <common>\nvarying float vIhSide;\nvarying float vIhY;')
+      .replace('#include <begin_vertex>','#include <begin_vertex>\nvIhSide = position.x;\nvIhY = position.y;');
     shader.fragmentShader=shader.fragmentShader
       .replace('#include <common>','#include <common>\nuniform sampler2D maskMap;\nuniform vec3 zoneColor0;\nuniform vec3 zoneColor1;\nuniform vec3 zoneColor2;'+extraUniforms)
       .replace('#include <map_fragment>',`#include <map_fragment>
         {
           vec4 zmask = texture2D( maskMap, vUv );
-          vec3 recolored = zoneColor0*zmask.r + zoneColor1*zmask.g + zoneColor2*zmask.b;
+          vec3 zc0 = zoneColor0, zc1 = zoneColor1, zc2 = zoneColor2;
+          if( vIhY < uSplitY ){ zc0 = splitZone0; zc1 = splitZone1; zc2 = splitZone2; }
+          vec3 recolored = zc0*zmask.r + zc1*zmask.g + zc2*zmask.b;
           float rw = clamp(zmask.r+zmask.g+zmask.b, 0.0, 1.0);
           diffuseColor.rgb = mix( diffuseColor.rgb, recolored, rw );${extraCode}
         }`);
@@ -173,10 +203,246 @@ function setupZoneMaterial(material,maxZones,labels,decals){
     setZoneColor(i,hex){ if(this.zones[i])this.zones[i].setColor(hex); },
   };
 }
+/* ====================== PER-PIECE EQUIPMENT ZONES ======================
+   The whole kit is ONE 2048² texture atlas and — until this pass — one
+   material shared by all nine body meshes, so "Socks · Primary" and
+   "Jersey · Primary" were literally the same slider: the mask classified
+   the ATLAS by color, and every piece painted with that color moved
+   together. Each piece now gets its OWN cloned material, and its own zone
+   palette clustered from ONLY the atlas pixels that piece's UV triangles
+   actually cover (rasterized below) — so the boot's palette is boot black
+   + lace white, the jersey's is its own three colors, and they move
+   independently.
+   Mesh identity was confirmed by rendering each mesh in a flat distinct
+   color: Cube=neck, Cube001=jersey, Cube002=pants+socks (one continuous
+   leg mesh — split by height, see IHC_SPLIT_Y), Cube003=gloves,
+   Cube004=helmet shell, Cube005=cage, Cube006=skate boots, Cube007=blade
+   steel, Plane004=skate LACES (16 little strap shells across the boot). */
+const IHC_SPLIT_Y=0.62; // bind-pose local Y of the shorts hem (render-verified)
+const IHC_PIECES=[
+  {id:'jersey',label:'Jersey',      icon:'🏒',mesh:'Cube001', zones:3,zoneLabels:['Primary','Secondary','Trim'],nameplate:true},
+  {id:'pants', label:'Pants',       icon:'🩳',mesh:'Cube002', zones:3,zoneLabels:['Primary','Secondary','Trim'],splitSide:'above'},
+  {id:'socks', label:'Socks',       icon:'🧦',mesh:'Cube002', zones:3,zoneLabels:['Primary','Secondary','Trim'],splitSide:'below'},
+  {id:'gloves',label:'Gloves',      icon:'🧤',mesh:'Cube003', zones:3,zoneLabels:['Primary','Secondary','Trim']},
+  {id:'helmet',label:'Helmet',      icon:'⛑️',mesh:'Cube004', zones:3,zoneLabels:['Shell','Secondary','Trim']},
+  {id:'cage',  label:'Cage',        icon:'🥅',mesh:'Cube005', zones:2,zoneLabels:['Cage','Padding']},
+  {id:'skates',label:'Skate Boots', icon:'⛸️',mesh:'Cube006', zones:2,zoneLabels:['Boot','Accent']},
+  {id:'laces', label:'Laces',       icon:'🪢',mesh:'Plane004',zones:2,zoneLabels:['Laces','Eyelets']},
+  {id:'blades',label:'Blade Steel', icon:'🔪',mesh:'Cube007', zones:2,zoneLabels:['Steel','Holder']},
+  /* Not team equipment — the neck/collar sliver is this rig's only stand-in
+     for exposed skin (helmet+cage cover the whole head, there is no face
+     texture) and belongs to the PLAYER. It rides the same pipeline purely so
+     it gets a coverage-restricted classification like everything else. */
+  {id:'neck',  label:'Skin',        icon:'🧑',mesh:'Cube',     zones:1,zoneLabels:['Skin'],personal:true},
+];
+function ihcPiece(id){return IHC_PIECES.find(p=>p.id===id);}
+/* Fills `cov` (1 byte per texel) with 1 wherever this mesh's UV triangles
+   land. Triangles are expanded ~1.5px outward from their centroid so the
+   island EDGES (where the texture's own antialiasing/bleed lives) count as
+   covered — without that, seam pixels fall outside every piece and read as
+   an un-recolored fringe. `filter` selects a sub-piece (pants vs socks). */
+function ihcRasterTri(cov,w,h,ax,ay,bx,by,cx,cy){
+  const gx=(ax+bx+cx)/3,gy=(ay+by+cy)/3,GROW=1.5;
+  const ex=(x,y)=>{const dx=x-gx,dy=y-gy,l=Math.hypot(dx,dy)||1;return[x+dx/l*GROW,y+dy/l*GROW];};
+  [[ax,ay],[bx,by],[cx,cy]]=[ex(ax,ay),ex(bx,by),ex(cx,cy)];
+  const minX=Math.max(0,Math.floor(Math.min(ax,bx,cx))),maxX=Math.min(w-1,Math.ceil(Math.max(ax,bx,cx)));
+  const minY=Math.max(0,Math.floor(Math.min(ay,by,cy))),maxY=Math.min(h-1,Math.ceil(Math.max(ay,by,cy)));
+  const den=(by-cy)*(ax-cx)+(cx-bx)*(ay-cy);
+  if(Math.abs(den)<1e-9)return;
+  for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++){
+    const px=x+0.5,py=y+0.5;
+    const l1=((by-cy)*(px-cx)+(cx-bx)*(py-cy))/den;
+    const l2=((cy-ay)*(px-cx)+(ax-cx)*(py-cy))/den;
+    const l3=1-l1-l2;
+    if(l1>=0&&l2>=0&&l3>=0)cov[y*w+x]=1;
+  }
+}
+/* UV v maps straight to texel row (no 1-v flip): glTF textures and the mask
+   DataTexture are both flipY=false, so v=0 is the FIRST row of pixel data,
+   which is the top row of the source image — the same row getImageData()
+   returns first. Verified by overlaying a rasterized coverage map on the
+   atlas and confirming the laces landed on the lace pixels. */
+function ihcMeshCoverage(meshes,w,h,filter){
+  const cov=new Uint8Array(w*h);
+  meshes.forEach(mesh=>{
+    const g=mesh.geometry,uv=g.attributes.uv,pos=g.attributes.position,idx=g.index;
+    if(!uv)return;
+    const n=idx?idx.count:pos.count;
+    for(let t=0;t<n;t+=3){
+      const a=idx?idx.getX(t):t,b=idx?idx.getX(t+1):t+1,c=idx?idx.getX(t+2):t+2;
+      if(filter&&!filter(pos,a,b,c))continue;
+      ihcRasterTri(cov,w,h,uv.getX(a)*w,uv.getY(a)*h,uv.getX(b)*w,uv.getY(b)*h,uv.getX(c)*w,uv.getY(c)*h);
+    }
+  });
+  return cov;
+}
+function ihcClusterBuckets(buckets,maxClusters){
+  let arr=Array.from(buckets.values()).map(e=>({count:e.count,color:[e.r/e.count,e.g/e.count,e.b/e.count]}));
+  arr.sort((a,b)=>b.count-a.count);
+  const merged=[];
+  for(const c of arr){
+    const dupe=merged.find(m=>{const dr=m.color[0]-c.color[0],dg=m.color[1]-c.color[1],db=m.color[2]-c.color[2];return dr*dr+dg*dg+db*db<1600;});
+    if(dupe)dupe.count+=c.count;else merged.push({count:c.count,color:c.color});
+    if(merged.length>=maxClusters*4)break;
+  }
+  merged.sort((a,b)=>b.count-a.count);
+  const total=merged.reduce((s,c)=>s+c.count,0)||1;
+  return merged.map(c=>({color:c.color,share:c.count/total}));
+}
+/* ONE shared 2048² mask for the whole kit, not one per piece: every piece
+   owns a disjoint set of atlas texels (its own UV islands), so their
+   classifications can live side by side in a single texture — nine separate
+   masks would have cost ~150MB of texture memory for zero extra information.
+   Each piece's material samples this same mask but multiplies it by its OWN
+   three zone colors, which is exactly what makes the pieces independent.
+   Built in two passes over the atlas (bucket colors per piece, then classify)
+   plus the UV rasterization, and cached for the whole session — the result
+   depends only on the shared atlas + shared geometry, never on an entity. */
+let _ihcKitCache=null;
+function ihcBuildKitMask(visual){
+  if(_ihcKitCache)return _ihcKitCache;
+  const meshNames=[...new Set(IHC_PIECES.map(p=>p.mesh))];
+  const first=meshNames.map(n=>visual.getObjectByName(n)).find(m=>m&&m.material&&m.material.map);
+  if(!first)return null;
+  const imgData=getImageDataFromTexture(first.material.map);
+  const w=imgData.width,h=imgData.height,src=imgData.data;
+  /* owner[p] = 1-based index into meshNames, or 0 for "no piece" */
+  const owner=new Uint8Array(w*h);
+  let overlaps=0;
+  meshNames.forEach((name,mi)=>{
+    const mesh=visual.getObjectByName(name);
+    if(!mesh)return;
+    const cov=ihcMeshCoverage([mesh],w,h,null);
+    for(let p=0;p<cov.length;p++){
+      if(!cov[p])continue;
+      if(owner[p]&&owner[p]!==mi+1)overlaps++;
+      owner[p]=mi+1;
+    }
+  });
+  const Q=20,buckets=meshNames.map(()=>new Map());
+  for(let p=0;p<owner.length;p++){
+    const m=owner[p];if(!m)continue;
+    const i=p*4;if(src[i+3]<20)continue;
+    const r=src[i],g=src[i+1],b=src[i+2];
+    const key=(Math.round(r/Q)*Q)+','+(Math.round(g/Q)*Q)+','+(Math.round(b/Q)*Q);
+    const bm=buckets[m-1];
+    let e=bm.get(key);if(!e){e={count:0,r:0,g:0,b:0};bm.set(key,e);}
+    e.count++;e.r+=r;e.g+=g;e.b+=b;
+  }
+  /* A piece with only one real color in the atlas (the helmet shell, the
+     laces, the blade steel) gets ONE zone, not three empty sliders — trailing
+     clusters under 1% of the piece are dust (antialiased island edges) and
+     stay unrecolored, exactly like `fixed` colors always have. */
+  const palettes=meshNames.map((name,mi)=>{
+    const def=IHC_PIECES.find(p=>p.mesh===name&&p.splitSide!=='below');
+    const clusters=ihcClusterBuckets(buckets[mi],def.zones+2);
+    const recolor=clusters.slice(0,def.zones).filter((c,i)=>i===0||c.share>=0.01);
+    const fixed=clusters.slice(recolor.length);
+    return{recolor,fixed,fixedShare:fixed.reduce((s,c)=>s+c.share,0)};
+  });
+  const out=new Uint8Array(w*h*4);
+  for(let p=0;p<owner.length;p++){
+    const m=owner[p];if(!m)continue;
+    const o=p*4;if(src[o+3]<20)continue;
+    const pal=palettes[m-1];
+    const r=src[o],g=src[o+1],b=src[o+2];
+    let bestIdx=-1,bestD=Infinity;
+    pal.recolor.forEach((c,i)=>{const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;bestIdx=i;}});
+    pal.fixed.forEach(c=>{const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;bestIdx=-1;}});
+    if(bestIdx===0)out[o]=255;else if(bestIdx===1)out[o+1]=255;else if(bestIdx===2)out[o+2]=255;
+    out[o+3]=255;
+  }
+  const mask=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
+  mask.flipY=false;mask.wrapS=mask.wrapT=THREE.ClampToEdgeWrapping;mask.needsUpdate=true;
+  _ihcKitCache={mask,palettes,meshNames,overlaps};
+  return _ihcKitCache;
+}
+/* Builds every body piece's own material + zone list on one loaded player
+   visual. `decals` (the shared name/logo/paint atlas textures) is wired into
+   EVERY piece, not just the jersey — that's what lets paint and decals show
+   up on pants/gloves/skates now that they no longer share the jersey's
+   material. Returns {pieceId:{def,zones,material}}. */
+function ihcBuildPieceKit(visual,decals){
+  const kit=ihcBuildKitMask(visual);
+  if(!kit)return{};
+  const out={};
+  const byMesh={};
+  IHC_PIECES.forEach(def=>{(byMesh[def.mesh]=byMesh[def.mesh]||[]).push(def);});
+  kit.meshNames.forEach((meshName,mi)=>{
+    const mesh=visual.getObjectByName(meshName);
+    if(!mesh||!mesh.material)return;
+    mesh.material=mesh.material.clone(); // detach from the atlas-wide shared material
+    const pal=kit.palettes[mi];
+    const defs=byMesh[meshName];
+    const primary=defs.find(d=>d.splitSide!=='below')||defs[0];
+    const mkZones=def=>{
+      const colors=pal.recolor.map(c=>new THREE.Color(c.color[0]/255,c.color[1]/255,c.color[2]/255));
+      const zones=pal.recolor.map((c,i)=>({
+        label:(def.zoneLabels&&def.zoneLabels[i])||('Zone '+(i+1)),
+        color:colors[i],original:'#'+colors[i].getHexString(),share:c.share,
+        setColor(hex){colors[i].set(hex);},
+      }));
+      while(colors.length<3)colors.push(new THREE.Color(0,0,0)); // shader always reads 3
+      return{def,zones,colors,material:mesh.material,fixedShare:pal.fixedShare};
+    };
+    const above=mkZones(primary);
+    out[primary.id]=above;
+    const belowDef=defs.find(d=>d.splitSide==='below');
+    const below=belowDef?mkZones(belowDef):null;
+    if(below)out[belowDef.id]=below;
+    const pieceDecals=decals?(primary.nameplate?decals
+      :{logoMap:decals.logoMap,paintMap:decals.paintMap}):null;
+    installRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
+      below?{y:IHC_SPLIT_Y,colors:below.colors}:null);
+  });
+  return out;
+}
+
 /* Simple single-color tint zone for small dedicated-mesh parts (stick tape) —
    no mask/classification needed since the whole mesh IS the zone; material.color
    multiplies the existing map, so any tape-pattern detail baked into the texture
    still shows through the tint (matches how real tape striping looks). */
+/* ============================== STICK ZONES ==============================
+   Local-Y (pre-skin, unscaled) below which Plane001 is the BLADE paddle and
+   above which it is the bare composite shaft. See IH_STICK_BLADE_Y in
+   game.html — same constant, same derivation, keep them in sync.
+
+   Why this is NOT clustered from the texture like every other piece:
+   Plane001 and the two tape wraps SHARE one texture, and that texture does
+   contain both a black region and a white region — so clustering the whole
+   image happily reports a "51% white" cluster and a black one. But Plane001's
+   own UVs only ever sample the BLACK region (verified by reading the atlas
+   through this mesh's UVs: #010101 at every single vertex, in every band along
+   the shaft). The white cluster belongs to the tape meshes. So the "Blade"
+   zone got a colour no Plane001 fragment could ever match, its mask coverage
+   was empty, and one zone silently owned the entire stick — which is why the
+   Blade swatch moved nothing while the Shaft swatch repainted blade and all.
+
+   Geometry decides it instead, reusing the same uSplitY machinery that keeps
+   pants and socks independent on the single leg mesh. Profiling Plane001's
+   2989 verts in bands along its own axis shows a sharp transition at y~=0.09:
+   below it the mesh is dense and irregular (100-136 verts/band, radial std
+   0.028-0.074 — the paddle), above it a sparse near-round tube (12-49
+   verts/band, std 0.002-0.021). Render-verified: at 0.09 the split lands
+   exactly on the heel, by 0.11 it has crept visibly up the shaft. */
+const IHC_STICK_BLADE_Y=0.09;
+function setupStickZones(material){
+  const imgData=getImageDataFromTexture(material.map);
+  const src=imgData.data,w=imgData.width,h=imgData.height,out=new Uint8Array(w*h*4);
+  for(let p=0;p<w*h;p++){
+    const o=p*4;if(src[o+3]<20)continue;
+    out[o]=255;out[o+3]=255;             // one zone; geometry does the splitting
+  }
+  const mask=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
+  mask.flipY=false;mask.wrapS=mask.wrapT=THREE.ClampToEdgeWrapping;mask.needsUpdate=true;
+  const shaft=new THREE.Color('#101014'),blade=new THREE.Color('#101014'),unused=new THREE.Color(0,0,0);
+  installRecolorShader(material,mask,[shaft,unused,unused],null,
+    {y:IHC_STICK_BLADE_Y,colors:[blade,unused,unused]});
+  const mk=(label,c)=>({label,color:c,original:'#'+c.getHexString(),share:0.5,
+                        setColor(hex){c.set(hex);}});
+  return {material,shaft:mk('Shaft',shaft),blade:mk('Blade',blade)};
+}
+
 function setupTintZone(material,label){
   return{
     label,
@@ -354,7 +620,28 @@ const IHT_POLICY_CATEGORIES=[
    Blade Tape. Only used for contexts the player never opened in the editor. */
 const IHT_DEFAULT_STICK=['#101014','#e8e4da','#15161a','#f5f2e8'];
 
-function ihtDesign(body,font){return{body,font:font||'Arial',paintStrokes:[],decals:[],paintMirrorOn:true};}
+/* A jersey design is per-EQUIPMENT-PIECE now (see IHC_PIECES). `body` — the
+   old single Primary/Secondary/Trim triple that used to drive the entire kit
+   at once — is still written and read as the jersey's own triple so older
+   saves (and anything still reading the flat loadout's `body`) keep working.
+   Migration mirrors what the old atlas-wide mask actually did: the helmet
+   followed Secondary, the cage/laces/blades followed Trim, and the boots were
+   their own baked black — so a pre-per-piece kit comes back looking the same. */
+function ihtPiecesFromBody(b){
+  const body=(b&&b.length===3)?b:['#020c3d','#4c0a16','#ffffff'];
+  return{jersey:body.slice(),pants:body.slice(),socks:body.slice(),
+    gloves:[body[0],body[1]],helmet:[body[1]],cage:[body[2]],
+    skates:['#000000'],laces:[body[2]],blades:[body[2]]};
+}
+function ihtDesignPieces(design){
+  if(design.pieces)return design.pieces;
+  design.pieces=ihtPiecesFromBody(design.body);
+  return design.pieces;
+}
+function ihtDesign(body,font){
+  return{body,pieces:ihtPiecesFromBody(body),font:font||'Arial',
+    paintStrokes:[],decals:[],paintMirrorOn:true};
+}
 function ihtSeedStore(){
   /* Migration: whatever look the player had already built in the editor
      becomes their favourite team's home jersey + their personal kit, so
@@ -453,6 +740,10 @@ function ihtEffectiveLoadout(s,kit,teamId,jerseyId){
   return{
     v:1,
     body:j.design.body.slice(),
+    pieces:JSON.parse(JSON.stringify(ihtDesignPieces(j.design))),
+    paint:{strokes:j.design.paintStrokes||[],decals:j.design.decals||[],
+           accStrokes:ctx.accStrokes||[],accDecals:ctx.accDecals||[],
+           mirror:j.design.paintMirrorOn!==false},
     neck:kit.skin||'#c68863',
     stick:(ctx.stick||kit.defaultStick||IHT_DEFAULT_STICK).slice(),
     name:kit.name||'',

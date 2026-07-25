@@ -157,15 +157,16 @@ function poseArmsDown(){
 }
 
 function applyLoadout(){
-  const bodyMat=visual.getObjectByName('Cube001').material;
-  const bodyZM=setupZoneMaterial(bodyMat,3,['Primary','Secondary','Trim'],
-    {nameNumberMap:nnTex,logoMap:logoTex,paintMap:paintTex});
-  lo.body.forEach((h,i)=>bodyZM.setZoneColor(i,h));
-
-  const meshNeck=visual.getObjectByName('Cube');
-  meshNeck.material=meshNeck.material.clone();
-  const neckZone=setupZoneMaterial(meshNeck.material,1,['Skin']).zones[0];
-  neckZone.setColor(lo.neck);
+  // exact same per-piece pipeline the Locker Room builds the preview with —
+  // shared in core precisely so the menu and the editor can't drift apart
+  const pieces=ihcBuildPieceKit(visual,{nameNumberMap:nnTex,logoMap:logoTex,paintMap:paintTex});
+  const pieceColors=lo.pieces||ihtPiecesFromBody(lo.body);
+  Object.keys(pieceColors).forEach(id=>{
+    const p=pieces[id];
+    if(!p)return;
+    (pieceColors[id]||[]).forEach((h,i)=>{if(p.zones[i])p.zones[i].setColor(h);});
+  });
+  if(pieces.neck)pieces.neck.zones[0].setColor(lo.neck);
 
   // stick: same 3-mesh / cloned-tape-materials split as the editor
   const meshMain=stickGroup.getObjectByName('Plane001');
@@ -185,10 +186,14 @@ function applyLoadout(){
   // the uMirrorPaint uniform only exists once the program compiles — poll
   // the shaderRef the recolor pipeline stashes and set it as soon as it's up
   if(!mirrorOn){
+    const mats=[...new Set(Object.keys(pieces).map(id=>pieces[id].material).filter(Boolean))];
     const setMirror=()=>{
-      const ref=bodyMat.userData.shaderRef;
-      if(ref&&ref.uniforms.uMirrorPaint){ref.uniforms.uMirrorPaint.value=0;return true;}
-      return false;
+      let n=0;
+      mats.forEach(m=>{
+        const ref=m.userData.shaderRef;
+        if(ref&&ref.uniforms.uMirrorPaint){ref.uniforms.uMirrorPaint.value=0;n++;}
+      });
+      return n===mats.length;
     };
     if(!setMirror()){
       let tries=0;
@@ -224,6 +229,7 @@ let loaded=0;const done=()=>{if(++loaded===2)start();};
 gltfLoader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
   remapBoneNames(gltf.scene);
   visual=gltf.scene;
+  ihcNoCull(visual);
   let box=new THREE.Box3().setFromObject(visual),size=new THREE.Vector3();box.getSize(size);
   visual.scale.setScalar(1.75/(size.y||1));
   box=new THREE.Box3().setFromObject(visual);visual.position.y=-box.min.y;
@@ -241,7 +247,7 @@ gltfLoader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
   done();
 },e=>{console.warn('menu player load failed',e);});
 gltfLoader.parse(b64ToBuf(STICK_B64),'',gltf=>{
-  stickGroup=gltf.scene;scene.add(stickGroup);placeStickRest();done();
+  stickGroup=gltf.scene;scene.add(stickGroup);ihcNoCull(stickGroup);placeStickRest();done();
 },e=>{console.warn('menu stick load failed',e);});
 
 function start(){

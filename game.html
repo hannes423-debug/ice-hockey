@@ -46,6 +46,13 @@
   /* EA-style stamina bar floating under the player indicator */
   #stamWrap{position:fixed;z-index:6;width:64px;height:7px;margin-left:-32px;border-radius:4px;background:rgba(8,18,30,.6);border:1px solid rgba(150,200,255,.35);pointer-events:none;display:none;}
   #stamBar{height:100%;border-radius:3px;background:#46e08a;width:100%;}
+  /* EA/2K-style name tag, sits just under the stamina bar (which itself sits
+     under the player indicator ring). Fades rather than pops so the
+     "with puck" mode doesn't flicker as possession changes hands. */
+  #nameTag{position:fixed;z-index:6;transform:translateX(-50%);pointer-events:none;display:none;
+    font-size:11px;font-weight:800;letter-spacing:.08em;white-space:nowrap;color:#eaf6ff;
+    text-shadow:0 1px 3px rgba(0,0,0,.85),0 0 6px rgba(0,0,0,.6);
+    opacity:0;transition:opacity .18s linear;}
   body.hideCursor,body.hideCursor #app,body.hideCursor canvas{cursor:none;}
   #cursorReticle{position:fixed;z-index:8;width:34px;height:34px;margin:-17px 0 0 -17px;pointer-events:none;
     border:2px solid rgba(255,90,60,.95);border-radius:50%;box-shadow:0 0 10px rgba(255,90,60,.6);display:none;}
@@ -71,12 +78,13 @@
   <button id="camBtn" class="btn">First person: OFF</button>
   <div id="stick" class="idle"><div id="knob"></div></div>
   <div id="sprintBtn" class="actBtn">SPRINT</div>
-  <div id="pivotBtn" class="actBtn">PIVOT</div>
+  <div id="pivotBtn" class="actBtn">LOCK</div>
   <button id="camFocusBtn" class="btn">Cam: Player (Tab)</button>
   <div id="cursorReticle"></div>
   <div id="cursorDot"></div>
   <canvas id="gestCanvas"></canvas>
   <div id="stamWrap"><div id="stamBar"></div></div>
+  <div id="nameTag"></div>
   <div id="puckArrow" class="edgeArrow"></div>
   <div id="playerArrow" class="edgeArrow"></div>
   <div class="hint" id="hintL">LEFT THUMB — MOVE</div>
@@ -3755,6 +3763,31 @@ const CONFIG={
      when pivot was toggled on — softer than active turning (turnLerp) so
      the lock reads as planted skates holding a line, not a rigid clamp. */
   pivotLockLerp:0.14,
+  /* MOHAWK TURN (Q/E, angle lock off — see mohawkStart/updatePlayer).
+     mohawkDur: a real heel-to-heel transition is quick — coaching video puts
+     the open-and-through at roughly a third of a second, and the whole point
+     of choosing it over a crossover-around pivot is that it barely costs
+     anything, hence the small mohawkSpeedCost (edge scrub only, ~5%).
+     mohawkLockLerp is how hard the hips chase the turn while it's happening
+     (the normal lock spring is far too soft to carry a 180).
+     lockTurnRate (rad/s) is the slow Q/E re-aim available while the angle is
+     LOCKED — roughly 100 deg/s, a pivot on the edges, not a spin. */
+  mohawkDur:0.34,mohawkSpeedCost:0.05,mohawkLockLerp:0.42,lockTurnRate:1.8,
+  /* mohawk POSE (applyJointFlex): mohawkTurnout is the extra hip external
+     rotation that opens the feet heel-to-heel, mohawkKneeDip the deeper bend
+     that carries the weight across, mohawkLead how far the shoulders/head
+     turn AHEAD of the hips (coaching cue: lead with the upper body, the hips
+     and skates follow). All three peak mid-transition and ease back out. */
+  mohawkTurnout:0.55,mohawkKneeDip:0.22,mohawkLead:0.45,
+  /* ANCHORED SKILL STICK (F toggle, MKB — see toggleSkillStick/ssUpdate):
+     ssRadiusFrac — full stick deflection in screen px as a fraction of the
+     short viewport edge (resolution/zoom independent: the same wrist motion
+     is always the same deflection, unlike the old absolute mapping where
+     the gesture scale changed with camera distance). ssDriftRate — how fast
+     the anchor chases the cursor (per-second), the "spring back to neutral"
+     a mouse doesn't have: hold still and the stick re-centers on its own,
+     same trick gyro-aim games use. */
+  ssRadiusFrac:0.17,ssDriftRate:1.1,
   /* stamina (EA NHL 25 energy model, adapted for no line changes:
      recovery happens on the ice). ONLY hustle/sprint drains — normal
      skating is sustainable and slowly regains energy, coasting on
@@ -4084,9 +4117,37 @@ const CONFIG={
   camDist:14,camHeight:12,camDistNear:6.5,camHeightNear:5.5,zoomT:0,
   camLook:1.1,camLerp:0.12,camVelLead:0.45,camSprintKick:1.6,
   eyeHeight:1.62,firstPerson:false,
-  robotScale:1.0,robotYaw:0,
+  robotScale:1.0,robotYaw:0,armStretch:1.32, // see stretchArms — this rig's arms are stylized short
+
   invertX:true,invertY:false,
-  gripFwd:0.31,gripUp:1.55,gripRight:0.16,
+  /* TOP-HAND GRIP ANCHOR — where the butt end of the stick is held.
+     Re-derived from this rig's own measurements after the model swap (the
+     old numbers were tuned for the previous asset and put the anchor at
+     y=1.55, ABOVE this model's 1.51 shoulders, which is what buried both
+     arms inside the torso). Real ready stance: top hand at waist/lower-rib
+     height on the strong side, slightly in front of the hip — for this
+     1.75m rig that's y≈1.20, 0.30 forward, 0.10 to the player's own right
+     (gripRight is along right(heading), which is the player's LEFT at this
+     rig's facing, hence the negative). The shoulder→wrist bones measure
+     only 0.449m on this stylized low-poly rig (a real 1.75m human is
+     ~0.56), so every hand target has to stay inside that sphere — this one
+     sits 0.39 from the shoulder, leaving a natural elbow bend. */
+  /* Re-tuned again after render+measurement: at gripFwd 0.38 the top hand sat
+     only 0.15 in FRONT of the spine (the stance's own forward lean already
+     carries the chest 0.23 ahead of the root), so both arms folded flat
+     against the ribs and the upper arms disappeared inside the jersey — the
+     "arms are inside the body" report. Pushing the anchor out to 0.54 and
+     0.15 to the strong side puts the hands genuinely in front of the chest;
+     measured elbow clearance from the spine axis goes 0.24/0.28 -> 0.24/0.36
+     and both upper arms clear the torso silhouette on a front render.
+     gripUp/iceBaseFwd are then set by a second constraint: the shaft has a
+     FIXED length, so the pair has to keep it spanning hand-to-ice exactly or
+     the blade floats above the ice / sinks through it. Swept against the
+     stick's real (CPU-skinned) lowest point: 1.30/0.90 buried the blade
+     0.096 under the ice, 1.42/0.98 floated it 0.028 above, 1.38/0.95 lands it
+     at -0.015 — flat on the ice. That grip height also happens to give
+     slightly MORE elbow clearance (0.264 vs 0.242), so nothing is traded. */
+  gripFwd:0.54,gripUp:1.38,gripRight:0.15,
   poleDown:0.55,
   /* stickLen is the real, physical stick length (grip to blade tip), in
      meters — sized off real hockey stick-fitting charts: ~0.83x standing
@@ -4103,24 +4164,46 @@ const CONFIG={
      (was stickRotZ on the old Z-axis stick) — 90° turns the blade from
      lying flat to standing edge-on, verified with an offline render. */
   stickLen:1.45,stickAxis:'y',stickMin:-0.005528158973902464,stickMax:1.204079031944275,
-  stickFlip:true,stickOffX:0,stickOffY:0,stickOffZ:0,stickRotX:0,stickRotY:1.5708,stickRotZ:0,
+  stickFlip:true,stickOffX:0,stickOffY:0,stickOffZ:0,stickRotX:0,stickRotY:0,stickRotZ:0,
   snapAlong:0.06,gripLock:1,
   lMode:0,lSlideT:0.45,lFreeX:-0.25,lFreeY:0.9,lFreeZ:0.35,
   rPalmX:0.06,rPalmY:0,rPalmZ:0.015,lPalmX:0.06,lPalmY:0,lPalmZ:0.015,
   gripOrient:1,rGripAxX:0,rGripAxY:0,rGripAxZ:1,rHandTwist:0,
   lGripAxX:0,lGripAxY:0,lGripAxZ:1,lHandTwist:0,
   puckEdit:0,puckEdX:0.35,puckEdY:0.03,puckEdZ:0.9,
-  botFracMin:0.35,botFracMax:0.62,slideReachMin:0.45,slideReachMax:1.3,
+  /* lower hand's slide down the shaft, as a fraction of stick length below
+     the butt: a real stickhandling grip separates the hands by roughly a
+     shoulder width (~0.32m = 0.22 of a 1.45m stick) and widens toward a
+     shooting grip (~0.58m) as you reach further out. */
+  botFracMin:0.20,botFracMax:0.28,slideReachMin:0.45,slideReachMax:1.3,
   handRollFactor:0.8,handRollBase:0,
-  rHandAlong:0.96,rHandX:-0.1969,rHandY:0.809,rHandZ:0.0799,rRoll:-0.66,
+  /* skill-stick grip excursion (see poseStick): how much of the puck's own
+     lateral/forward offset the HANDS follow, how far they may travel, how
+     much the top hand drops as it extends, and how quickly it all tracks.
+     bladeRoll* rolls the stick on its own axis with the reach so the blade
+     turns over toward the backhand instead of holding one fixed face. */
+  gripFollowLat:0.32,gripFollowLatMax:0.22,
+  gripFollowFwd:0.28,gripFollowFwdMax:0.14,
+  gripFollowDrop:0.35,gripFollowRate:11,
+  bladeRollFactor:0.45,bladeRollMax:0.75,
+  // hand sits exactly ON the anchor now; the old huge offsets were fighting
+  // an equally large armExtR shrink, and the pair netted out to "hands in
+  // the chest" on this rig.
+  rHandAlong:0,rHandX:0,rHandY:0,rHandZ:0,rRoll:-0.66,
   lHandAlong:0,lRoll:0,
   rElbowX:-1.4518,rElbowY:-1.7678,rElbowZ:-3.3219,lElbowX:-0.17,lElbowY:-0.11,lElbowZ:0.91,
   tpsAimDist:7,orbitSpeed:2.2,
   bodyOffX:-0.02,bodyOffY:0,bodyOffZ:0.17,bodyRotY:0,
-  armExtR:-0.46,fWristR:0.2,fWristL:0.58,
-  rSwivel:-0.18,lSwivel:-1.5,
-  rElbowPin:1,rElbowPX:-2.1267,rElbowPY:-0.6977,rElbowPZ:-0.2559,
-  lElbowPin:1,lElbowPX:0.8,lElbowPY:-0.12,lElbowPZ:-0.565,
+  armExtR:0,fWristR:0.2,fWristL:0.58,
+  rSwivel:0,lSwivel:0,
+  /* Elbow pins are anatomical now: each is an actual point where that elbow
+     should sit relative to its own shoulder (out to the side and below,
+     slightly forward) — a hockey player's elbows hang OUT away from the
+     ribs, which is also what keeps the forearms from drawing through the
+     jersey. (The pin only supplies a direction — mid-shoulder-to-hand
+     toward the pin — so what matters is where it points, not how far.) */
+  rElbowPin:1,rElbowPX:-0.40,rElbowPY:-0.28,rElbowPZ:0.16,
+  lElbowPin:1,lElbowPX:0.40,lElbowPY:-0.26,lElbowPZ:0.16,
   /* skating ready stance (ice hockey only) — sourced from on-ice biomechanics
      studies: chest-over-knees forward lean, ~90-110deg knee flexion for an
      athletic/elite stance (vs. 120-140deg for a casual skater — we split the
@@ -4129,8 +4212,48 @@ const CONFIG={
      dorsiflexion to keep weight forward on the blades, and hip turnout
      (external rotation) since push-offs happen at ~45deg off the skating
      direction, which starts from a turned-out hip. */
-  fSpine1:0.32,fSpine2:-0.02,fSpine3:-0.12,fNeck:-0.06,fHead:-0.26,headLookAt:0.5,
-  fHipR:0.3,fHipL:0.3,fKneeR:0.42,fKneeL:0.42,fAnkleR:0.12,fAnkleL:0.12,
+  /* Deepened for this pass. The old numbers (hip 0.30 / knee 0.42) left the
+     skater standing nearly upright — shoulders at 1.50 on a 1.75m rig — which
+     is both unlike a real hockey ready stance AND the reason the lower hand
+     couldn't reach the shaft: the shaft's usable stretch sits ~0.55m below
+     shoulder height, past this rig's arm length. A real athletic stance
+     (~50-60deg knee flexion, chest over the knees) drops the shoulders ~0.15
+     and pushes them forward, which is exactly the direction that makes the
+     two-handed grip physically reachable. stanceSink lowers the root to keep
+     the skates ON the ice while the knees bend — without it the whole
+     character floats (the same correction goaliePose needed). */
+  /* HIP SIGN CORRECTED 2026-07-25 — the numbers above were written when the
+     comment on flexBone still claimed "positive Rv = hip flexes FORWARD". It
+     doesn't: legStridePose already measured that a POSITIVE thigh flex about
+     right(heading) swings the leg BACKWARD (that measurement is what fixed the
+     inverted stride), but the stance itself was never re-signed to match, so
+     the ready stance was extending both hips backwards while the knees folded
+     the shins back too — the skates ended up 0.36 BEHIND the hips and, because
+     bending a knee on this rig lifts the foot instead of dropping the hips,
+     0.09 in the AIR (measured: sole y +0.114 against a stanceSink of only
+     0.02). That is the "legs trail behind the player and never look planted"
+     report. Re-measured on the real rig (CPU-skinned sole height, not the
+     bind-pose bounding box, which says nothing about a posed skinned mesh):
+        hip +0.34 knee 0.48  skate 0.355 BEHIND hip, sole +0.114  (old)
+        hip -0.45 knee 0.60  skate 0.074 AHEAD of hip, knee 0.19 ahead,
+                             sole +0.021, feet 0.52 apart            (new)
+     So the hips now genuinely flex forward, the knees stack over the toes and
+     the chest sits over the knees — a real athletic ready stance. stanceSink
+     is re-measured to match (see stanceWiden, which lifts the soles further).
+     Knee/ankle signs were already right: a positive calf flex folds the shin
+     back under, which is what a knee does. */
+  fSpine1:0.38,fSpine2:0.0,fSpine3:-0.10,fNeck:-0.06,fHead:-0.28,headLookAt:0.5,
+  fHipR:-0.45,fHipL:-0.45,fKneeR:0.60,fKneeL:0.60,fAnkleR:0.14,fAnkleL:0.14,
+  /* stanceWiden: hip ABduction (rotation about fwd(heading)), pushing both
+     skates out from under the hips so the base is wide enough to look stable
+     rather than tightrope-narrow — the flipped stance stands 0.52 apart on its
+     own, this takes it to ~0.62 (measured), close to the shoulder-plus width
+     every one of the reference photos shows. MEASURED SIGN: about fwd(heading),
+     NEGATIVE abducts the right leg outward and POSITIVE abducts the left, i.e.
+     the two sides mirror (the old "positive = outward for either leg" comment
+     in legStridePose was wrong the same way the hip one was). */
+  stanceWiden:0.08,
+  stanceSink:0.035,
   hipTurnoutR:0.25,hipTurnoutL:-0.25,
   /* procedural crossover/turn-lean, driven by realized turn rate x speed
      (see updatePlayer): crossoverTurnGain converts rad/s into a 0-1 blend,
@@ -4141,13 +4264,35 @@ const CONFIG={
      body leans into a hard turn. */
   crossoverTurnGain:1.1,crossoverCadence:5.5,crossoverOutAmp:0.55,crossoverInAmp:0.22,
   crossoverLift:0.3,bankMaxAngle:0.35,
+  /* stride shape (see legStridePose): strideFwdGain scales the forward half of
+     the hip swing (recovery), strideBackGain the backward half (push), both
+     measured AROUND the new stance base rather than the old backwards one —
+     with the base itself now sitting 0.45 forward, the old fwdGain of 2.4
+     would have kicked the recovery leg 1.65 rad out in front. Measured skate
+     travel over a full cycle at amp=1: 0.36 behind the hip to 0.31 in front,
+     lifting 0.21 at the top of the recovery. strideKneeLift adds hip flexion
+     through that recovery (the knee rising forward); strideKneeAmp is the
+     recovery knee fold. */
+  /* strideAbdGain: how far the pushing leg swings OUT to the side. Was a
+     hardcoded 0.55, which on the corrected mirrored abduction axis lifted the
+     pushing skate to y=0.555 — a leg kicked up sideways behind the player.
+     0.35 keeps the push-side skate at the same 0.496 the recovery already
+     peaks at, i.e. the only thing lifting off the ice is the recovery leg,
+     which is what actually happens. */
+  strideFwdGain:1.1,strideBackGain:1.4,strideKneeLift:0.26,strideKneeAmp:0.55,strideAbdGain:0.35,
+  cadenceIdleHz:0.9, // only used when there is no skating state to read a cycle from
   reachRadius:1.3,
-  /* puck sits ~0.65m (~26in) in front of the skates — a typical close-control
-     handling distance — and the fan is sized off the real hand-spacing rule
-     (bottom hand slides roughly a body-width down the shaft, top hand fixed):
-     ~0.7m forehand reach, ~0.4m backhand (shorter, wrist can't roll as far),
-     ~0.5m depth each way for the push/pull cushioning motion. */
-  iceHeight:0.045,iceBaseFwd:0.65,iceForehandRange:0.82,iceBackhandRange:0.44,
+  /* puck sits ~0.88m in front of the skates — the distance a 1.45m stick
+     held at a real waist-height grip (gripUp/gripFwd) actually reaches with
+     the blade FLAT on the ice: sqrt(1.39² - 1.16²) ≈ 0.76 from the hands,
+     +0.30 hand offset, minus a blade's half-length (the puck rides the
+     middle of the blade, not the tip). Raised from 0.65 together with the
+     grip rework — at the old anchor height the shaft couldn't physically
+     span hand-to-ice, so the blade floated. The fan is sized off the real
+     hand-spacing rule (bottom hand slides roughly a body-width down the
+     shaft, top hand fixed): ~0.8m forehand reach, ~0.44m backhand (shorter,
+     wrist can't roll as far), ~0.5m depth each way for push/pull cushioning. */
+  iceHeight:0.045,iceBaseFwd:0.95,iceForehandRange:0.82,iceBackhandRange:0.44,
   /* zoneMidHalf widened from 0.35: the grip's rightward offset (gripRight)
      means the stick's natural resting angle (dead-ahead aim, no mouse
      input) sits at lat~=-0.44 rad, not 0 — with the old threshold that
@@ -4231,9 +4376,38 @@ const CONFIG={
      shaft at the sky — see poseAimPt in updatePlayer) with a front-leg
      weight-transfer lean and a brief low follow-through sweep instead of
      an instant pose snap. */
+  /* WINDUP DRAW-BACK (see the shootHeld branch of poseAimPt): where the puck
+     is dragged to while a wrist/backhand/pass is being loaded, relative to
+     the skater — BEHIND the hips (shotLoadBack is measured along fwd, so a
+     negative number is behind) and out to the strong side, blade cupped, the
+     puck riding just off the ice as the blade rolls over it (shotLoadLift).
+     shotLoadDur is how long the draw takes to reach full load. Kept well
+     inside the stick's reach envelope so the arms never have to unstick from
+     the shaft to get there. */
+  shotLoadBack:-0.34,shotLoadSide:0.46,shotLoadLift:0.02,shotLoadDur:0.30,
   shotBladeLift:0.3,shotFollowDur:0.22,shotFollowReach:0.9,shotLeanFwd:0.12,
   shotLeanSpine1:0.16,shotLeanSpine2:0.1,shotLeanSpine3:0.05,
-  shotLeanHipR:0.16,shotLeanHipL:0.16,shotLeanKnee:0.22,
+  /* WRIST-SHOT WEIGHT TRANSFER (rebuilt 2026-07-25 off the reference photos +
+     the wrist-shot-mechanics sequence): a real wrister is not a symmetric
+     "sink lower on both legs" — it is a STAGGER. The puck starts back by the
+     rear skate, and as it sweeps forward the whole body's weight rolls onto
+     the FRONT leg (the one opposite the shooting side), which steps out ahead
+     and takes a deep knee bend, while the REAR leg extends and trails behind
+     and out to the side, pushing off the inside edge. The old code added the
+     same positive lean to BOTH hips, which — with the sign bug above — just
+     shoved both legs further backwards.
+     shotStanceFront/Rear are hip swing (front negative = forward, rear
+     positive = trailing back), *Knee the matching knee bend (front folds,
+     rear straightens), *Abd how far each leg spreads sideways for the wide
+     base. Measured at full follow-through: front skate 0.19 ahead of its hip,
+     rear skate 0.17 behind its, 0.36 of fore-aft stagger between the feet. */
+  shotStanceFrontHip:-0.35,shotStanceFrontKnee:0.25,shotStanceFrontAbd:0.08,
+  shotStanceRearHip:0.60,shotStanceRearKnee:-0.45,shotStanceRearAbd:0.18,
+  /* a wide, lunging stance is a LOWER one — spreading the legs this far lifts
+     the soles 0.019 above the idle stance sink (measured), so the root drops
+     by the same amount through the shot. Grounds the skates and gives the
+     "load down into the shot, rise out of it" beat for free. */
+  shotSink:0.02,
   /* puckFriction is now a real kinetic-friction coefficient (mu), not a
      decay rate — see updatePuck. Regulation puck-on-ice measures ~0.05-0.2;
      0.08 sits toward the slick/well-maintained end (NHL-grade ice). */
@@ -4741,6 +4915,15 @@ function updateSkating(E,dirX,dirZ,sprint,braking,dt,steerHeading){
       sk.phase=sk.phase==='push'?'glide':'push';
       sk.phaseT=sk.phase==='push'?pushDur:glideDur;
     }
+    /* the VISUAL stride now runs at exactly this rate (see applyJointFlex):
+       push+glide is ONE leg's turn, so a full two-legged cycle is twice it.
+       The animation used to free-run at its own made-up 1.5-4.5 Hz, i.e.
+       3-9 strides/s where this simulation is doing 2.4-3.3 — that mismatch
+       is what read as "the legs move way too fast". Elite on-ice stride
+       rate is ~2.5-3 strides/s cruising and ~3.5-4 flat out, so the
+       simulated cycle was already the realistic one; the legs just weren't
+       following it. */
+    sk.cycleDur=Math.max(0.12,2*(pushDur+glideDur));
     if(reversing||vLen<CONFIG.carveMinSpeed){
       // reversal / near-stand: free instant steering, no carve arc,
       // no push/glide gating — "turn on a dime near a stop" plus the
@@ -4874,10 +5057,46 @@ function remapBoneNames(root){
   });
 }
 
+/* SKINNED MESHES MUST NOT BE FRUSTUM-CULLED HERE.
+   three.js culls against geometry.boundingSphere, which is computed from the
+   BIND POSE — but every mesh on these rigs renders wherever the bones drag it,
+   which on the stick is over a metre away from its bind position. Measured:
+     Plane005 (grip tape)  bind sphere @ (0.46,2.63,-2.77) r=0.10, actually
+                           renders @ (0.07,1.34,-2.63)  -> drift 1.29m >> r
+     Plane002 (blade tape) drift ~1.5m, r=0.08
+   The sphere therefore misses the real mesh entirely and both tape wraps get
+   culled on almost every frame — which is why the handle tape looked like it
+   had "no separate texture": it was never drawn at all, so its own material
+   colour could not show. The body meshes drift too (0.16-0.52m) but their
+   radii are large enough to still cover themselves, so they only pop at
+   screen edges. Disabling the test on ~12 always-on-screen character meshes
+   costs nothing and is the standard fix for posed skinned geometry. */
+function ihNoCull(root){root.traverse(o=>{if(o.isMesh)o.frustumCulled=false;});}
+
 let player=null,stickGroup=null,puck=null;
 const clock=new THREE.Clock();
 let camYaw=0,firstFrame=true,cameraFocus='player';
 
+/* This rig's arms are stylized SHORT: shoulder→wrist measures 0.449m on a
+   1.75m character where a real person's is ~0.56, and with the palm offset the
+   effective grip reach is ~0.51. That's the actual reason a correct two-handed
+   hockey grip was geometrically impossible here — with the top hand at the hip
+   and the blade on the ice ~0.9m ahead, the lower hand's place on the shaft
+   sits ~0.64m from the left shoulder, so the IK clamp slid it all the way back
+   up to the butt and both hands bunched together in front of the chest.
+   Lengthening the two arm segments (translation only — the glove mesh keeps
+   its size, the sleeve just stretches) buys the reach that grip needs. Applied
+   to every character built through createPlayer, so player, bots and goalie
+   all keep the same proportions. */
+function stretchArms(v,k){
+  if(!k||k===1)return;
+  ['r','l'].forEach(s=>{
+    const fore=v.getObjectByName('lowerarm_'+s),hand=v.getObjectByName('hand_'+s);
+    if(fore)fore.position.multiplyScalar(k);
+    if(hand)hand.position.multiplyScalar(k);
+  });
+  v.updateMatrixWorld(true);
+}
 function findArm(v,s,scale){
   const upper=v.getObjectByName('upperarm_'+s),fore=v.getObjectByName('lowerarm_'+s),hand=v.getObjectByName('hand_'+s);
   if(!upper||!fore||!hand)return null;upper.updateWorldMatrix(true,true);
@@ -4921,6 +5140,7 @@ function createPlayer(gltf){
     ent.actions.idle=mk('Idle_Loop');ent.actions.run=mk('Walk_Loop');ent.actions.sprint=mk('Sprint_Loop');
     ent.actions.idle.play();ent.curAction=ent.actions.idle;
   }
+  stretchArms(v,CONFIG.armStretch); // before findArm — it measures the bones
   ent.armR2=findArm(v,'r',s);ent.armL2=findArm(v,'l',s);
   ent.spine=v.getObjectByName('spine_03');
   ent.joints={};
@@ -4932,6 +5152,7 @@ function createPlayer(gltf){
   // see resetPoseJoints() for why this matters without an AnimationMixer.
   for(const k in ent.joints)ent.joints[k].userData.restQuat=ent.joints[k].quaternion.clone();
   if(!ent.armL2)console.warn('street_hockey: left arm IK chain not found — off-hand will not track the stick');
+  ihNoCull(v); // posed skinned meshes: bind-pose bounding spheres cull wrongly
   return ent;
 }
 /* Resets every cached pose joint to its bind-pose quaternion. flexBone()
@@ -5030,31 +5251,53 @@ function flexBone(bone,worldAxis,ang){
    simulates (sk.state/E.vel), so the visual stride matches what the
    physics is actually doing instead of running an unrelated animation
    loop alongside it. Uses the SAME world axes (Rv=hip flex/extend,
-   F=hip abduct/adduct) and the SAME sign convention already established
-   by the ready-stance/crossover code just below/above this function
-   (positive Rv flex = hip flexes forward same as fHipR/fHipL; positive F
-   rotation = abducts outward for EITHER leg, same as the crossover code).
+   F=hip abduct/adduct) and the SAME (measured, see below) sign convention as
+   the ready-stance code: about Rv a positive thigh flex swings the leg BACK
+   and a negative one FORWARD; about F the two legs mirror each other, so
+   abducting outward is negative on the right leg and positive on the left.
    phase convention: 0 = leg fully back at the end of push, π/2 = mid-
    recovery (knee driving forward+up), π = leg forward at the catch,
    3π/2 = mid-push (driving back and out). */
 function legStridePose(J,side,phase,amp,Rv,F){
   const thigh=J['thigh_'+side],calf=J['calf_'+side],foot=J['foot_'+side];
   if(!thigh||!calf)return;
-  const hipDrive=Math.sin(phase);                      // + forward(recovery/catch) / - back(push/trail)
-  const pushOut=Math.max(0,-Math.cos(phase));           // 0 through recovery/catch, peaks mid-push
-  const kneeBend=Math.max(0,Math.sin(phase-0.5));       // deepest through recovery, straightens through push/glide
-  flexBone(thigh,Rv,hipDrive*0.5*amp);
-  flexBone(thigh,F,pushOut*0.55*amp);
-  flexBone(calf,Rv,kneeBend*1.0*amp);
-  if(foot)flexBone(foot,Rv,-kneeBend*0.25*amp);
+  /* SIGN CONVENTION, MEASURED ON THIS RIG (the old comment had it backwards):
+     a POSITIVE flexBone(thigh,Rv,x) swings the leg BACKWARD, a negative one
+     swings it FORWARD. Sweeping the static stance hip from -0.8 to +0.8 moves
+     the skate monotonically from 0.54 in FRONT of the root to 0.44 BEHIND it.
+     The old code read sin(phase) as "+ forward", so the entire stride ran
+     inverted: the deep recovery knee-fold landed on the BACK half of the
+     swing and threw the skate up behind the player (measured 0.94-0.97 above
+     the ice, higher than the hip) while no phase of the cycle ever brought a
+     foot in front of the body at all.
+     Rebuilt around two explicit halves instead of a signed sine, so the sign
+     can't silently invert again:
+       push  (sin>0) — leg drives BACK and ABDUCTS out, knee straightening
+       recov (sin<0) — leg swings FORWARD, knee folds to clear the ice, and
+                       strideKneeLift adds the extra forward/up knee rise. */
+  const s=Math.sin(phase);
+  const push=Math.max(0,s),recov=Math.max(0,-s);
+  /* the abduction axis does NOT behave the same for both legs (the older
+     comment claimed it did): measured about fwd(heading), a NEGATIVE rotation
+     abducts the right leg outward and a POSITIVE one the left. Applying one
+     shared sign, as this used to, pushed the right leg out and pulled the left
+     one across the body — half the stride was a crossover it never meant. */
+  const abdOut=(side==='r')?-1:1;
+  flexBone(thigh,Rv,(push*CONFIG.strideBackGain-recov*CONFIG.strideFwdGain)*0.5*amp);
+  flexBone(thigh,F,abdOut*push*CONFIG.strideAbdGain*amp); // abduct outward through the push
+  flexBone(calf,Rv,recov*CONFIG.strideKneeAmp*amp);    // knee folds through the recovery
+  /* the "legs rise forward" beat the stride was missing entirely */
+  flexBone(thigh,Rv,-recov*CONFIG.strideKneeLift*amp);
+  if(foot)flexBone(foot,Rv,-recov*0.25*amp);
 }
 function applyJointFlex(ent,dt){
   if(!ent.joints)return;
   resetPoseJoints(ent); // see resetPoseJoints() — makes every flexBone call below safe with no mixer
   const J=ent.joints,Rv=right(ent.heading);
-  // wrist-shot weight transfer: front-loads the stance (more hip/knee bend,
-  // more forward spine flex) while winding up and following through, easing
-  // back out once the follow-through timer clears.
+  // wrist-shot weight transfer: staggers the stance onto the front leg and
+  // leans the chest out over it while winding up and following through,
+  // easing back out once the follow-through timer clears (see the stance
+  // block below and shotStance* in CONFIG).
   const sf=ent.shotFollow||0,bb=ent.brakeBlend||0,stb=ent.stumbleBlend||0,kn=ent.kneelBlend||0;
   // stumble wobble: a decaying side-to-side sway while recovering balance
   // after a hard board hit or a blown edge on a false start — the wobble
@@ -5064,18 +5307,73 @@ function applyJointFlex(ent,dt){
   flexBone(J.spine_02,Rv,CONFIG.fSpine2+sf*CONFIG.shotLeanSpine2-stb*CONFIG.stumbleSpineLean*0.6);
   flexBone(J.spine_03,Rv,CONFIG.fSpine3+sf*CONFIG.shotLeanSpine3+stumbleWobble);
   flexBone(J.neck_01,Rv,CONFIG.fNeck);flexBone(J.head,Rv,CONFIG.fHead);
-  // kneel (kn): double-knee block — thighs fold hard under (hip flex) and
-  // knees fold fully, dropping the shins flat; body sink comes from the
-  // root offset (kneelSink) in updatePlayer.
-  flexBone(J.thigh_r,Rv,CONFIG.fHipR+sf*CONFIG.shotLeanHipR+kn*0.4);
-  flexBone(J.thigh_l,Rv,CONFIG.fHipL+sf*CONFIG.shotLeanHipL+kn*0.4);
-  flexBone(J.calf_r,Rv,CONFIG.fKneeR+sf*CONFIG.shotLeanKnee+kn*1.6);
-  flexBone(J.calf_l,Rv,CONFIG.fKneeL+sf*CONFIG.shotLeanKnee+kn*1.6);
+  /* READY STANCE + WRIST-SHOT STAGGER.
+     Base hips/knees come straight from CONFIG (see the sign note there: a
+     NEGATIVE thigh flex about Rv is hip flexion = leg forward, a POSITIVE calf
+     flex folds the shin back).
+     Shot (sf): the front leg steps out ahead and folds, the rear leg extends
+     and trails — see shotStance* in CONFIG. FRONT-LEG SIDE: you always step
+     into a shot with the foot OPPOSITE the puck, so this reads off the side
+     the puck is actually carried and loaded on. This game's forehand is
+     +lat, which is +right(heading) (see the lat computation in poseStick) —
+     and right(h) is this rig's own LEFT — so the puck rides on the player's
+     left and the weight goes onto the RIGHT skate. shotLoadSide carries that
+     same sign (it IS the load point's offset), so deriving from it keeps the
+     stagger correct if the handedness is ever mirrored.
+     (This was backwards when the stagger was first built: it was derived
+     from gripRight, on the assumption that the top hand and the puck sit on
+     opposite sides. The game's own forehand geometry says otherwise.)
+     Kneel (kn): double-knee block — the thighs swing back to vertical under
+     the hips and the knees fold fully, dropping the shins flat; body sink
+     comes from the root offset (kneelSink) in updatePlayer. */
+  const frontIsLeft=CONFIG.shotLoadSide<0;
+  const fS=frontIsLeft?'l':'r',rS=frontIsLeft?'r':'l';
+  const shotHip={},shotKnee={},shotAbd={};
+  shotHip[fS]=sf*CONFIG.shotStanceFrontHip;  shotKnee[fS]=sf*CONFIG.shotStanceFrontKnee;
+  shotHip[rS]=sf*CONFIG.shotStanceRearHip;   shotKnee[rS]=sf*CONFIG.shotStanceRearKnee;
+  shotAbd[fS]=sf*CONFIG.shotStanceFrontAbd;  shotAbd[rS]=sf*CONFIG.shotStanceRearAbd;
+  flexBone(J.thigh_r,Rv,CONFIG.fHipR+shotHip.r+kn*0.4);
+  flexBone(J.thigh_l,Rv,CONFIG.fHipL+shotHip.l+kn*0.4);
+  flexBone(J.calf_r,Rv,CONFIG.fKneeR+shotKnee.r+kn*1.6);
+  flexBone(J.calf_l,Rv,CONFIG.fKneeL+shotKnee.l+kn*1.6);
   flexBone(J.foot_r,Rv,CONFIG.fAnkleR);flexBone(J.foot_l,Rv,CONFIG.fAnkleL);
-  // skating ready-stance turnout: hips externally rotated (toes/knees out)
-  // — a real skater pushes off at roughly a 45 degree angle off the skating
-  // direction, which starts from a turned-out hip, not a straight-ahead one.
-  flexBone(J.thigh_r,up,CONFIG.hipTurnoutR);flexBone(J.thigh_l,up,CONFIG.hipTurnoutL);
+  /* stance width: hip abduction about fwd(heading), MIRRORED between the two
+     sides (negative spreads the right leg, positive the left — measured on
+     this rig). Carries the shot's wider base on top of the idle width. */
+  const F0=fwd(ent.heading);
+  flexBone(J.thigh_r,F0,-(CONFIG.stanceWiden+shotAbd.r));
+  flexBone(J.thigh_l,F0, (CONFIG.stanceWiden+shotAbd.l));
+  /* skating ready-stance turnout: hips externally rotated (toes/knees out)
+     — a real skater pushes off at roughly a 45 degree angle off the skating
+     direction, which starts from a turned-out hip, not a straight-ahead one.
+     MOHAWK (mh): the transition is defined by its foot position — heels
+     together, toes pointing in OPPOSITE directions, hips opened wide, both
+     skates on one line riding edges. So the turnout goes hard asymmetric
+     for the length of the turn: the lead foot (the side you're opening
+     toward) rotates further out while the trailing one turns the other way,
+     which is literally toes-apart/heels-together, plus a deeper knee bend
+     and a wider base because that is what carries the weight transfer
+     across. Peaks mid-turn and eases back out. */
+  const mh=(ent.mohawkT||0)>0
+    ?Math.sin((1-clamp(ent.mohawkT/Math.max(0.01,CONFIG.mohawkDur),0,1))*Math.PI)
+    :0;
+  /* mohawkDir +1 = opening to the player's RIGHT. The LEAD foot (the one on
+     that side) rotates hard OUT while the trailing one rotates back the
+     other way — the toes end up pointing opposite along one line with the
+     heels close, which is the whole shape of the move. Note this rig's
+     turnout signs already mirror (R +, L -), so "more external" is + on the
+     right thigh and - on the left. */
+  const mhd=ent.mohawkDir||1,leadIsR=mhd>0;
+  flexBone(J.thigh_r,up,CONFIG.hipTurnoutR+mh*CONFIG.mohawkTurnout*(leadIsR?1:-0.45));
+  flexBone(J.thigh_l,up,CONFIG.hipTurnoutL+mh*CONFIG.mohawkTurnout*(leadIsR?0.45:-1));
+  if(mh>0.01){
+    flexBone(J.calf_r,Rv,mh*CONFIG.mohawkKneeDip);flexBone(J.calf_l,Rv,mh*CONFIG.mohawkKneeDip);
+    /* head and shoulders LEAD the rotation, hips follow. Turning toward the
+       player's right is a DECREASING heading on this rig (right(h) is its
+       own left), hence the -mhd. */
+    flexBone(J.spine_03,up,-mh*CONFIG.mohawkLead*mhd);
+    flexBone(J.neck_01,up,-mh*CONFIG.mohawkLead*0.6*mhd);
+  }
   /* hockey stop (Space): body is already yawed sideways to travel (root
      brakeYawCur) and leaned back away from it (bank channel). The legs do
      the real technique here: the LEADING leg (the one on the travel side)
@@ -5100,7 +5398,7 @@ function applyJointFlex(ent,dt){
   // applied separately as a root roll in updatePlayer.
   const cb=ent.crossoverBlend||0;
   if(cb>0.01){
-    const F=fwd(ent.heading),ph=ent.crossoverPhase||0,td=ent.turnDir||0;
+    const F=F0,ph=ent.crossoverPhase||0,td=ent.turnDir||0;
     const outIsRight=td<0;
     const swing=Math.sin(ph)*cb;
     const rAmp=(outIsRight?CONFIG.crossoverOutAmp:-CONFIG.crossoverInAmp)*swing;
@@ -5111,22 +5409,32 @@ function applyJointFlex(ent,dt){
     flexBone(outIsRight?J.calf_r:J.calf_l,Rv,lift*1.3);
   }
   // straight-line stride cycle (see legStridePose above) — fades out under
-  // crossover/brake footwork so they don't fight over the same leg bones,
-  // and fades toward a near-still idle stance when not actually skating.
-  const F3=fwd(ent.heading);
+  // crossover/brake footwork AND under a shot's planted stagger, so they don't
+  // fight over the same leg bones (a shot is taken off a planted, weight-
+  // transferring base, not mid-stride), and fades toward a near-still idle
+  // stance when not actually skating.
   const vLen=ent.vel?ent.vel.length():0;
   const speedFrac=clamp(vLen/CONFIG.moveSpeed,0,1);
   const sk=ent.skate;
-  const strideSuppress=Math.max(cb,bb);
+  const strideSuppress=Math.max(cb,bb,sf*0.85);
   const strideOn=!!sk&&sk.state!=='idle'&&sk.state!=='hardstop'&&strideSuppress<0.95;
-  const cadenceHz=1.5+speedFrac*3.0+(sk&&sk.state==='sprint_push'?0.8:0);
+  /* CADENCE IS THE SIMULATION'S, NOT THE ANIMATION'S. sk.cycleDur is the
+     push->glide->push->glide loop updateSkating is actually running (both
+     legs), so reading it here keeps the visible stride locked to the real
+     one at every speed and for sprint (sprint shortens the glide via
+     skSprintGlideMul, so it speeds up here for free). Measured: ~1.7 Hz
+     accelerating (short choppy strides, 3.3 strides/s), ~1.2 Hz at cruise
+     (long glides, 2.4 strides/s), ~1.5 Hz sprinting — against the 4.5 Hz /
+     9 strides-per-second the free-running animation used to hit.
+     cadenceIdleHz only matters for the near-still 0.05-amp idle sway. */
+  const cadenceHz=sk&&sk.cycleDur?1/sk.cycleDur:CONFIG.cadenceIdleHz;
   ent.strideCyclePhase=((ent.strideCyclePhase||0)+(dt||0)*cadenceHz*Math.PI*2)%(Math.PI*2);
   const strideAmp=(strideOn?(0.4+0.6*speedFrac):0.05)*(1-strideSuppress);
-  legStridePose(J,'r',ent.strideCyclePhase,strideAmp,Rv,F3);
-  legStridePose(J,'l',ent.strideCyclePhase+Math.PI,strideAmp,Rv,F3);
+  legStridePose(J,'r',ent.strideCyclePhase,strideAmp,Rv,F0);
+  legStridePose(J,'l',ent.strideCyclePhase+Math.PI,strideAmp,Rv,F0);
   // lateral weight rock: hips/spine sway toward whichever leg is gliding,
   // same phase signal as the stride so it doesn't fight the push/recovery.
-  flexBone(J.spine_01,F3,Math.sin(ent.strideCyclePhase)*0.05*strideAmp);
+  flexBone(J.spine_01,F0,Math.sin(ent.strideCyclePhase)*0.05*strideAmp);
 }
 
 /* ----- pose locks: per-part "permanent" (always hold this exact stance —
@@ -5164,6 +5472,21 @@ function lv(part,key,zoneNow){
   return lockActive(part,zoneNow)?lockedPoses[part][key]:CONFIG[key];
 }
 
+/* Real geometry of the stick asset in stickGroup space (see the long note in
+   poseStick's stickGroup block): where the blade and the butt actually sit,
+   and therefore which way the shaft actually runs.
+   Measured by walking every vertex through SkinnedMesh.boneTransform() and
+   tracing the centroid of each slab along the principal axis. The skinning
+   step matters: all three stick meshes are skinned, so the raw position
+   attribute is bind-pose data that the bone matrices then move — reading the
+   attribute directly (with the Armature node transform applied on top)
+   describes a shape 1.2m above where the stick actually renders. */
+const IH_STICK_BLADE=new THREE.Vector3(0.297,0.034,0.687); // middle of the blade — where the puck rides
+const IH_STICK_BUTT=new THREE.Vector3(-0.216,1.164,0.218);
+const IH_STICK_MESH_LEN=IH_STICK_BLADE.distanceTo(IH_STICK_BUTT);
+// unit vector butt -> blade: the direction the shaft must be aimed along
+const IH_STICK_AXIS=IH_STICK_BLADE.clone().sub(IH_STICK_BUTT).normalize();
+
 /* ----- stick pose (mirrors the grip+direction*length approach used for the sword in Spin Issue) ----- */
 function poseStick(ent,aim,dt){
   if(!ent.armR2)return;
@@ -5173,7 +5496,32 @@ function poseStick(ent,aim,dt){
   /* STICK IS MASTER: the shaft is defined first (snap anchor -> aim), then
      both hands IK onto points of the shaft. Moving the GRIP sliders moves the
      snap anchor; snapAlong slides the stick through the top hand. */
-  const anchor=ent.pos.clone().addScaledVector(F,CONFIG.gripFwd).addScaledVector(up,CONFIG.gripUp).addScaledVector(right(ent.heading),CONFIG.gripRight);
+  const Rv0=right(ent.heading);
+  const anchor=ent.pos.clone().addScaledVector(F,CONFIG.gripFwd).addScaledVector(up,CONFIG.gripUp).addScaledVector(Rv0,CONFIG.gripRight);
+  /* SKILL-STICK GRIP EXCURSION — the hands TRAVEL with the puck.
+     Real stickhandling is not a blade swinging around a fixed pivot: the top
+     hand sweeps across the hip toward whichever side the puck is on, pushes
+     forward and drops as the player extends into a reach, and comes back as
+     the puck comes back. Holding the grip at one body-fixed point (what this
+     did before) is exactly what makes stick movement read as a joystick —
+     the arms telescope while the shoulders never commit to the play.
+     Deliberately a FRACTION of the aim offset, not all of it: the blade still
+     travels much further than the hands do, which is the whole mechanical
+     advantage of a stick. Smoothed with an exponential lag so the weight
+     transfer has some mass instead of snapping frame-to-frame. */
+  {
+    const rel=aim.clone().sub(ent.pos);
+    const lat0=rel.dot(Rv0),fwd0=rel.dot(F);
+    const exLat=clamp(lat0*CONFIG.gripFollowLat,-CONFIG.gripFollowLatMax,CONFIG.gripFollowLatMax);
+    const exFwd=clamp((fwd0-CONFIG.iceBaseFwd)*CONFIG.gripFollowFwd,-CONFIG.gripFollowFwdMax*0.6,CONFIG.gripFollowFwdMax);
+    const exDown=(Math.abs(exLat)+Math.max(0,exFwd))*CONFIG.gripFollowDrop;
+    if(!ent.gripEx)ent.gripEx=new THREE.Vector3();
+    const k=1-Math.exp(-Math.max(0,dt||0)*CONFIG.gripFollowRate);
+    ent.gripEx.x+=(exLat-ent.gripEx.x)*k;
+    ent.gripEx.y+=(-exDown-ent.gripEx.y)*k;
+    ent.gripEx.z+=(exFwd-ent.gripEx.z)*k;
+    anchor.addScaledVector(Rv0,ent.gripEx.x).addScaledVector(up,ent.gripEx.y).addScaledVector(F,ent.gripEx.z);
+  }
   let dir=aim.clone().sub(anchor);if(dir.lengthSq()<1e-6)dir=up.clone().negate();
   const reach=dir.length();dir.normalize();
   let butt=anchor.clone().addScaledVector(dir,-CONFIG.snapAlong);
@@ -5331,19 +5679,37 @@ function poseStick(ent,aim,dt){
   ent.stickGrip.copy(CONFIG.gripLock>=0.5?butt.clone().addScaledVector(dir,CONFIG.snapAlong):anchor);
   ent.stickTip.copy(tip);ent.stickDir=dir.clone();
   if(stickGroup){
-    const scale=CONFIG.stickLen/(CONFIG.stickMax-CONFIG.stickMin);
-    const axisSign=CONFIG.stickFlip?-1:1;
-    const localAxis=(CONFIG.stickAxis==='z'?new THREE.Vector3(0,0,axisSign):new THREE.Vector3(0,axisSign,0));
-    const posSign=CONFIG.stickFlip?1:-1;
+    /* THE SHAFT IS NOT ALONG THE MESH'S LOCAL Y AXIS. The old code assumed it
+       was (stickAxis:'y', aligning local ±Y with the shaft direction) — true
+       of the previous asset, false of this one: measured in stickGroup space
+       the butt sits at (-0.44, 2.415, 0.069) and the blade heel at
+       (0.40, 1.336, -0.123), so the real shaft axis is ~38 degrees off local
+       Y (the Armature node carries a rotation the bounds-based tuning never
+       accounted for). Aligning the wrong axis is what threw the rendered
+       stick away from the hands that are IK'd onto the logical shaft.
+       Derivation: walk every vertex through the skinning transform, slice
+       along the principal axis and take each slab's centroid — that traces
+       the true shaft. Butt-to-blade-middle measures 1.328, which is what
+       CONFIG.stickLen scales to. */
+    const scale=CONFIG.stickLen/IH_STICK_MESH_LEN;
     stickGroup.scale.setScalar(scale);
     // Orient in the player's local frame so roll is tied to heading + hand
     // movement (setFromUnitVectors in world space has arbitrary roll that
     // drifts as the player turns, making the stick spin on its own axis).
     const qHead=new THREE.Quaternion().setFromAxisAngle(up,ent.heading);
     const dirLocal=dir.clone().applyQuaternion(qHead.clone().invert());
-    stickGroup.quaternion.copy(qHead).multiply(new THREE.Quaternion().setFromUnitVectors(localAxis,dirLocal));
-    stickGroup.position.copy(tip).addScaledVector(dir,posSign*CONFIG.stickMin*scale);
-    stickGroup.rotateX(lv('stick','stickRotX',zoneNow));stickGroup.rotateY(lv('stick','stickRotY',zoneNow));stickGroup.rotateZ(lv('stick','stickRotZ',zoneNow));
+    stickGroup.quaternion.copy(qHead).multiply(new THREE.Quaternion().setFromUnitVectors(IH_STICK_AXIS,dirLocal));
+    /* roll about the shaft itself: turns the blade from lying flat to edge-on.
+       Now REACH-DRIVEN on top of the static offset — a real player rolls the
+       stick over as the puck moves from the forehand to the backhand instead
+       of dragging one fixed blade face across the whole sweep, and cups the
+       blade over the puck at the extremes of the reach. */
+    const bladeRoll=lv('stick','stickRotY',zoneNow)+
+      clamp(lat*CONFIG.bladeRollFactor,-CONFIG.bladeRollMax,CONFIG.bladeRollMax);
+    stickGroup.rotateOnWorldAxis(dir,bladeRoll);
+    // blade heel lands ON the logical tip, whatever the roll ended up being
+    stickGroup.position.copy(tip).sub(IH_STICK_BLADE.clone().multiplyScalar(scale).applyQuaternion(stickGroup.quaternion));
+    stickGroup.rotateX(lv('stick','stickRotX',zoneNow));stickGroup.rotateZ(lv('stick','stickRotZ',zoneNow));
     // offsets in the shaft's own frame — they turn WITH the stick/hand,
     // instead of world axes that made the mesh orbit the player when turning
     const sSide=new THREE.Vector3().crossVectors(up,dir);
@@ -5420,6 +5786,39 @@ function updateReticle(){
   cursorDotEl.style.display='none';
   drawGestureTrail();
   reticle.visible=false;
+  updateSSViz();
+}
+/* skill stick ring: a soft ring on the ice at the ANCHOR (the stick's
+   neutral) with a dot showing the current deflection inside it — the
+   learnable "what does the game think my stick is doing" readout. Kept
+   visually quiet (pale, low alpha) so it reads under the purple aim
+   reticle rather than competing with it. Lazy-built on first need. */
+let ssViz=null;
+const _ssVizP=new THREE.Vector3();
+function updateSSViz(){
+  const show=skillStickOn&&!TOUCH&&mouseCtl.active
+    &&(!GAME.menuEl||GAME.menuEl.style.display==='none');
+  if(!ssViz){
+    if(!show)return;
+    const ring=new THREE.Mesh(new THREE.RingGeometry(0.50,0.56,36),
+      new THREE.MeshBasicMaterial({color:0xcfd8ea,transparent:true,opacity:0.38,side:THREE.DoubleSide,depthWrite:false}));
+    const dot=new THREE.Mesh(new THREE.CircleGeometry(0.085,18),
+      new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.85,depthWrite:false}));
+    ring.rotation.x=dot.rotation.x=-Math.PI/2;
+    ring.renderOrder=33;dot.renderOrder=34;dot.position.y=0.004;
+    ssViz=new THREE.Group();ssViz.add(ring);ssViz.add(dot);
+    ssViz.userData.dot=dot;scene.add(ssViz);
+  }
+  ssViz.visible=show;
+  if(!show)return;
+  if(!mouseIcePointAt(ssAnchor.x,ssAnchor.y,_ssVizP)){ssViz.visible=false;return;}
+  ssViz.position.set(_ssVizP.x,0.032,_ssVizP.z);
+  // deflection dot: screen right/up mapped through the camera basis onto the
+  // ice. right(camYaw) is screen-LEFT (same convention trap as refR in the
+  // aim path), so screen-right = -cr.
+  const cf=fwd(camYaw),cr=right(camYaw);
+  ssViz.userData.dot.position.set(
+    (-cr.x*ssDefU+cf.x*ssDefV)*0.52,0.004,(-cr.z*ssDefU+cf.z*ssDefV)*0.52);
 }
 
 /* ----- off-screen indicator arrows (EA-style): when the puck (or the
@@ -5664,6 +6063,15 @@ function buildStartMenu(){
     '<div id="smP1Row" style="margin-bottom:16px;font-size:11px;opacity:.95;">P1 INPUT<br>'+
       '<span id="smP1Pick"></span>'+
     '</div>'+
+    '<div id="smNameRow" style="margin-bottom:16px;font-size:11px;opacity:.95;">PLAYER NAME<br>'+
+      '<button id="smNmAlways" class="smOpt" data-nm="always" style="padding:6px 14px;font-size:11px;margin-top:6px;">ALWAYS</button> '+
+      '<button id="smNmPuck" class="smOpt" data-nm="puck" style="padding:6px 14px;font-size:11px;margin-top:6px;">WITH PUCK<br><span style="font-size:9px;opacity:.7">ON RECEIVE</span></button> '+
+      '<button id="smNmOff" class="smOpt" data-nm="off" style="padding:6px 14px;font-size:11px;margin-top:6px;">OFF</button>'+
+    '</div>'+
+    '<div id="smInfoRow" style="margin-bottom:16px;font-size:11px;opacity:.95;">SHOT READOUT<br>'+
+      '<button id="smSiOn" class="smOpt" data-si="on" style="padding:6px 14px;font-size:11px;margin-top:6px;">ON<br><span style="font-size:9px;opacity:.7">TYPE · KM/H · ROLL</span></button> '+
+      '<button id="smSiOff" class="smOpt" data-si="off" style="padding:6px 14px;font-size:11px;margin-top:6px;">OFF<br><span style="font-size:9px;opacity:.7">CLEAN ICE</span></button>'+
+    '</div>'+
     '<div style="display:flex;gap:10px;justify-content:center;">'+
       '<button id="smStart" style="padding:10px 34px;font-size:15px;font-weight:800;letter-spacing:.08em;border-radius:9px;border:1px solid #c45cff;background:rgba(168,85,255,.28);color:#fff;cursor:pointer;">START</button>'+
       '<button id="smExit" style="padding:10px 22px;font-size:12px;font-weight:700;letter-spacing:.06em;border-radius:9px;border:1px solid rgba(160,160,200,.4);background:rgba(40,40,70,.4);color:#b8c0d8;cursor:pointer;">EXIT TO MENU</button>'+
@@ -5691,6 +6099,18 @@ function buildStartMenu(){
     card.querySelector('#smBLbl').textContent=m==='practice'?'OPPONENT BOTS':'TEAM B BOTS';
     if(m!=='1v1')renderRoster();};
   pB.onclick=()=>sel('practice');vB.onclick=()=>sel('1v1');mB.onclick=()=>sel('match');
+  /* name-tag mode picker — persists immediately (setNameTagMode writes
+     localStorage), so it survives the reload the front-end menu does on
+     hand-off, exactly like padScheme. */
+  const nmBtns=card.querySelectorAll('#smNameRow .smOpt');
+  const syncNmBtns=()=>nmBtns.forEach(b=>b.classList.toggle('sel',b.dataset.nm===nameTagMode));
+  nmBtns.forEach(b=>b.onclick=()=>{setNameTagMode(b.dataset.nm);syncNmBtns();});
+  syncNmBtns();
+  /* shot readout on/off — same immediate-persist pattern as the name tag */
+  const siBtns=card.querySelectorAll('#smInfoRow .smOpt');
+  const syncSiBtns=()=>siBtns.forEach(b=>b.classList.toggle('sel',(b.dataset.si==='on')===shotInfoOn));
+  siBtns.forEach(b=>b.onclick=()=>{setShotInfo(b.dataset.si==='on');syncSiBtns();});
+  syncSiBtns();
   function renderRoster(){
     const prac=selMode==='practice';
     anEl.textContent=prac?MATCH.botsP:MATCH.botsA;bnEl.textContent=prac?MATCH.botsO:MATCH.botsB;
@@ -5802,6 +6222,7 @@ function buildStartMenu(){
   mBtn.textContent='MENU';
   mBtn.style.cssText='position:fixed;top:12px;left:12px;z-index:20;padding:7px 13px;border-radius:8px;border:1px solid rgba(196,92,255,.55);background:rgba(30,20,50,.6);color:#e9d5ff;font-weight:800;font-size:12px;letter-spacing:.07em;cursor:pointer;';
   window.__openMenu=()=>{wrap.style.display='flex';window.__poseFrozen=true;
+    if(document.exitPointerLock)document.exitPointerLock(); // menu needs the OS pointer
     document.body.classList.remove('hideCursor');}; // menu needs the real OS pointer back
   mBtn.addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();window.__openMenu();});
   document.body.appendChild(mBtn);
@@ -7485,9 +7906,64 @@ function updateReachRing(){
     const f=player.stamina/CONFIG.staminaMax;
     stamBarEl.style.width=(f*100).toFixed(1)+'%';
     stamBarEl.style.background=f>0.6?'#46e08a':f>0.25?'#ffcf4d':'#ff5a3c';
+    updateNameTag(proj);
   }
 }
 const stamWrapEl=document.getElementById('stamWrap'),stamBarEl=document.getElementById('stamBar');
+/* ----- PLAYER NAME TAG (EA/2K convention) -----
+   Sits directly under the stamina bar, i.e. under the player indicator ring.
+   Modes:
+     always  — always on
+     puck    — only while carrying, plus a short grace window after the puck
+               ARRIVES, so the tag pops as you receive a pass and lingers a
+               beat instead of blinking on/off with every touch
+     off     — hidden
+   The name is whatever the Locker Room loadout supplies (ihPlayerName); with
+   no name saved there is nothing to draw and the tag stays hidden in every
+   mode. */
+const nameTagEl=document.getElementById('nameTag');
+let ihLastDt=0.016;
+const NAMETAG_KEY='ihNameTag';
+const NAMETAG_MODES=['always','puck','off'];
+let nameTagMode=(()=>{try{const v=localStorage.getItem(NAMETAG_KEY);
+  return NAMETAG_MODES.indexOf(v)>=0?v:'puck';}catch(e){return 'puck';}})();
+function setNameTagMode(m){
+  if(NAMETAG_MODES.indexOf(m)<0)return;
+  nameTagMode=m;try{localStorage.setItem(NAMETAG_KEY,m);}catch(e){}
+}
+/* ----- SHOT READOUT TOGGLE -----
+   The aim viz draws two world-space text planes: the shot TYPE ("WRIST
+   SHOT") beside the player and, after a shot, the realized numbers
+   ("94 KM/H · ROLL 14/20 · 12° CONE · 80% PWR"). Some people want the ice
+   clean — the ribbon, landing circle and reticle still tell you everything
+   you need to aim, they just don't spell it out. Off hides BOTH text planes
+   and skips redrawing their canvases; nothing else about aiming changes.
+   Persisted like nameTagMode/padScheme so it survives the front-end menu's
+   reload on hand-off. */
+const SHOTINFO_KEY='ihShotInfo';
+let shotInfoOn=(()=>{try{return localStorage.getItem(SHOTINFO_KEY)!=='off';}catch(e){return true;}})();
+function setShotInfo(on){
+  shotInfoOn=!!on;try{localStorage.setItem(SHOTINFO_KEY,shotInfoOn?'on':'off');}catch(e){}
+}
+const NAMETAG_RECEIVE_HOLD=2.0;   // seconds the tag stays up after receiving
+let nameTagHold=0,nameTagHadPuck=false;
+function updateNameTag(proj){
+  const nm=(typeof ihPlayerName==='string'?ihPlayerName:'').trim();
+  if(!nm||nameTagMode==='off'){nameTagEl.style.display='none';return;}
+  // `puck.possessed` IS "P1 has it" on this codebase (see the carrier lookup
+  // in updateMatch) — there is no puck.owner field.
+  const carrying=!!(typeof puck!=='undefined'&&puck&&puck.possessed);
+  // rising edge = the puck just arrived on the stick (pickup or received pass)
+  if(carrying&&!nameTagHadPuck)nameTagHold=NAMETAG_RECEIVE_HOLD;
+  nameTagHadPuck=carrying;
+  if(nameTagHold>0)nameTagHold=Math.max(0,nameTagHold-(ihLastDt||0.016));
+  const show=(nameTagMode==='always')||carrying||nameTagHold>0;
+  nameTagEl.style.display='block';
+  nameTagEl.textContent=nm;
+  nameTagEl.style.left=proj.x+'px';
+  nameTagEl.style.top=(proj.y+27)+'px';   // just under the stamina bar
+  nameTagEl.style.opacity=show?'1':'0';
+}
 
 /* ===== AR aim visualization (ported from aim_viz.html, game-fitted) =====
    World-space tactical projection while aiming — no screen-space HUD:
@@ -7710,7 +8186,7 @@ class AimVizFX{
        still uses R, since a small angular error genuinely swings wider the
        further the puck actually flies (see computeAimError). */
     this.lastSpread=Math.tan(computeAimError(dl))*R;
-    this._drawType(type==='wrist'?'WRIST SHOT':type==='backhand'?'BACKHAND':type==='slap'?'SLAPSHOT':'PASS');
+    if(shotInfoOn)this._drawType(type==='wrist'?'WRIST SHOT':type==='backhand'?'BACKHAND':type==='slap'?'SLAPSHOT':'PASS');
   }
   /* the realized shot: freeze ribbon onto the actual trajectory + info */
   fire(info){
@@ -7719,7 +8195,8 @@ class AimVizFX{
     const {R}=this._clampRange(player.pos.x,player.pos.z,dx,dz,999,v,ang);
     this._writePath(player.pos.x,player.pos.z,dx,dz,v,ang,R);
     this.lastSpread=Math.tan(info.errMax||0)*R;
-    this._drawInfo(info);this.lastInfo=info;
+    if(shotInfoOn)this._drawInfo(info);
+    this.lastInfo=info;
     /* the info text runs on its OWN timeline + frozen anchor: if the
        buttons stay held the aim preview legitimately resumes (re-targeting
        the shared ribbon), and the realized-shot readout must survive that */
@@ -7790,7 +8267,7 @@ class AimVizFX{
     this.landRing.scale.setScalar(landR);this.landFill.scale.setScalar(landR);
     this.landRing.material.opacity=0.35*this.fade;this.landFill.material.opacity=0.08*this.fade;
     this.landRing.visible=this.landFill.visible=landR>0.06;
-    const inUse=this.state==='aiming';
+    const inUse=this.state==='aiming'&&shotInfoOn; // SHOT READOUT setting
     /* type text: below the player indicator ring, camera-upright, aiming only */
     this.typeLbl.visible=inUse;
     if(inUse){
@@ -7806,7 +8283,7 @@ class AimVizFX{
        right-to-left; the "above" side is whichever perpendicular lands
        higher on screen. Immune to camera-basis sign conventions (the old
        world-space dot test picked the wrong side and rendered upside-down). */
-    this.infoLbl.visible=this.infoFade>0.01&&!!this.infoMid;
+    this.infoLbl.visible=shotInfoOn&&this.infoFade>0.01&&!!this.infoMid;
     if(this.infoLbl.visible){
       this.infoLbl.material.opacity=this.infoFade;
       const pm=projectToScreen(this.infoMid);
@@ -8136,11 +8613,29 @@ if(!TOUCH){
   // removed whenever the start menu is open again (__openMenu) — it used to be
   // added unconditionally right here, which hid the OS pointer even while the
   // pre-game start menu (mode select / lobby) was up and needed a visible cursor.
-  addEventListener('mousemove',e=>{mouseCtl.active=true;mouseClientX=e.clientX;mouseClientY=e.clientY;
-    mouseCtl.ndc.x=(e.clientX/innerWidth)*2-1;mouseCtl.ndc.y=-(e.clientY/innerHeight)*2+1;});
+  /* POINTER LOCK: while locked the OS cursor is captured and e.clientX
+     freezes, so the virtual cursor is accumulated from raw movement deltas
+     instead — clamped to the viewport (the reticle's ray-cast needs an
+     on-screen point; the skill stick's own deflection is anchor-relative,
+     so a big deke never pins against a screen edge, which is the reason to
+     lock at all). Engaged by the first gameplay click (mousedown below),
+     released whenever the menu opens; Esc exits (browser rule) and the next
+     click re-locks. If the browser refuses the lock, everything below still
+     works off the absolute cursor — lock is an upgrade, not a dependency. */
+  addEventListener('mousemove',e=>{mouseCtl.active=true;
+    if(document.pointerLockElement){
+      mouseClientX=clamp(mouseClientX+(e.movementX||0),0,innerWidth);
+      mouseClientY=clamp(mouseClientY+(e.movementY||0),0,innerHeight);
+    }else{mouseClientX=e.clientX;mouseClientY=e.clientY;}
+    mouseCtl.ndc.x=(mouseClientX/innerWidth)*2-1;mouseCtl.ndc.y=-(mouseClientY/innerHeight)*2+1;});
   addEventListener('contextmenu',e=>e.preventDefault()); // RMB is the slapshot modifier, not a context menu
   addEventListener('mousedown',e=>{
     if(e.target.closest&&e.target.closest('#dbgPanel,#dbgTab,button,.btn'))return;
+    // first gameplay click engages pointer lock (needs a real user gesture)
+    if(!document.pointerLockElement&&(!GAME.menuEl||GAME.menuEl.style.display==='none')){
+      const el=document.getElementById('app');
+      if(el&&el.requestPointerLock){try{const pr=el.requestPointerLock();if(pr&&pr.catch)pr.catch(()=>{});}catch(err){}}
+    }
     if(e.button===0)lmbHeld=true;else if(e.button===2)rmbHeld=true;
     else if(e.button===1){e.preventDefault();mmbHeld=true;}}); // MMB = poke jab modifier, not autoscroll
   addEventListener('mouseup',e=>{
@@ -8148,7 +8643,13 @@ if(!TOUCH){
   addEventListener('blur',()=>{lmbHeld=false;rmbHeld=false;mmbHeld=false;
     for(const k in keys)keys[k]=false;}); // don't leave a shot charging OR a movement key "stuck" held if the tab loses focus (e.g. alt-tab)
   // scroll up = zoom in (zoomT toward 1 = near/action-cam), scroll down = zoom out
-  addEventListener('wheel',e=>{CONFIG.zoomT=clamp(CONFIG.zoomT-Math.sign(e.deltaY)*0.07,0,1);},{passive:true});
+  /* zoom step per wheel notch. 0.07 meant ~14 notches to cross the whole
+     far<->action-cam range, which is a lot of scrolling mid-play; 0.18 gets
+     there in ~6, and holding Shift while scrolling takes the whole range in
+     two notches for a snap between the two framings. */
+  addEventListener('wheel',e=>{
+    const step=e.shiftKey?0.5:0.18;
+    CONFIG.zoomT=clamp(CONFIG.zoomT-Math.sign(e.deltaY)*step,0,1);},{passive:true});
 }
 /* ----- swipe-gesture shooting/passing (desktop) -----
    While a shot/pass button is held, the cursor's motion SHAPES the shot,
@@ -8175,6 +8676,41 @@ const gest={lastX:0,lastY:0,swipe:false,pts:null,pathLen:0,slowT:0,fire:null,tra
 const _gestNdc=new THREE.Vector2(),_gestIce=new THREE.Vector3();
 function aimClientX(){return mouseClientX;}
 function aimClientY(){return mouseClientY;}
+/* ----- ANCHORED SKILL STICK (MKB, F toggle) -----
+   The mouse becomes a virtual right stick: the position of the cursor when
+   the mode engages (and, continuously, the drifting anchor) is the stick's
+   NEUTRAL, and the cursor's offset from it — at a fixed pixel scale — is the
+   stick deflection. That deflection feeds reachPointFromUV exactly like the
+   gamepad's RS does in padStickTarget, so pad and mouse stickhandling are
+   the same mechanism with different hardware in front of it. The free
+   reticle is untouched: it stays the aim point for shots/passes (and the
+   fake/cancel), always visible. Windups/gestures also unchanged — they read
+   the cursor path as before. Toggle persists like the other settings.
+   Recentering: a mouse doesn't spring back, so the anchor CHASES the cursor
+   at ssDriftRate — hold still after a deke and the stick eases back to
+   neutral; every activation (toggle-on, windup start) also re-anchors hard. */
+const SKILLSTICK_KEY='ihSkillStick';
+let skillStickOn=(()=>{try{return localStorage.getItem(SKILLSTICK_KEY)==='on';}catch(e){return false;}})();
+const ssAnchor={x:innerWidth/2,y:innerHeight/2};
+let ssDefU=0,ssDefV=0,ssDefMag=0; // this frame's deflection (screen right = +U, screen up = +V), read by the aim path + the ring visual
+function ssAnchorReset(){ssAnchor.x=mouseClientX;ssAnchor.y=mouseClientY;}
+function toggleSkillStick(){
+  skillStickOn=!skillStickOn;
+  try{localStorage.setItem(SKILLSTICK_KEY,skillStickOn?'on':'off');}catch(e){}
+  ssAnchorReset();
+  flashMsg('SKILL STICK '+(skillStickOn?'ON':'OFF'));
+}
+function ssUpdate(dt){ // drift + deflection, once per frame (updatePlayer)
+  if(!skillStickOn||TOUCH){ssDefU=0;ssDefV=0;ssDefMag=0;return;}
+  const k=1-Math.exp(-(dt||0)*CONFIG.ssDriftRate);
+  ssAnchor.x+=(mouseClientX-ssAnchor.x)*k;
+  ssAnchor.y+=(mouseClientY-ssAnchor.y)*k;
+  const R=Math.max(40,CONFIG.ssRadiusFrac*Math.min(innerWidth,innerHeight));
+  let u=(mouseClientX-ssAnchor.x)/R,v=-(mouseClientY-ssAnchor.y)/R;
+  const m=Math.hypot(u,v);
+  if(m>1){u/=m;v/=m;}
+  ssDefU=u;ssDefV=v;ssDefMag=Math.min(1,m);
+}
 /* ice-plane intersection from arbitrary CLIENT coords (the virtual aim
    cursor) — same math as mouseIcePoint, which always reads the real one. */
 function mouseIcePointAt(cx,cy,out){
@@ -8518,7 +9054,9 @@ function padStickTarget(F,refR){
      the envelope — the rim is reachable only at full tilt, so sensitivity
      automatically matches whatever the envelope's real size is */
   const m=Math.min(1,PAD.rsMag),r=m*m;
-  const u=m>0?(PAD.rsX/m)*r:0,v=m>0?(-PAD.rsY/m)*r:0;
+  /* PAD.rsX is flipped at the source (stick-right = NEGATIVE, see pollPad);
+     the aim UV space is true screen-right = +U (refR), so un-flip here. */
+  const u=m>0?(-PAD.rsX/m)*r:0,v=m>0?(-PAD.rsY/m)*r:0;
   return reachPointFromUV(player.pos,F,refR,u,v);
 }
 /* TOE DRAG is a skill-stick GESTURE (EA style), shared by pad and mouse:
@@ -8924,7 +9462,7 @@ addEventListener('keydown',e=>{
   // gameplay key — leave it to the browser's normal text-entry behavior
   const te=document.activeElement;
   if(te&&(te.tagName==='INPUT'||te.tagName==='TEXTAREA'||te.isContentEditable))return;
-  const k=e.key.toLowerCase();keys[k]=true;if(k==='v')setFP(!CONFIG.firstPerson);if(k==='f')faceAimNow();
+  const k=e.key.toLowerCase();keys[k]=true;if(k==='v')setFP(!CONFIG.firstPerson);if(k==='g')faceAimNow();
   // only steal these from the browser once gameplay is actually running —
   // while the start menu/lobby is open, Tab/Space/Arrows/Ctrl/Alt behave
   // normally (Tab moves focus between menu buttons, etc.)
@@ -8937,6 +9475,12 @@ addEventListener('keydown',e=>{
     if(defenseMode&&rmbHeld&&player&&!puck.possessed)startKneel();else togglePivot();}
   if(k==='tab'&&!e.repeat&&gameplayActive){e.preventDefault();e.stopPropagation();toggleCamFocus();}
   if(k==='x'&&!e.repeat)triggerToeDrag();
+  /* Q/E: with the ANGLE LOCK off they are mohawk turns (left/right open),
+     with it on they slowly rotate the locked facing (held, not tapped —
+     handled per-frame in updatePlayer). No camera orbit on these anymore. */
+  if((k==='q'||k==='e')&&!e.repeat&&gameplayActive&&!pivotToggled&&p1Input!=='pad')mohawkStart(k==='q'?-1:1);
+  // F = anchored skill stick toggle (face-cam snap moved to G to make room)
+  if(k==='f'&&!e.repeat&&gameplayActive&&!TOUCH)toggleSkillStick();
   if(k==='f2'&&!e.repeat)toggleSkateDebug();
   // Alt is the mode toggle only while NOT carrying — with the puck the mode
   // is forced to offense and held Alt becomes the reverse-hit modifier
@@ -8957,7 +9501,31 @@ camBtn.addEventListener('click',()=>setFP(!CONFIG.firstPerson));
 const sprintBtn=document.getElementById('sprintBtn');
 const pivotBtn=document.getElementById('pivotBtn');
 function faceAimNow(){camYaw=player.heading;}
-function togglePivot(){pivotToggled=!pivotToggled;pivotBtn.classList.toggle('on',pivotToggled);}
+function togglePivot(){pivotToggled=!pivotToggled;pivotBtn.classList.toggle('on',pivotToggled);
+  // taking the manual lock over ends the mohawk's implicit one, so the two
+  // never fight over the same facing (and turning the manual lock OFF while
+  // reversed leaves you facing forward again, not stuck backwards)
+  if(player)player.mohawkLocked=false;}
+/* MOHAWK TURN — see the long note in updatePlayer. dir: -1 = open to the
+   player's left (Q), +1 = to the right (E). Each press flips between facing
+   travel and facing back down the ice; the second one releases the implicit
+   lock so you're a normal forward skater again. Ignored while a shot is
+   loaded (the shot's own facing lock owns the hips then) or while already
+   mid-transition, and it never touches velocity except for the small edge
+   scrub a real heel-to-heel transition costs. */
+function mohawkStart(dir){
+  if(!player||shootHeld)return;
+  if((player.mohawkT||0)>0||(player.diveT||0)>0||player.kneelActive)return;
+  player.mohawkFrom=player.heading;
+  /* dir +1 = open to the player's RIGHT. Heading INCREASES toward this rig's
+     own left (right(h) is its left — see the grip note in CONFIG), so a
+     right-hand mohawk is a negative heading sweep. */
+  player.mohawkTurn=-dir*Math.PI;  // 180 deg: forward <-> backward
+  player.mohawkDir=dir;
+  player.mohawkT=CONFIG.mohawkDur;
+  player.mohawkLocked=!player.mohawkLocked;
+  if(player.vel)player.vel.multiplyScalar(1-CONFIG.mohawkSpeedCost);
+}
 /* SKATING PHYSICS v2 debug overlay (F2). Plain text, updated once per
    frame from updatePlayer() right after updateSkating() runs — cheap
    (one textContent write, only while visible) and shows exactly the
@@ -9001,7 +9569,7 @@ if(TOUCH){
   app.addEventListener('pointerup',fsOnce); // fullscreen needs a completed user gesture, so pointerUP
 }
 document.getElementById('hintL').textContent=TOUCH?'LEFT THUMB — MOVE':'WASD — MOVE';
-document.getElementById('hintR').textContent=TOUCH?'DRAG INSIDE YOUR RING = STICKHANDLE · DRAG FROM OUTSIDE = AIM, SWIPE + LIFT = SHOOT (CURVED = CHIP/SAUCER), LIFT ON YOURSELF = FAKE · 2ND FINGER = PASS/SLAP · DEFEND: HOLD+DRAG = CHECK, TAP = POKE':'HOLD LMB (SHOT) / RMB (PASS) / BOTH (SLAP), RELEASE = SHOOT — SWIPE SPEED = POWER, STRAIGHT = CLEAN, CURVED = CHIP/SAUCER (DEEPER = HIGHER) · PULL RETICLE ONTO YOURSELF + RELEASE = FAKE · C = PROTECT · ALT = DEFENSE · X = TOE-DRAG · SPACE = BRAKE · SHIFT = SPRINT · CTRL = PIVOT';
+document.getElementById('hintR').textContent=TOUCH?'DRAG INSIDE YOUR RING = STICKHANDLE · DRAG FROM OUTSIDE = AIM, SWIPE + LIFT = SHOOT (CURVED = CHIP/SAUCER), LIFT ON YOURSELF = FAKE · 2ND FINGER = PASS/SLAP · DEFEND: HOLD+DRAG = CHECK, TAP = POKE':'HOLD LMB (SHOT) / RMB (PASS) / BOTH (SLAP), RELEASE = SHOOT — SWIPE SPEED = POWER, STRAIGHT = CLEAN, CURVED = CHIP/SAUCER (DEEPER = HIGHER) · PULL RETICLE ONTO YOURSELF + RELEASE = FAKE · C = PROTECT · ALT = DEFENSE · X = TOE-DRAG · SPACE = BRAKE · SHIFT = SPRINT · CTRL = ANGLE LOCK (BACKSKATE) · Q/E = MOHAWK TURN (LOCKED: SLOW TURN) · , . = CAMERA · F = SKILL STICK · G = FACE CAM';
 setTimeout(()=>document.querySelectorAll('.hint').forEach(el=>el.style.opacity=0),6500);
 
 /* ----- main update / camera lock ----- */
@@ -9081,7 +9649,7 @@ function updatePlayer(dt){
       if(!anyDown)player.shotSuppressed=false;
       rawShotType='none';
     }
-    if(rawShotType!=='none'&&prevShotType==='none')resetGesture();
+    if(rawShotType!=='none'&&prevShotType==='none'){resetGesture();if(skillStickOn)ssAnchorReset();}
     if(rawShotType!=='none'&&mouseCtl.active)updateGesture(dt||0);
     /* the FAKE is now a deliberate spatial act, not a timing one: pull the
        ice reticle INSIDE your own player-circle indicator and release —
@@ -9126,6 +9694,12 @@ function updatePlayer(dt){
   // 0 (normal stickhandling stance). Computed up front so both the body's
   // forward weight shift and the joint-flex lean below can use it.
   if(player.shotReleaseT>0)player.shotReleaseT=Math.max(0,player.shotReleaseT-(dt||0));
+  /* windup draw-back ramp: counts up while a wrist/backhand/pass is held
+     (the slap has its own high backswing and its own charge timer), and
+     resets the moment nothing is being loaded, so every fresh windup starts
+     the draw from the carry position instead of mid-pull. */
+  player.shotLoadT=(shootHeld&&player.shotType&&player.shotType!=='slap')
+    ?Math.min(CONFIG.shotLoadDur,(player.shotLoadT||0)+(dt||0)):0;
   // eased engage/release for the puck-protect tuck (pose blend read in poseAimPt)
   player.protectBlend=(player.protectBlend||0)+((player.protectActive?1:0)-(player.protectBlend||0))*Math.min(1,(dt||0)*CONFIG.protectBlendRate);
   if(player.toeDragT>0)player.toeDragT=Math.max(0,player.toeDragT-(dt||0));
@@ -9214,8 +9788,36 @@ function updatePlayer(dt){
      what lets you shield the puck facing one way while skating the other.
      Toggle off and the body snaps back to the normal "face where you're
      going" rule. Needs no pointer, so it works on touch too. */
-  const pivotMode=pivotToggled;
-  if(pivotMode&&!player.wasPivotMode)player.pivotLockHeading=player.heading;
+  /* MOHAWK TURN (Q/E with the angle lock OFF) — a real skating maneuver,
+     separate from both the angle lock and from backskating itself.
+     Biomechanics (IIHF / power-skating coaching): the mohawk is a heel-to-
+     heel transition — the lead foot turns out, the hips open wide, both
+     skates ride edges on one line with the toes pointing in OPPOSITE
+     directions, weight transfers across, and the head and shoulders lead
+     the rotation with the hips and skates following. Done properly it costs
+     almost no speed, which is exactly why it's the standard way to go from
+     forward to backward with the puck. So here: momentum is preserved (only
+     a small scrub), the facing spins 180 deg over mohawkDur, and the body
+     comes out of it facing the play while still travelling the same way.
+     Coming out of a mohawk the facing has to STAY decoupled from travel or
+     the normal "face where you're going" rule would instantly snap you
+     forward again — that is what mohawkLocked is: an implicit angle lock
+     owned by the maneuver, cleared by mohawking back (or by taking the
+     manual lock over with Ctrl). This is the split the request asked for:
+     Ctrl = hold an angle (and therefore backskate by pushing away from it),
+     Q/E = the transition move; neither one IS backskating. */
+  if((player.mohawkT||0)>0){
+    player.mohawkT=Math.max(0,player.mohawkT-(dt||0));
+    const t=1-clamp(player.mohawkT/Math.max(0.01,CONFIG.mohawkDur),0,1);
+    const e=t*t*(3-2*t); // ease: hips open, snap through, settle
+    player.pivotLockHeading=player.mohawkFrom+player.mohawkTurn*e;
+    if(player.mohawkT<=0)player.pivotLockHeading=player.mohawkFrom+player.mohawkTurn;
+  }
+  const pivotMode=pivotToggled||!!player.mohawkLocked||(player.mohawkT||0)>0;
+  // the HUD chip reads "is my facing locked", whichever of the two owns it
+  if(pivotBtn)pivotBtn.classList.toggle('on',pivotMode);
+  // (a mohawk in flight is already driving pivotLockHeading — don't re-capture)
+  if(pivotMode&&!player.wasPivotMode&&(player.mohawkT||0)<=0)player.pivotLockHeading=player.heading;
   player.wasPivotMode=pivotMode;
   /* shot-aim soft lock: the instant you start winding up a shot/pass, your
      facing freezes at wherever it was ("the latest skill stick position")
@@ -9228,10 +9830,22 @@ function updatePlayer(dt){
   const shotAimLock=!!shootHeld;
   if(shotAimLock&&!player.wasShotAimLock)player.shotLockHeading=player.heading;
   player.wasShotAimLock=shotAimLock;
+  /* while the angle is locked, Q/E steer the LOCKED FACING itself, slowly —
+     the "hold this angle but let me re-aim it" adjustment a defenseman makes
+     gliding backwards, and the reason the lock doesn't have to be dropped
+     and re-taken every time the play shifts. Deliberately slow (lockTurnRate,
+     rad/s) so it reads as pivoting on the edges, not spinning on the spot. */
+  if(pivotMode&&!shotAimLock&&(player.mohawkT||0)<=0&&p1Input!=='pad'){
+    if(keys['q'])player.pivotLockHeading=(player.pivotLockHeading||player.heading)-CONFIG.lockTurnRate*(dt||0);
+    if(keys['e'])player.pivotLockHeading=(player.pivotLockHeading||player.heading)+CONFIG.lockTurnRate*(dt||0);
+  }
   if(shotAimLock){
     player.heading=player.shotLockHeading;
   }else if(pivotMode){
-    player.heading=angLerp(player.heading,player.pivotLockHeading,1-Math.pow(1-CONFIG.pivotLockLerp,dt*60));
+    // a mohawk snaps through its 180 much faster than the lock's normal
+    // settle rate — otherwise the hips lag a third of the way behind the turn
+    const lerpK=(player.mohawkT||0)>0?CONFIG.mohawkLockLerp:CONFIG.pivotLockLerp;
+    player.heading=angLerp(player.heading,player.pivotLockHeading,1-Math.pow(1-lerpK,dt*60));
   }
   /* Space = hockey stop: a deliberate, full-commitment brake, not just
      "let go of the stick" — real technique is a two-foot stop, skates
@@ -9413,7 +10027,8 @@ function updatePlayer(dt){
   player.brakeYawCur=(player.brakeYawTarget||0)*(player.brakeBlend||0);
   player.root.position.copy(player.pos)
     .addScaledVector(right(player.heading),CONFIG.bodyOffX)
-    .addScaledVector(up,CONFIG.bodyOffY-(player.kneelBlend||0)*CONFIG.kneelSink)
+    .addScaledVector(up,CONFIG.bodyOffY-CONFIG.stanceSink-(player.kneelBlend||0)*CONFIG.kneelSink
+      -player.shotFollow*CONFIG.shotSink)
     .addScaledVector(fwd(player.heading),CONFIG.bodyOffZ+player.shotFollow*CONFIG.shotLeanFwd);
   /* build the orientation fresh from quaternions every frame — mixing a
      `.rotation.y=` Euler assignment with `.rotateZ()` (which writes the
@@ -9463,19 +10078,43 @@ function updatePlayer(dt){
   updateOffscreenArrows();
   updateSpray(dt||0);
   // aim target: ice-locked teardrop while stickhandling, free vertical plane while shootHeld
-  if(keys['q'])camYaw+=CONFIG.orbitSpeed*dt;
-  if(keys['e'])camYaw-=CONFIG.orbitSpeed*dt;
-  const refR=R.clone().multiplyScalar(R.dot(camR)>=0?1:-1);
+  /* camera orbit moved off Q/E (those are skating controls now — mohawk turn
+     / locked-facing rotation, see mohawkStart) onto , and . so the view can
+     still be swung without stealing a movement key. */
+  if(keys[','])camYaw+=CONFIG.orbitSpeed*dt;
+  if(keys['.'])camYaw-=CONFIG.orbitSpeed*dt;
+  /* screen-right axis for the aim's UV space. right(camYaw)/camR actually
+     points to the camera's screen-LEFT (up×fwd, not fwd×up — that's why the
+     movement input uses -ix on camR), so align R AGAINST camR: +U has to
+     mean "blade moves right on screen" for both skill sticks (pad RS and
+     the anchored mouse stick). The old projected-cursor clamp never showed
+     the sign because clampToReachEnvelope is invariant to it. */
+  const refR=R.clone().multiplyScalar(R.dot(camR)>=0?-1:1);
   // freeze-frame: leave currentAim exactly as it was so the whole pose holds
   // rock-stable instead of chasing live mouse/touch input while "paused".
   if(!window.__poseFrozen){
+    ssUpdate(dt); // skill stick anchor drift + this frame's deflection
     let aimTarget;
     const mouseMode=mouseCtl.active; // touch feeds the same cursor state, so it takes the same paths
     if(mouseMode&&shootHeld){
       // TPS shot aim: free 3D point along the view ray; release fires toward it
       aimTarget=new THREE.Vector3();mouseTPSPoint(aimTarget);
-    }else if(mouseMode){
-      // stickhandle aim: mouse projected to ice, clamped into the reach envelope
+    }else if(mouseMode&&skillStickOn&&!TOUCH){
+      /* ANCHORED SKILL STICK stickhandling: the anchor-relative deflection
+         goes through the same envelope-UV mapping as the gamepad RS
+         (padStickTarget) — squared response for fine control near neutral,
+         the envelope rim only at full deflection. The reticle keeps roaming
+         free as the aim point; the blade no longer chases it directly. */
+      const rq=ssDefMag*ssDefMag;
+      const uu=ssDefMag>0?(ssDefU/ssDefMag)*rq:0,vv=ssDefMag>0?(ssDefV/ssDefMag)*rq:0;
+      aimTarget=reachPointFromUV(player.pos,F,refR,uu,vv);
+    }else if(mouseMode&&TOUCH){
+      /* touch stickhandle aim: cursor projected to ice, clamped into the
+         reach envelope. TOUCH ONLY — this used to be the always-on desktop
+         stickhandling too, which made the skill stick feel permanently ON;
+         MKB now stickhandles exclusively through the F-toggle anchored
+         skill stick above. Toggle OFF = the blade carries neutrally and
+         the reticle is purely the shot/pass aim point. */
       const hit=new THREE.Vector3();
       if(mouseIcePoint(hit)){
         aimTarget=clampToReachEnvelope(player.pos,F,refR,hit.sub(player.pos));
@@ -9580,8 +10219,28 @@ function updatePlayer(dt){
       .addScaledVector(right(player.heading),CONFIG.slapBackSide)
       .addScaledVector(up,CONFIG.slapBackHeight*(0.5+0.5*chargeFrac));
   }else if(shootHeld){
-    poseAimPt=currentAim.clone();
-    poseAimPt.y=Math.min(poseAimPt.y,CONFIG.iceHeight+CONFIG.shotBladeLift);
+    /* WINDUP = LOADING THE SHOT, not pointing at the target. This used to be
+       `poseAimPt=currentAim`, so aiming simply swung the blade around to
+       point wherever the reticle was — a skater "aiming" with a laser
+       pointer. A real wrist shot loads the other way: the puck is drawn BACK
+       to (and slightly behind) the back skate with the blade cupped over it
+       and the weight on the back leg, and only then swept forward through
+       the release. The aim itself stays completely free — currentAim still
+       decides where the puck GOES — this is purely what the body does while
+       the shot is being loaded, same gameplay-target-vs-body split the
+       follow-through and reach envelope already use.
+       shotLoadT ramps 0->1 over shotLoadDur while held (see updatePlayer) so
+       the draw-back is a motion, not a snap; the puck comes with it, since
+       poseAimPt drives stickTip and stickTip drives the carry spring —
+       which is exactly the "pull the puck back to load it" read. */
+    const w=clamp((player.shotLoadT||0)/Math.max(0.01,CONFIG.shotLoadDur),0,1);
+    const wEase=w*w*(3-2*w);
+    const carry=player.pos.clone().addScaledVector(F,CONFIG.iceBaseFwd)
+      .addScaledVector(right(player.heading),CONFIG.shotLoadSide*0.25);
+    const load=player.pos.clone().addScaledVector(F,CONFIG.shotLoadBack)
+      .addScaledVector(right(player.heading),CONFIG.shotLoadSide);
+    poseAimPt=carry.lerp(load,wEase);
+    poseAimPt.y=CONFIG.iceHeight+CONFIG.shotLoadLift*wEase;
   }else if(player.shotReleaseT>0){
     const fDur=player.shotFollowDurActive||CONFIG.shotFollowDur,fReach=player.shotFollowReachActive||CONFIG.shotFollowReach;
     const followT=1-clamp(player.shotReleaseT/fDur,0,1);
@@ -9595,6 +10254,7 @@ function animateBody(ent,speed,dt){if(ent.mixer){ent.phase=(ent.phase||0)+dt*(sp
   const moving=speed>0.3;const cad=moving?(7+speed):2.0;ent.phase=(ent.phase||0)+dt*cad;}
 
 function tick(){requestAnimationFrame(tick);const realDt=Math.min(clock.getDelta(),0.05);
+  ihLastDt=realDt; // shared frame delta for HUD timers (name tag receive hold)
   const dt=window.__poseFrozen?0:realDt; // freeze-frame: pose/render continue, time stops
   if(window.__editorTick)window.__editorTick(realDt);
   menuPadPoll(realDt); // menu pad nav + lobby joining, even while frozen
@@ -9609,31 +10269,50 @@ if(screen.orientation)screen.orientation.addEventListener('change',()=>{setTimeo
 /* ============================== LOCKER ROOM INTEGRATION ==============================
    Reads the loadout saved by the separate "Locker Room" equipment editor
    (~/Lataukset/ice-hockey-customize.html, same hasa1992 model/GLB asset) out of
-   localStorage and applies it to the HUMAN PLAYER's own model only — jersey/pants/
-   gloves/helmet/skates zone colors (all one shared mesh+material on this asset,
-   "Cube001" — see the editor's own note), stick shaft/blade/tape colors ("Plane001"/
-   "Plane002"/"Plane005"), neck/skin ("Cube"), and the jersey name/number plate.
-   Bots/goalie/other pool skaters are untouched by THIS loadout (separate
-   loader.parse calls = fully independent materials) — a personal Locker
-   Room loadout only ever applies to P1's own body+stick. They DO get their
-   own independent, randomized zone-recolor via ihApplyBotZoneRecolor
-   further down (see the BOT/GOALIE APPEARANCE VARIATION section) so no two
-   skaters on the ice look like identical clones — that's a separate
-   per-entity system, not this one.
-   Zone colors are recovered the SAME way the editor derives them in the first place —
-   k-means-ish clustering of the mesh's own baked texture into its N most common
-   colors — so with no saved loadout yet, the player renders with the texture's own
-   original colors (zero visual regression) and an empty name/number plate (same
-   "transparent until set" decal behavior the editor uses).
-   NOT ported: logos and freehand paint. The editor itself doesn't persist those into
-   saved loadouts either (see its Freehand Paint panel's own note) — there's nothing
-   durable yet to hand off. Revisit if/when the editor gains logo/paint persistence. */
+   localStorage and applies it to the HUMAN PLAYER's own model only.
+   PER-PIECE as of this pass: every equipment piece — jersey, pants, socks,
+   gloves, helmet, cage, skate boots, LACES, blade steel, neck/skin — has its
+   own material and its own zone palette (clustered from only the atlas pixels
+   that piece's UV islands actually cover), so recoloring socks recolors socks
+   and nothing else. Before this, all nine body meshes shared ONE material and
+   one atlas-wide mask, which is exactly why changing one piece changed the
+   whole kit. Pants and socks are a single continuous leg mesh, so they share a
+   material and are separated per-fragment at the shorts hem (IH_SPLIT_Y).
+   Stick shaft/blade/tape ("Plane001"/"Plane002"/"Plane005") work as before.
+   PAINT + DECALS now render here too: the freehand strokes and placed logos
+   built in the editor ride along in the loadout and are replayed onto the same
+   paint/logo atlas canvases the editor composites, using the same draw order.
+   Bots/goalie are untouched by THIS loadout (separate loader.parse calls =
+   fully independent materials) — a personal Locker Room loadout only ever
+   applies to P1's own body+stick. They get their own per-TEAM piece colors via
+   ihApplyBotZoneRecolor further down.
+   Zone colors are recovered the SAME way the editor derives them in the first
+   place, so with no saved loadout the player renders with the texture's own
+   original colors (zero visual regression) and an empty name/number plate.
+   NOTE: this file stays single-file on purpose, so these ih* functions are a
+   hand-synced port of ice-hockey-customize-core.js (IHC_PIECES, the coverage
+   rasterizer, the kit mask, the stroke/decal replay). Change one, change both. */
 const IH_LOADOUT_KEY='ihGameLoadout_v1';
 const IH_DECAL_SIZE=2048;
 const IH_NAME_RECT={x:200,y:1400,w:400,h:150};
 const IH_NUMBER_RECT={x:240,y:1530,w:340,h:230};
+const IH_SPLIT_Y=0.62; // bind-pose local Y of the shorts hem (render-verified)
+const IH_PIECES=[
+  {id:'jersey',mesh:'Cube001', zones:3,nameplate:true},
+  {id:'pants', mesh:'Cube002', zones:3},
+  {id:'socks', mesh:'Cube002', zones:3,splitSide:'below'},
+  {id:'gloves',mesh:'Cube003', zones:3},
+  {id:'helmet',mesh:'Cube004', zones:3},
+  {id:'cage',  mesh:'Cube005', zones:2},
+  {id:'skates',mesh:'Cube006', zones:2},
+  {id:'laces', mesh:'Plane004',zones:2},
+  {id:'blades',mesh:'Cube007', zones:2},
+  {id:'neck',  mesh:'Cube',    zones:1,personal:true},
+];
 let ihBodyColors=null,ihNeckColors=null,ihStickShaftBlade=null,ihGripTapeMat=null,ihBladeTapeMat=null;
+let ihPlayerPieces=null;
 let ihNameCanvas,ihNameCtx,ihNameTexture;
+let ihPaintCanvas,ihPaintCtx,ihPaintTexture,ihLogoCanvas,ihLogoCtx,ihLogoTexture;
 
 function ihGetImageDataFromTexture(tex){
   const img=tex.image;
@@ -9641,15 +10320,7 @@ function ihGetImageDataFromTexture(tex){
   const ctx=cvs.getContext('2d');ctx.drawImage(img,0,0);
   return ctx.getImageData(0,0,cvs.width,cvs.height);
 }
-function ihExtractPalette(imgData,maxClusters,sampleStride){
-  const data=imgData.data;const buckets=new Map();const Q=20;
-  for(let i=0;i<data.length;i+=4*sampleStride){
-    const a=data[i+3];if(a<20)continue;
-    const r=data[i],g=data[i+1],b=data[i+2];
-    const key=(Math.round(r/Q)*Q)+','+(Math.round(g/Q)*Q)+','+(Math.round(b/Q)*Q);
-    let e=buckets.get(key);if(!e){e={count:0,r:0,g:0,b:0};buckets.set(key,e);}
-    e.count++;e.r+=r;e.g+=g;e.b+=b;
-  }
+function ihClusterBuckets(buckets,maxClusters){
   let arr=Array.from(buckets.values()).map(e=>({count:e.count,color:[e.r/e.count,e.g/e.count,e.b/e.count]}));
   arr.sort((a,b)=>b.count-a.count);
   const merged=[];
@@ -9659,24 +10330,96 @@ function ihExtractPalette(imgData,maxClusters,sampleStride){
     if(merged.length>=maxClusters*4)break;
   }
   merged.sort((a,b)=>b.count-a.count);
-  return merged.map(c=>c.color);
+  const total=merged.reduce((s,c)=>s+c.count,0)||1;
+  return merged.map(c=>({color:c.color,share:c.count/total}));
 }
-function ihBuildMaskTexture(imgData,recolor,fixed){
+/* Rasterizes one mesh's UV triangles into a coverage map (1 byte per texel),
+   grown ~1.5px outward from each triangle's centroid so island EDGE texels
+   (where the texture's own antialiasing lives) still belong to the piece.
+   UV v maps straight to texel row with NO 1-v flip: glTF textures and the mask
+   DataTexture are both flipY=false, so v=0 is the first row of pixel data,
+   which is the same row getImageData() returns first. Verified by overlaying a
+   coverage map on the atlas and confirming the laces landed on lace pixels. */
+function ihRasterTri(cov,w,h,ax,ay,bx,by,cx,cy){
+  const gx=(ax+bx+cx)/3,gy=(ay+by+cy)/3,GROW=1.5;
+  const ex=(x,y)=>{const dx=x-gx,dy=y-gy,l=Math.hypot(dx,dy)||1;return[x+dx/l*GROW,y+dy/l*GROW];};
+  [[ax,ay],[bx,by],[cx,cy]]=[ex(ax,ay),ex(bx,by),ex(cx,cy)];
+  const minX=Math.max(0,Math.floor(Math.min(ax,bx,cx))),maxX=Math.min(w-1,Math.ceil(Math.max(ax,bx,cx)));
+  const minY=Math.max(0,Math.floor(Math.min(ay,by,cy))),maxY=Math.min(h-1,Math.ceil(Math.max(ay,by,cy)));
+  const den=(by-cy)*(ax-cx)+(cx-bx)*(ay-cy);
+  if(Math.abs(den)<1e-9)return;
+  for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++){
+    const px=x+0.5,py=y+0.5;
+    const l1=((by-cy)*(px-cx)+(cx-bx)*(py-cy))/den;
+    const l2=((cy-ay)*(px-cx)+(ax-cx)*(py-cy))/den;
+    if(l1>=0&&l2>=0&&1-l1-l2>=0)cov[y*w+x]=1;
+  }
+}
+function ihMeshCoverage(mesh,w,h){
+  const cov=new Uint8Array(w*h);
+  const g=mesh.geometry,uv=g.attributes.uv,pos=g.attributes.position,idx=g.index;
+  if(!uv)return cov;
+  const n=idx?idx.count:pos.count;
+  for(let t=0;t<n;t+=3){
+    const a=idx?idx.getX(t):t,b=idx?idx.getX(t+1):t+1,c=idx?idx.getX(t+2):t+2;
+    ihRasterTri(cov,w,h,uv.getX(a)*w,uv.getY(a)*h,uv.getX(b)*w,uv.getY(b)*h,uv.getX(c)*w,uv.getY(c)*h);
+  }
+  return cov;
+}
+/* ONE shared mask for the whole kit rather than one per piece: every piece
+   owns a disjoint set of atlas texels, so their classifications coexist in a
+   single texture (nine 2048² masks would have cost ~150MB for no extra
+   information). Each piece's material samples this same mask but multiplies it
+   by its OWN zone colors — that's what makes the pieces independent.
+   Depends only on the shared atlas + shared geometry, never on an entity, so
+   it's computed once and reused by the player and every bot. */
+let ihKitCache=null;
+function ihBuildKitMask(visual){
+  if(ihKitCache)return ihKitCache;
+  const meshNames=[...new Set(IH_PIECES.map(p=>p.mesh))];
+  const first=meshNames.map(n=>visual.getObjectByName(n)).find(m=>m&&m.material&&m.material.map);
+  if(!first)return null;
+  const imgData=ihGetImageDataFromTexture(first.material.map);
   const w=imgData.width,h=imgData.height,src=imgData.data;
+  const owner=new Uint8Array(w*h);
+  meshNames.forEach((name,mi)=>{
+    const mesh=visual.getObjectByName(name);
+    if(!mesh)return;
+    const cov=ihMeshCoverage(mesh,w,h);
+    for(let p=0;p<cov.length;p++)if(cov[p])owner[p]=mi+1;
+  });
+  const Q=20,buckets=meshNames.map(()=>new Map());
+  for(let p=0;p<owner.length;p++){
+    const m=owner[p];if(!m)continue;
+    const i=p*4;if(src[i+3]<20)continue;
+    const key=(Math.round(src[i]/Q)*Q)+','+(Math.round(src[i+1]/Q)*Q)+','+(Math.round(src[i+2]/Q)*Q);
+    const bm=buckets[m-1];
+    let e=bm.get(key);if(!e){e={count:0,r:0,g:0,b:0};bm.set(key,e);}
+    e.count++;e.r+=src[i];e.g+=src[i+1];e.b+=src[i+2];
+  }
+  // a piece with one real color in the atlas gets ONE zone; trailing sub-1%
+  // clusters are antialiasing dust and stay unrecolored, like `fixed` always did
+  const palettes=meshNames.map((name,mi)=>{
+    const def=IH_PIECES.find(p=>p.mesh===name&&p.splitSide!=='below');
+    const clusters=ihClusterBuckets(buckets[mi],def.zones+2);
+    const recolor=clusters.slice(0,def.zones).filter((c,i)=>i===0||c.share>=0.01);
+    return{recolor,fixed:clusters.slice(recolor.length)};
+  });
   const out=new Uint8Array(w*h*4);
-  const all=recolor.map((color,idx)=>({color,idx})).concat(fixed.map(color=>({color,idx:-1})));
-  for(let p=0;p<w*h;p++){
-    const o=p*4,a=src[o+3];
-    if(a<20)continue;
-    const r=src[o],g=src[o+1],b=src[o+2];
-    let best=all[0],bestD=Infinity;
-    for(const c of all){const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;best=c;}}
-    if(best.idx===0)out[o]=255;else if(best.idx===1)out[o+1]=255;else if(best.idx===2)out[o+2]=255;
+  for(let p=0;p<owner.length;p++){
+    const m=owner[p];if(!m)continue;
+    const o=p*4;if(src[o+3]<20)continue;
+    const pal=palettes[m-1],r=src[o],g=src[o+1],b=src[o+2];
+    let bestIdx=-1,bestD=Infinity;
+    pal.recolor.forEach((c,i)=>{const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;bestIdx=i;}});
+    pal.fixed.forEach(c=>{const dr=r-c.color[0],dg=g-c.color[1],db=b-c.color[2];const d=dr*dr+dg*dg+db*db;if(d<bestD){bestD=d;bestIdx=-1;}});
+    if(bestIdx===0)out[o]=255;else if(bestIdx===1)out[o+1]=255;else if(bestIdx===2)out[o+2]=255;
     out[o+3]=255;
   }
-  const tex=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
-  tex.flipY=false;tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;tex.needsUpdate=true;
-  return tex;
+  const mask=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
+  mask.flipY=false;mask.wrapS=mask.wrapT=THREE.ClampToEdgeWrapping;mask.needsUpdate=true;
+  ihKitCache={mask,palettes,meshNames};
+  return ihKitCache;
 }
 /* Same DataTexture-not-CanvasTexture + customProgramCacheKey approach the
    editor's own onBeforeCompile patch had to land on — a CanvasTexture sampler
@@ -9694,57 +10437,115 @@ function ihBuildMaskTexture(imgData,recolor,fixed){
    override at each candidate insertion point until only the post-lighting
    one visibly took effect. Post-lighting mixing loses a little PBR shading
    nuance (the recolored tint doesn't itself interact with lights) but is
-   reliable across every material variant this rig's meshes use — worth
-   revisiting if a real root cause surfaces, but not worth blocking on. */
-function ihInstallRecolorShader(material,maskTexture,zoneColors,nameNumberMap){
-  material.customProgramCacheKey=()=>'ihZoneMaterial_'+material.uuid+(nameNumberMap?'_nn':'');
+   reliable across every material variant this rig's meshes use.
+   `split` gives a second color triple selected per-fragment by bind-pose
+   height — how pants and socks stay independent on one shared mesh. */
+function ihInstallRecolorShader(material,maskTexture,zoneColors,decals,split){
+  material.customProgramCacheKey=()=>'ihZoneMaterial_'+material.uuid+(decals&&decals.nameNumberMap?'_nn':'')+(decals?'_d':'');
   material.onBeforeCompile=(shader)=>{
     shader.uniforms.maskMap={value:maskTexture};
     shader.uniforms.zoneColor0={value:zoneColors[0]};
     shader.uniforms.zoneColor1={value:zoneColors[1]};
     shader.uniforms.zoneColor2={value:zoneColors[2]};
-    let extraUniforms='',extraCode='';
-    if(nameNumberMap){
-      shader.uniforms.nameNumberMap={value:nameNumberMap};
-      extraUniforms='\nuniform sampler2D nameNumberMap;';
-      extraCode=`
+    shader.uniforms.splitZone0={value:(split?split.colors[0]:zoneColors[0])};
+    shader.uniforms.splitZone1={value:(split?split.colors[1]:zoneColors[1])};
+    shader.uniforms.splitZone2={value:(split?split.colors[2]:zoneColors[2])};
+    shader.uniforms.uSplitY={value:split?split.y:-999.0};
+    let extraUniforms='\nuniform vec3 splitZone0;\nuniform vec3 splitZone1;\nuniform vec3 splitZone2;\nuniform float uSplitY;\nvarying float vIhY;',extraCode='';
+    if(decals){
+      if(decals.nameNumberMap){
+        shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
+        extraUniforms+='\nuniform sampler2D nameNumberMap;';
+        extraCode+=`
           vec4 nn = texture2D( nameNumberMap, vUv );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, nn.rgb, nn.a );`;
+      }
+      /* paint + placed logos: the same shared atlas-space canvases the editor
+         composites, in the same order (logos under paint), sampled with the
+         same left/right-half remap when the editor's Mirror toggle is off. */
+      if(decals.paintMap){
+        shader.uniforms.logoMap={value:decals.logoMap};
+        shader.uniforms.paintMap={value:decals.paintMap};
+        shader.uniforms.uMirrorPaint={value:decals.mirror===false?0.0:1.0};
+        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
+        extraCode+=`
+          vec2 pUv = vUv;
+          if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
+          vec4 lg = texture2D( logoMap, pUv );
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, lg.rgb, lg.a );
+          vec4 pt = texture2D( paintMap, pUv );
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, pt.rgb, pt.a );`;
+      }
     }
+    // vIhSide/vIhY: which real body side and which bind-pose height a fragment
+    // belongs to, from the raw pre-skin `position` attribute (the rig is
+    // bind-pose symmetric and never gets an arbitrary runtime Y-rotation).
+    shader.vertexShader=shader.vertexShader
+      .replace('#include <common>','#include <common>\nvarying float vIhSide;\nvarying float vIhY;')
+      .replace('#include <begin_vertex>','#include <begin_vertex>\nvIhSide = position.x;\nvIhY = position.y;');
     shader.fragmentShader=shader.fragmentShader
       .replace('#include <common>','#include <common>\nuniform sampler2D maskMap;\nuniform vec3 zoneColor0;\nuniform vec3 zoneColor1;\nuniform vec3 zoneColor2;'+extraUniforms)
       .replace('#include <dithering_fragment>',`
         {
           vec4 zmask = texture2D( maskMap, vUv );
-          vec3 recolored = zoneColor0*zmask.r + zoneColor1*zmask.g + zoneColor2*zmask.b;
+          vec3 zc0 = zoneColor0, zc1 = zoneColor1, zc2 = zoneColor2;
+          if( vIhY < uSplitY ){ zc0 = splitZone0; zc1 = splitZone1; zc2 = splitZone2; }
+          vec3 recolored = zc0*zmask.r + zc1*zmask.g + zc2*zmask.b;
           float rw = clamp(zmask.r+zmask.g+zmask.b, 0.0, 1.0);
           gl_FragColor.rgb = mix( gl_FragColor.rgb, recolored, rw );${extraCode}
         }
         #include <dithering_fragment>`);
+    material.userData.ihShaderRef=shader;
   };
   material.needsUpdate=true;
 }
-/* Cached once and reused by every bot/goalie's own zone-recolor setup below —
-   the mask is purely a function of the shared PLAYER_B64 texture's PIXEL
-   DATA (which cluster of pixels is which zone), not of any one entity's
-   mesh/material instance, so re-deriving it per-bot (a real cost — image
-   readback + k-means-ish clustering over a 2048x2048 atlas) would be pure
-   waste when a full match can spawn 10+ skaters. Only the BODY (3-zone,
-   the case that passes a nameNumberMap) populates this — stick/neck don't
-   need a bot-side equivalent since bots/goalie use their own procedural
-   stick and gear, not this rig's GLTF stick or the neck zone. */
-let ihBodyMaskCache=null;
-function ihSetupZoneMaterial(material,maxZones,nameNumberMap){
-  const imgData=ihGetImageDataFromTexture(material.map);
-  const clusters=ihExtractPalette(imgData,maxZones+2,4);
-  const recolor=clusters.slice(0,maxZones);
-  const fixed=clusters.slice(maxZones);
-  const mask=ihBuildMaskTexture(imgData,recolor,fixed);
-  const zoneColors=recolor.map(c=>new THREE.Color(c[0]/255,c[1]/255,c[2]/255));
-  while(zoneColors.length<3)zoneColors.push(new THREE.Color(0,0,0));
-  ihInstallRecolorShader(material,mask,zoneColors,nameNumberMap);
-  if(nameNumberMap)ihBodyMaskCache=mask;
-  return zoneColors;
+/* Builds every body piece's own material + live Color objects on one entity's
+   visual. Returns {pieceId:{colors:[Color x3], material}} — mutate the Colors
+   in place to recolor (the shader holds the same objects). */
+function ihBuildPieceKit(visual,decals){
+  const kit=ihBuildKitMask(visual);
+  if(!kit)return null;
+  const out={};
+  kit.meshNames.forEach((meshName,mi)=>{
+    const mesh=visual.getObjectByName(meshName);
+    if(!mesh||!mesh.material)return;
+    mesh.material=mesh.material.clone(); // detach from the atlas-wide shared material
+    const pal=kit.palettes[mi];
+    const defs=IH_PIECES.filter(p=>p.mesh===meshName);
+    const primary=defs.find(d=>d.splitSide!=='below')||defs[0];
+    const mk=()=>{
+      const colors=pal.recolor.map(c=>new THREE.Color(c.color[0]/255,c.color[1]/255,c.color[2]/255));
+      const zoneCount=colors.length;
+      while(colors.length<3)colors.push(new THREE.Color(0,0,0)); // shader always reads 3
+      return{colors,zoneCount,material:mesh.material,mesh};
+    };
+    const above=mk();out[primary.id]=above;
+    const belowDef=defs.find(d=>d.splitSide==='below');
+    const below=belowDef?mk():null;
+    if(below)out[belowDef.id]=below;
+    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap,mirror:decals.mirror}):null;
+    ihInstallRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
+      below?{y:IH_SPLIT_Y,colors:below.colors}:null);
+  });
+  return out;
+}
+/* Same mapping core's ihtPiecesFromBody uses: a three-color team identity
+   spread over the kit the way the old atlas-wide mask used to spread it
+   (helmet followed Secondary, cage/laces/blades followed Trim, boots stayed
+   their own baked black), so a body-only loadout still looks like itself. */
+function ihPiecesFromBody(b){
+  const body=(b&&b.length===3)?b:['#020c3d','#4c0a16','#ffffff'];
+  return{jersey:body.slice(),pants:body.slice(),socks:body.slice(),
+    gloves:[body[0],body[1]],helmet:[body[1]],cage:[body[2]],
+    skates:['#000000'],laces:[body[2]],blades:[body[2]]};
+}
+function ihApplyPieceColors(pieces,colorMap){
+  if(!pieces||!colorMap)return;
+  Object.keys(colorMap).forEach(id=>{
+    const p=pieces[id];
+    if(!p)return;
+    (colorMap[id]||[]).forEach((hex,i)=>{if(p.colors[i]&&i<p.zoneCount)p.colors[i].set(hex);});
+  });
 }
 /* ============================== BOT/GOALIE APPEARANCE VARIATION ==============================
    Bots used to all get the exact same flat single-hue tint (tintTeam's
@@ -9813,26 +10614,56 @@ function ihApplyBotZoneRecolor(ent,team){
   const teamColors=ihGetTeamZoneColors(team);
   const number=ihAssignBotNumber(team);
   if(!bodyMesh.userData.ihZoneColors){
-    bodyMesh.material=bodyMesh.material.clone(); // detach from Cube002-007's shared reference before patching
-    const ownColors=teamColors.map(c=>c.clone());
-    const nameCanvas=document.createElement('canvas');
-    nameCanvas.width=nameCanvas.height=IH_DECAL_SIZE;
-    const nameCtx=nameCanvas.getContext('2d');
-    const nameTexture=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
-    nameTexture.flipY=false;
-    const mask=ihBodyMaskCache||ihGetBodyMask(bodyMesh.material);
-    ihInstallRecolorShader(bodyMesh.material,mask,ownColors,nameTexture);
-    bodyMesh.userData.ihZoneColors=ownColors;
-    bodyMesh.userData.ihNameCtx=nameCtx;
-    bodyMesh.userData.ihNameTexture=nameTexture;
-  }else{
-    const live=bodyMesh.userData.ihZoneColors;
-    live[0].copy(teamColors[0]);live[1].copy(teamColors[1]);live[2].copy(teamColors[2]);
+    /* The whole kit is per-piece now, so a bot needs its own piece materials
+       too — but only the JERSEY's has to be unique per bot (it carries that
+       skater's number decal). The other eight pieces are identical for every
+       skater on a team, so they're built ONCE per team and shared by
+       reference: a full match compiles ~1 program per bot plus 8 per team
+       instead of 9 per bot. (A material CLONE can't be shared safely here —
+       customProgramCacheKey closes over the original material's uuid, so a
+       clone would silently reuse the original's compiled program and lose its
+       own uniforms; sharing the exact same material instance is fine.) */
+    const kit=ihBuildPieceKit(ent.visual,{nameNumberMap:ihMakeNumberTexture(bodyMesh)});
+    if(!kit)return;
+    const shared=ihGetTeamPieceMats(team,kit);
+    Object.keys(kit).forEach(id=>{
+      if(id==='jersey')return;
+      const m=shared[id];
+      if(m&&kit[id].mesh)kit[id].mesh.material=m;
+    });
+    bodyMesh.userData.ihZoneColors=kit.jersey.colors;
   }
+  const live=bodyMesh.userData.ihZoneColors;
+  live[0].copy(teamColors[0]);live[1].copy(teamColors[1]);live[2].copy(teamColors[2]);
   ihDrawNumberToCanvas(bodyMesh.userData.ihNameCtx,bodyMesh.userData.ihNameTexture,
     '#'+teamColors[0].getHexString(),'#'+teamColors[1].getHexString(),'#'+teamColors[2].getHexString(),number);
   bodyMesh.userData.ihTeam=team;
   bodyMesh.userData.ihNumber=number;
+}
+/* Per-bot number plate canvas, stashed on the jersey mesh (its texture is what
+   the jersey material samples as nameNumberMap). */
+function ihMakeNumberTexture(bodyMesh){
+  const c=document.createElement('canvas');
+  c.width=c.height=IH_DECAL_SIZE;
+  const tex=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
+  tex.flipY=false;
+  bodyMesh.userData.ihNameCtx=c.getContext('2d');
+  bodyMesh.userData.ihNameTexture=tex;
+  return tex;
+}
+/* The eight non-jersey piece materials for a team, built once from whichever
+   entity happens to be first and then handed to every teammate. Colors come
+   from the same three-color team identity spread across the kit the way a
+   real uniform spreads it (ihPiecesFromBody). */
+let ihTeamPieceMats={A:null,B:null};
+function ihGetTeamPieceMats(team,kit){
+  if(ihTeamPieceMats[team])return ihTeamPieceMats[team];
+  const tc=ihGetTeamZoneColors(team);
+  ihApplyPieceColors(kit,ihPiecesFromBody(tc.map(c=>'#'+c.getHexString())));
+  const set={};
+  Object.keys(kit).forEach(id=>{if(id!=='jersey')set[id]=kit[id].material;});
+  ihTeamPieceMats[team]=set;
+  return set;
 }
 /* Bot/goalie equivalent of ihRedrawNameNumber — number only (no nameplate;
    AI skaters don't have a real name to show), reusing the same fixed-size
@@ -9854,17 +10685,6 @@ function ihDrawNumberToCanvas(ctx,texture,primary,secondary,trim,number){
   texture.image.data.set(imgData.data);
   texture.needsUpdate=true;
 }
-/* Fallback path for the rare case a bot's body zone-recolor gets requested
-   before the human player has ever set one up (so ihBodyMaskCache is still
-   empty) — computes+caches the mask directly, same as ihSetupZoneMaterial's
-   body branch does. */
-function ihGetBodyMask(material){
-  if(ihBodyMaskCache)return ihBodyMaskCache;
-  const imgData=ihGetImageDataFromTexture(material.map);
-  const clusters=ihExtractPalette(imgData,5,4);
-  ihBodyMaskCache=ihBuildMaskTexture(imgData,clusters.slice(0,3),clusters.slice(3));
-  return ihBodyMaskCache;
-}
 function ihFillRoundedRect(ctx,x,y,w,h,r,color){
   ctx.fillStyle=color;
   ctx.beginPath();
@@ -9872,6 +10692,8 @@ function ihFillRoundedRect(ctx,x,y,w,h,r,color){
   ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();ctx.fill();
 }
 let ihJerseyFont='Arial'; // synced from the Locker Room loadout's own font picker
+/* the name currently on the jersey — also what the HUD name tag draws */
+let ihPlayerName='';
 function ihFitText(ctx,text,maxWidth,startSize,minSize){
   let size=startSize;
   ctx.font=`bold ${size}px ${ihJerseyFont}`;
@@ -9932,41 +10754,187 @@ function ihRedrawNameNumber(name,number){
    meshes (expensive-ish — texture clustering — so this runs once, not per apply). */
 function ihSetupLockerRoomMaterials(){
   const bodyMesh=player.visual.getObjectByName('Cube001');
-  const neckMesh=player.visual.getObjectByName('Cube');
   const meshMain=stickGroup.getObjectByName('Plane001');
   const meshBladeTape=stickGroup.getObjectByName('Plane002');
   const meshGripTape=stickGroup.getObjectByName('Plane005');
-  if(!bodyMesh||!neckMesh||!meshMain||!meshBladeTape||!meshGripTape)return false;
+  if(!bodyMesh||!meshMain||!meshBladeTape||!meshGripTape)return false;
 
   ihNameCanvas=document.createElement('canvas');
   ihNameCanvas.width=ihNameCanvas.height=IH_DECAL_SIZE;
   ihNameCtx=ihNameCanvas.getContext('2d');
-  ihNameTexture=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
-  ihNameTexture.flipY=false;
+  ihNameTexture=ihMakeDecalTexture();
+  ihPaintCanvas=document.createElement('canvas');
+  ihPaintCanvas.width=ihPaintCanvas.height=IH_DECAL_SIZE;
+  ihPaintCtx=ihPaintCanvas.getContext('2d');
+  ihPaintTexture=ihMakeDecalTexture();
+  ihLogoCanvas=document.createElement('canvas');
+  ihLogoCanvas.width=ihLogoCanvas.height=IH_DECAL_SIZE;
+  ihLogoCtx=ihLogoCanvas.getContext('2d');
+  ihLogoTexture=ihMakeDecalTexture();
 
-  ihBodyColors=ihSetupZoneMaterial(bodyMesh.material,3,ihNameTexture);
-
-  neckMesh.material=neckMesh.material.clone();
-  ihNeckColors=ihSetupZoneMaterial(neckMesh.material,1,null);
-  ihNeckColors[0].set('#c68863'); // same realistic default the editor uses
+  ihPlayerPieces=ihBuildPieceKit(player.visual,
+    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture});
+  if(!ihPlayerPieces)return false;
+  ihBodyColors=ihPlayerPieces.jersey.colors;      // the name/number plate reads these
+  ihNeckColors=ihPlayerPieces.neck.colors;
+  ihNeckColors[0].set('#c68863');                 // same realistic default the editor uses
 
   meshBladeTape.material=meshBladeTape.material.clone();
   meshGripTape.material=meshGripTape.material.clone();
-  ihStickShaftBlade=ihSetupZoneMaterial(meshMain.material,2,null); // [0]=Blade,[1]=Shaft (cluster-frequency order, matches the editor)
+  ihStickShaftBlade=ihSetupStickZones(meshMain.material); // [0]=Blade,[1]=Shaft (geometry split, see IH_STICK_BLADE_Y)
   ihGripTapeMat=meshGripTape.material;
   ihBladeTapeMat=meshBladeTape.material;
   return true;
 }
+function ihMakeDecalTexture(){
+  const t=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
+  t.flipY=false;return t;
+}
+/* ---------- FREEHAND PAINT + PLACED LOGOS ----------
+   Hand-synced port of core's ihcReplayStrokes/ihcReplayDecals/ihcPaintCanvasXY
+   (see the single-file note at the top of this section). Strokes are stored as
+   UV POINT PATHS, not pixels, so replaying them here reproduces exactly what
+   the editor drew. Draw order matches the editor's: team design first, the
+   player's personal accents over it, logos under paint.
+   A straight line between two consecutive drag samples is only valid when the
+   UV mapping is continuous between them — crossing a UV seam means two
+   3D-adjacent points land far apart in texture space, and connecting them
+   would paint a streak across unrelated parts of the model. */
+const IH_SEAM_JUMP_UV=0.08;
+function ihPaintCanvasXY(uv,side,mirrorOn){
+  if(mirrorOn)return{x:uv.x*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
+  return{x:(uv.x*0.5+(side>=0?0.5:0))*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
+}
+function ihStampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
+  ctx.globalAlpha=opacity;
+  ctx.fillStyle=color;ctx.strokeStyle=color;
+  ctx.lineWidth=size;ctx.lineCap='round';ctx.lineJoin='round';
+  if(px!=null&&!seamJump){ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();}
+  else{ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();}
+}
+function ihReplayStrokes(ctx,strokes,mirrorOn){
+  (strokes||[]).forEach(s=>{
+    if(s.visible===false||!s.points)return;
+    let prevXY=null,prev=null;
+    s.points.forEach(p=>{
+      const xy=ihPaintCanvasXY(p,p.side,mirrorOn);
+      const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>IH_SEAM_JUMP_UV)||
+        (!mirrorOn&&prev&&prev.side!==p.side);
+      ihStampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
+        s.size,s.color,s.opacity,seamJump);
+      prevXY=xy;prev=p;
+    });
+  });
+  ctx.globalAlpha=1;
+}
+function ihReplayDecals(ctx,decals,logoLib,mirrorOn){
+  (decals||[]).forEach(d=>{
+    if(d.visible===false)return;
+    const lib=(logoLib||[]).find(l=>l.id===d.logoId);
+    if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
+    const xy=ihPaintCanvasXY({x:d.u,y:d.v},d.side,mirrorOn);
+    const size=IH_DECAL_SIZE*d.scale;
+    ctx.save();
+    ctx.translate(xy.x,xy.y);ctx.rotate(d.rotation||0);
+    ctx.drawImage(lib.img,-size/2,-size/2,size,size);
+    ctx.restore();
+  });
+}
+function ihSyncCanvasToTexture(ctx,texture){
+  texture.image.data.set(ctx.getImageData(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE).data);
+  texture.needsUpdate=true;
+}
+/* The logo bitmaps themselves live in the editor's own library key (they're
+   data URLs, far too big for the loadout snapshot) — decode async and redraw
+   the logo layer as each one lands. */
+let ihLogoLib=null,ihLastPaint=null;
+function ihApplyPaintLayers(paint){
+  if(!ihPaintCtx||!paint)return;
+  ihLastPaint=paint;
+  const mirror=paint.mirror!==false;
+  // the mirror convention has to match what the strokes were packed with —
+  // same single global uniform the editor uses (see its paintCanvasXY note)
+  ihSetMirrorUniform(mirror);
+  ihPaintCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  ihReplayStrokes(ihPaintCtx,paint.strokes,mirror);     // team design
+  ihReplayStrokes(ihPaintCtx,paint.accStrokes,mirror);  // personal accents on top
+  ihSyncCanvasToTexture(ihPaintCtx,ihPaintTexture);
+  if(ihLogoLib===null){
+    try{ihLogoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){ihLogoLib=[];}
+    ihLogoLib.forEach(l=>{l.img=new Image();l.img.onload=()=>ihRedrawLogoLayer();l.img.src=l.dataURL;});
+  }
+  ihRedrawLogoLayer();
+}
+function ihRedrawLogoLayer(){
+  if(!ihLogoCtx||!ihLastPaint)return;
+  const mirror=ihLastPaint.mirror!==false;
+  ihLogoCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  ihReplayDecals(ihLogoCtx,ihLastPaint.decals,ihLogoLib,mirror);
+  ihReplayDecals(ihLogoCtx,ihLastPaint.accDecals,ihLogoLib,mirror);
+  ihSyncCanvasToTexture(ihLogoCtx,ihLogoTexture);
+}
+function ihSetMirrorUniform(mirrorOn){
+  if(!ihPlayerPieces)return;
+  const seen=new Set();
+  Object.keys(ihPlayerPieces).forEach(id=>{
+    const mat=ihPlayerPieces[id].material;
+    if(!mat||seen.has(mat.uuid))return;
+    seen.add(mat.uuid);
+    const ref=mat.userData.ihShaderRef;
+    if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=mirrorOn?1:0;
+  });
+}
+/* The stick is its own GLB with its own texture, so it keeps the simple
+   whole-texture clustering the body used to use (no UV-island split needed —
+   one mesh IS one piece there). */
+/* Local-Y (pre-skin, unscaled) below which Plane001 is the BLADE paddle and
+   above which it is the composite shaft.
+   Derived from the asset's geometry, not from its texture — see
+   ihSetupStickZones for why the texture is useless here. Profiling Plane001's
+   2989 verts in bands along its own shaft axis shows a sharp transition at
+   y~=0.09: below it the mesh is dense and irregular (100-136 verts/band,
+   radial std 0.028-0.074 — the paddle and its ribbing), above it the mesh is
+   a sparse, near-perfectly-round tube (12-49 verts/band, std 0.002-0.021).
+   Render-verified by vertex-colouring the split: at 0.09 the recolour stops
+   exactly at the heel; by 0.11 it has visibly crept up the shaft. */
+const IH_STICK_BLADE_Y=0.09;
+/* The stick's shaft/blade split CANNOT come from the texture.
+   Plane001's map is a single flat colour (#010101 at every UV — measured by
+   sampling the atlas through the mesh's own UVs), so colour-clustering it into
+   "blade" + "shaft" zones produced one real cluster plus padding: one zone
+   silently owned the whole stick and the other was dead, which is why setting
+   the blade colour appeared to do nothing.
+   Geometry decides it instead, reusing the SAME uSplitY machinery that keeps
+   pants and socks independent on the one shared leg mesh: the mask marks every
+   opaque texel as zone 0, and the shader picks the blade palette below
+   IH_STICK_BLADE_Y and the shaft palette above it. `position.y` is pre-skin and
+   pre-scale, so the threshold holds at any runtime stick scale.
+   Returns [bladeColor, shaftColor] — the index order the caller already uses. */
+function ihSetupStickZones(material){
+  const imgData=ihGetImageDataFromTexture(material.map);
+  const src=imgData.data,w=imgData.width,h=imgData.height,out=new Uint8Array(w*h*4);
+  for(let p=0;p<w*h;p++){
+    const o=p*4;if(src[o+3]<20)continue;
+    out[o]=255;out[o+3]=255;               // one zone; geometry does the splitting
+  }
+  const mask=new THREE.DataTexture(out,w,h,THREE.RGBAFormat);
+  mask.flipY=false;mask.wrapS=mask.wrapT=THREE.ClampToEdgeWrapping;mask.needsUpdate=true;
+  const shaft=new THREE.Color('#101014'),blade=new THREE.Color('#101014'),unused=new THREE.Color(0,0,0);
+  ihInstallRecolorShader(material,mask,[shaft,unused,unused],null,
+    {y:IH_STICK_BLADE_Y,colors:[blade,unused,unused]});
+  return [blade,shaft];
+}
 /* Cheap: just reads localStorage and pushes color/name/number values into the
    already-built shader uniforms — safe to call again any time the loadout changes. */
 function ihApplySavedLoadout(){
-  if(!ihBodyColors)return;
+  if(!ihPlayerPieces)return;
   let name='',number='';
   try{
     const raw=localStorage.getItem(IH_LOADOUT_KEY);
     if(raw){
       const lo=JSON.parse(raw);
-      if(lo.body&&lo.body.length===3)lo.body.forEach((hex,i)=>ihBodyColors[i].set(hex));
+      // `pieces` is the per-piece shape; `body` alone is a pre-per-piece save
+      ihApplyPieceColors(ihPlayerPieces,lo.pieces||ihPiecesFromBody(lo.body));
       if(lo.neck)ihNeckColors[0].set(lo.neck);
       if(lo.stick&&lo.stick.length===4){
         ihStickShaftBlade[1].set(lo.stick[0]); // Shaft
@@ -9977,8 +10945,10 @@ function ihApplySavedLoadout(){
       name=lo.name||'';number=lo.number||'';
       const font=lo.font||'Arial';
       if(font!==ihJerseyFont){ihJerseyFont=font;ihNameFontSizeCache=null;ihNumberFontSizeCache=null;}
+      ihApplyPaintLayers(lo.paint);
     }
   }catch(e){console.warn('Locker Room loadout failed to load',e);}
+  ihPlayerName=name;
   ihRedrawNameNumber(name,number);
 }
 function applyLockerRoomLoadout(){
@@ -9987,7 +10957,8 @@ function applyLockerRoomLoadout(){
   ihApplySavedLoadout();
   // debug/test hook, same convention as window.__poseFrozen etc — `let`
   // top-level globals aren't reachable from outside this script's scope.
-  window.__ihLoadoutDebug={bodyColors:ihBodyColors,neckColors:ihNeckColors,stickShaftBlade:ihStickShaftBlade,gripTapeMat:ihGripTapeMat,bladeTapeMat:ihBladeTapeMat};
+  window.__ihLoadoutDebug={bodyColors:ihBodyColors,neckColors:ihNeckColors,stickShaftBlade:ihStickShaftBlade,gripTapeMat:ihGripTapeMat,bladeTapeMat:ihBladeTapeMat,
+    pieces:ihPlayerPieces,paintCanvas:()=>ihPaintCanvas,logoCanvas:()=>ihLogoCanvas};
 }
 window.__ihBotDebugSnapshot=()=>{
   const info=e=>{
@@ -10029,6 +11000,7 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
   },err=>console.error('bot load failed',err));
   loader.parse(b64ToBuf(STICK_B64),'',sgltf=>{
     stickGroup=sgltf.scene;stickGroup.visible=false;scene.add(stickGroup);
+    ihNoCull(stickGroup); // see ihNoCull: without this both tape wraps vanish
     applyLockerRoomLoadout();
     puck=createPuck();
     camera.position.copy(player.pos).addScaledVector(fwd(camYaw),-CONFIG.camDist).addScaledVector(up,CONFIG.camHeight);
@@ -10110,7 +11082,12 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
     ['jlegs','LEG JOINTS — isolated',[
       ['fHipR','R hip flex',-1.5,1.5,0.02],['fKneeR','R knee flex',-1.5,1.5,0.02],['fAnkleR','R ankle flex',-1.2,1.2,0.02],
       ['fHipL','L hip flex',-1.5,1.5,0.02],['fKneeL','L knee flex',-1.5,1.5,0.02],['fAnkleL','L ankle flex',-1.2,1.2,0.02],
-      ['hipTurnoutR','R hip turnout',-1.2,1.2,0.02],['hipTurnoutL','L hip turnout',-1.2,1.2,0.02]]],
+      ['hipTurnoutR','R hip turnout',-1.2,1.2,0.02],['hipTurnoutL','L hip turnout',-1.2,1.2,0.02],
+      ['stanceWiden','Stance width (hip abduction)',-0.4,0.6,0.01],['stanceSink','Stance sink (skates to ice)',-0.1,0.3,0.005],
+      ['shotStanceFrontHip','Shot: front hip fwd',-1.0,0.5,0.02],['shotStanceFrontKnee','Shot: front knee bend',-0.6,1.0,0.02],
+      ['shotStanceFrontAbd','Shot: front leg spread',-0.4,0.6,0.02],
+      ['shotStanceRearHip','Shot: rear hip back',-0.5,1.2,0.02],['shotStanceRearKnee','Shot: rear knee straighten',-1.0,0.6,0.02],
+      ['shotStanceRearAbd','Shot: rear leg spread',-0.4,0.8,0.02]]],
     ['body','BODY — isolated',[
       ['bodyOffX','Offset right',-1.0,1.0,0.005],['bodyOffY','Offset up',-1.0,1.0,0.005],
       ['bodyOffZ','Offset fwd',-1.0,1.0,0.005],['bodyRotY','Rotate yaw',-3.14,3.14,0.02]]],

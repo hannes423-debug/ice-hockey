@@ -254,12 +254,13 @@ function loadCharacter(cb){
     v.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
     const root=new THREE.Group();root.add(v);scene.add(root);
     player={root,visual:v,scale:s};
+    ihcNoCull(v);
     setupIdleSway(v);
     buildReflectionClone(v);
     done();
   },undefined,e=>{console.error('player load failed',e);done();});
   gltfLoader.parse(b64ToBuf(STICK_B64),'',gltf=>{
-    stickGroup=gltf.scene;scene.add(stickGroup);placeStickRest();done();
+    stickGroup=gltf.scene;scene.add(stickGroup);ihcNoCull(stickGroup);placeStickRest();done();
   },undefined,e=>{console.error('stick load failed',e);done();});
 }
 
@@ -360,11 +361,31 @@ function catLockLabel(catId){return ihtLockSource(TSTORE,ctxTeam(),catId);}
    and both call this — one save covers every edit site. Written back by
    ASSIGNMENT (not shared array references) because applyState/undo replaces
    the live arrays wholesale. */
+/* {pieceId:[hex,...]} for every TEAM-owned piece, in that piece's own zone
+   order — the shape the team store, presets, undo history and the game
+   loadout all speak. */
+function capturePieceColors(){
+  const out={};
+  TEAM_PIECE_IDS.forEach(id=>{
+    const m=mgrByKey(id);
+    if(m)out[id]=m.zones.map(z=>'#'+z.color.getHexString());
+  });
+  return out;
+}
+function applyPieceColors(pieces){
+  if(!pieces)return;
+  Object.keys(pieces).forEach(id=>{
+    const m=mgrByKey(id);
+    if(!m)return;
+    (pieces[id]||[]).forEach((hex,i)=>{if(m.zones[i])m.zones[i].setColor(hex);});
+  });
+}
 function saveToStore(){
   if(suppressStore||!bodyZM||!stickZM||!neckZone)return;
   const j=ctxJersey(),kctx=ctxKit();
   if(actingRole==='admin'){
-    j.design.body=bodyZM.zones.map(z=>'#'+z.color.getHexString());
+    j.design.pieces=capturePieceColors();
+    j.design.body=j.design.pieces.jersey.slice(); // legacy mirror of the jersey triple
     j.design.font=jerseyFont;
     j.design.paintStrokes=paintStrokes;
     j.design.decals=placedDecals;
@@ -384,7 +405,7 @@ function saveToStore(){
 function loadContext(){
   const t=ctxTeam(),j=ctxJersey(),kctx=ctxKit();
   suppressStore=true;
-  j.design.body.forEach((h,i)=>bodyZM.setZoneColor(i,h));
+  applyPieceColors(ihtDesignPieces(j.design));
   const stick=kctx.stick||PKIT.defaultStick||IHT_DEFAULT_STICK;
   stick.forEach((h,i)=>stickZM.setZoneColor(i,h));
   neckZone.setColor(PKIT.skin||'#c68863');
@@ -455,8 +476,16 @@ let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1;
    simple: old strokes don't remember their own original mirror setting. */
 let paintMirrorOn=true;
 function applyPaintMirrorUniform(){
-  const ref=bodyZM&&bodyZM.material&&bodyZM.material.userData.shaderRef;
-  if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=paintMirrorOn?1:0;
+  // every piece has its own material (and so its own copy of the uniform) now
+  if(!PIECES)return;
+  const seen=new Set();
+  Object.keys(PIECES).forEach(id=>{
+    const mat=PIECES[id].material;
+    if(!mat||seen.has(mat.uuid))return;
+    seen.add(mat.uuid);
+    const ref=mat.userData.shaderRef;
+    if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=paintMirrorOn?1:0;
+  });
 }
 const raycaster=new THREE.Raycaster();
 const pointerNDC=new THREE.Vector2();
@@ -549,11 +578,17 @@ function redrawPaintLayer(){
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
 }
 
-let bodyZM=null,stickZM=null,neckZone=null;
+let bodyZM=null,stickZM=null,neckZone=null,PIECES=null;
 function buildMaterialManagers(){
-  const bodyMat=player.visual.getObjectByName('Cube001').material; // jersey mesh; shared by pants/gloves/helmet/cage/skates/blades too
   setupDecalCanvases();
-  bodyZM=setupZoneMaterial(bodyMat,3,['Primary','Secondary','Trim'],{nameNumberMap:nameNumberTexture,logoMap:logoTexture,paintMap:paintTexture});
+  /* EVERY equipment piece gets its own material + its own zone palette,
+     clustered from only the atlas pixels that piece actually uses (see
+     ihcBuildPieceKit in core). Before this, all nine body meshes shared ONE
+     material and one atlas-wide mask, so "Socks · Primary" and "Jersey ·
+     Primary" were the same slider — changing one changed the whole kit. */
+  PIECES=ihcBuildPieceKit(player.visual,
+    {nameNumberMap:nameNumberTexture,logoMap:logoTexture,paintMap:paintTexture});
+  bodyZM=PIECES.jersey; // the jersey is still what the name/number plate reads its colors from
 
   /* "Neck" (mesh "Cube") is the only exposed-skin-adjacent geometry this
      model has — there is NO separate face/skin texture anywhere: the color
@@ -562,9 +597,7 @@ function buildMaterialManagers(){
      the cage bars, not a face. The helmet+cage cover the whole head, so
      "head skin color" genuinely has nothing to attach to on this asset —
      Neck is the closest honest, real, independently-colorable stand-in. */
-  const meshNeck=player.visual.getObjectByName('Cube');
-  meshNeck.material=meshNeck.material.clone();
-  neckZone=setupZoneMaterial(meshNeck.material,1,['Skin']).zones[0];
+  neckZone=PIECES.neck.zones[0];
   // default to a realistic skin tone rather than the auto-extracted collar
   // navy — the auto-extraction just classifies this mesh's baked color,
   // which happens to match the jersey collar since there's no real skin
@@ -582,13 +615,14 @@ function buildMaterialManagers(){
   const meshGripTape=stickGroup.getObjectByName('Plane005');
   meshBladeTape.material=meshBladeTape.material.clone();
   meshGripTape.material=meshGripTape.material.clone();
-  // labels are ['Blade','Shaft'], not frequency order ['Shaft','Blade'] — the
-  // more-frequent cluster in this texture is the lighter blade-paint color,
-  // confirmed by an offline render (the "51% cluster" is white, not black).
-  const shaftBladeMgr=setupZoneMaterial(meshMain.material,2,['Blade','Shaft']);
+  /* Shaft vs blade is split by GEOMETRY, not by clustering this material's
+     texture — the shaft mesh's UVs only ever sample the texture's black
+     region, so the old two-cluster split left the Blade swatch dead. See
+     setupStickZones in core. */
+  const shaftBladeMgr=setupStickZones(meshMain.material);
   const gripTapeZone=setupTintZone(meshGripTape.material,'Grip Tape');
   const bladeTapeZone=setupTintZone(meshBladeTape.material,'Blade Tape');
-  const zones=[shaftBladeMgr.zones[1],shaftBladeMgr.zones[0],gripTapeZone,bladeTapeZone];
+  const zones=[shaftBladeMgr.shaft,shaftBladeMgr.blade,gripTapeZone,bladeTapeZone];
   stickZM={
     material:meshMain.material,
     zones,
@@ -616,16 +650,24 @@ function editorModesForRole(){
     :EDITOR_MODES.filter(m=>m.id!=='admin');
 }
 let currentEditorMode='team';
+/* One category per real equipment PIECE — each drives only its own mesh's
+   material now (`piece` is the id in IHC_PIECES/core), so socks recolor
+   socks and nothing else. Pieces whose baked texture only ever had one color
+   (helmet shell, cage, boot, laces, blade steel) honestly show one zone
+   rather than three sliders that would move nothing. */
 const CATEGORIES=[
-  {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',mode:'team',
-   note:'This low-poly rig shares one uniform texture across jersey, pants, gloves and helmet — Primary / Secondary / Trim recolor the whole kit at once. Independent per-piece textures are the next asset pass.'},
+  {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',piece:'jersey',mode:'team'},
   {id:'decals',label:'Decals & Paint', icon:'🎨',cam:'upper',group:'decals',mode:'team'},
-  {id:'helmet',label:'Helmet', icon:'⛑️',cam:'helmet',group:'body',mode:'team'},
-  {id:'gloves',label:'Gloves', icon:'🧤',cam:'gloves',group:'body',mode:'team'},
-  {id:'pants', label:'Pants',  icon:'🩳',cam:'pants', group:'body',mode:'team'},
-  {id:'socks', label:'Socks',  icon:'🧦',cam:'skates',group:'body',mode:'team'},
-  {id:'skates',label:'Skates', icon:'⛸️',cam:'skates',group:'fixed',mode:'team',
-   note:'Boots, laces and blades are baked as a fixed dark finish in this pass — not yet on a colorable zone.'},
+  {id:'helmet',label:'Helmet', icon:'⛑️',cam:'helmet',group:'body',piece:'helmet',mode:'team'},
+  {id:'cage',  label:'Cage',   icon:'🥅',cam:'helmet',group:'body',piece:'cage',  mode:'team'},
+  {id:'gloves',label:'Gloves', icon:'🧤',cam:'gloves',group:'body',piece:'gloves',mode:'team'},
+  {id:'pants', label:'Pants',  icon:'🩳',cam:'pants', group:'body',piece:'pants', mode:'team'},
+  {id:'socks', label:'Socks',  icon:'🧦',cam:'pants', group:'body',piece:'socks', mode:'team',
+   note:'Socks and pants are one continuous leg mesh on this rig — they are split at the shorts hem, so this recolors only the sock below it.'},
+  {id:'skates',label:'Skates', icon:'⛸️',cam:'skates',group:'body',piece:'skates',mode:'team'},
+  {id:'laces', label:'Laces',  icon:'🪢',cam:'skates',group:'body',piece:'laces', mode:'team',
+   note:'The lace straps across each boot are their own little meshes — colorable independently of the boot.'},
+  {id:'blades',label:'Blades', icon:'🔪',cam:'skates',group:'body',piece:'blades',mode:'team'},
   {id:'skin',  label:'Skin',   icon:'🧑',cam:'helmet',group:'skin',mode:'player',
    note:'This model has no separate face/skin texture — the helmet+cage cover the whole head with no exposed geometry behind the bars. "Skin" recolors the one real stand-in this rig has: the neck/collar-trim sliver between helmet and jersey.'},
   {id:'stick', label:'Stick',  icon:'🏑',cam:'stick', group:'stick',mode:'player'},
@@ -910,11 +952,11 @@ function renderRightPanel(){
     wirePoliciesPanel();
     return;
   }
-  const mgrKey=cat.group==='stick'?'stick':'body';
-  const mgr=cat.group==='stick'?stickZM:bodyZM;
+  const mgrKey=cat.group==='stick'?'stick':cat.piece;
+  const mgr=mgrByKey(mgrKey);
   const editable=categoryEditable(cat);
   const lockSrc=cat.id==='stick'?catLockLabel('stick'):null;
-  html+=`<p class="rp-sub">${cat.group==='stick'?'Independent material — shaft &amp; blade tape.':'Realtime color &amp; material — changes apply instantly, no Apply button.'}</p>`;
+  html+=`<p class="rp-sub">${cat.group==='stick'?'Independent material — shaft &amp; blade tape.':'Own material, own zones — recolors this piece only.'}</p>`;
   if(!editable){
     html+=`<div class="rp-note">${cat.group==='stick'
       ?`🔒 ${lockSrc||ctxTeam().name} does not allow personal stick customization — these are the colors you'll play with. Switch to Team Admin to change the policy.`
@@ -935,8 +977,10 @@ function renderRightPanel(){
     </div>`;
   }
 
-  if(editable&&mgrKey==='body'){
-    html+=`<div class="rp-section"><div class="rp-section-title">Team Colors</div>${paletteHTML()}</div>`;
+  if(editable&&cat.group==='body'){
+    html+=`<div class="rp-section"><div class="rp-section-title">Team Colors</div>${paletteHTML()}
+      <label class="rp-check"><input type="checkbox" id="palAllPieces" checked> Apply to the whole kit</label>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:4px;">Off = recolor only ${cat.label.toLowerCase()}.</div></div>`;
   }
 
   if(editable){
@@ -995,7 +1039,12 @@ function wireRightPanel(mgrKey,mgr,editable){
   document.querySelectorAll('#paletteStrip .preset-card').forEach(el=>{
     el.addEventListener('click',()=>{
       const p=QUICK_PALETTES[+el.dataset.palette];
-      p.colors.forEach((c,i)=>bodyZM.setZoneColor(i,c));
+      const all=document.getElementById('palAllPieces');
+      /* A team colorway is a KIT-wide idea, so by default it paints every
+         team piece (each piece takes as many of the three colors as it has
+         zones); unchecking it makes the strip a per-piece shortcut instead. */
+      const targets=(all&&all.checked)?TEAM_PIECE_IDS.map(mgrByKey).filter(Boolean):[mgr];
+      targets.forEach(t=>p.colors.forEach((c,i)=>{if(t.zones[i])t.zones[i].setColor(c);}));
       refreshSwatches();pushHistory();showToast(p.name+' applied');
     });
   });
@@ -1013,9 +1062,17 @@ function wireRightPanel(mgrKey,mgr,editable){
   const exb=document.getElementById('btnExportCode');if(exb)exb.addEventListener('click',exportLoadoutCode);
   const imb=document.getElementById('btnImportCode');if(imb)imb.addEventListener('click',importLoadoutCode);
 }
+/* Every zone-editing path (panel rows, color picker, presets, undo) addresses
+   a manager by KEY: 'stick', or an equipment piece id from IHC_PIECES. */
+const TEAM_PIECE_IDS=IHC_PIECES.filter(p=>!p.personal).map(p=>p.id);
+function mgrByKey(key){
+  if(key==='stick')return stickZM;
+  return (PIECES&&PIECES[key])||null;
+}
 function refreshSwatches(){
-  ['body','stick'].forEach(mgrKey=>{
-    const mgr=mgrKey==='body'?bodyZM:stickZM;
+  TEAM_PIECE_IDS.concat(['stick','neck']).forEach(mgrKey=>{
+    const mgr=mgrByKey(mgrKey);
+    if(!mgr)return;
     mgr.zones.forEach((z,i)=>{
       const sw=document.getElementById('swatch-'+mgrKey+'-'+i);
       const hx=document.getElementById('hex-'+mgrKey+'-'+i);
@@ -1023,11 +1080,6 @@ function refreshSwatches(){
       if(hx)hx.textContent='#'+z.color.getHexString().toUpperCase();
     });
   });
-  if(neckZone){
-    const sw=document.getElementById('swatch-neck-0'),hx=document.getElementById('hex-neck-0');
-    if(sw)sw.style.background='#'+neckZone.color.getHexString();
-    if(hx)hx.textContent='#'+neckZone.color.getHexString().toUpperCase();
-  }
   redrawNameNumber(); // the name/number badge fills track Primary/Secondary/Trim
 }
 function wireNameplatePanel(){
@@ -1231,7 +1283,7 @@ function randomizeZones(mgr){
   mgr.zones.forEach((z,i)=>{
     const h=Math.random()*360,s=0.35+Math.random()*0.5,v=i===mgr.zones.length-1?0.82+Math.random()*0.16:0.22+Math.random()*0.55;
     const rgb=hsvToRgb(h,s,v);
-    mgr.setZoneColor(i,rgbToHex(rgb.r,rgb.g,rgb.b));
+    z.setColor(rgbToHex(rgb.r,rgb.g,rgb.b));
   });
 }
 
@@ -1291,18 +1343,17 @@ function applyLive(){
     if(s){s.color=currentHex();const sw=document.getElementById('strokeColorSwatch');if(sw)sw.style.background=s.color;redrawPaintLayer();renderPaintLayersList();}
     return;
   }
-  const mgr=cpState.mgrKey==='body'?bodyZM:stickZM;
-  mgr.setZoneColor(cpState.idx,currentHex());
+  const mgr=mgrByKey(cpState.mgrKey);
+  if(mgr&&mgr.zones[cpState.idx])mgr.zones[cpState.idx].setColor(currentHex());
   refreshSwatches();
 }
 function openColorPicker(anchorEl,mgrKey,idx){
   cpState.mgrKey=mgrKey;cpState.idx=idx;cpState.anchorEl=anchorEl;
   let startHex='#ffffff';
   if(mgrKey==='paint')startHex=paintBrushColor;
-  else if(mgrKey==='neck')startHex='#'+neckZone.color.getHexString();
   else if(mgrKey==='lclayer')startHex=(lcLayers[lcSelectedIdx]&&lcLayers[lcSelectedIdx].color)||'#7c5cff';
   else if(mgrKey==='paintstroke')startHex=(paintStrokes[idx]&&paintStrokes[idx].color)||'#7c5cff';
-  else startHex='#'+(mgrKey==='body'?bodyZM:stickZM).zones[idx].color.getHexString();
+  else{const m=mgrByKey(mgrKey);if(m&&m.zones[idx])startHex='#'+m.zones[idx].color.getHexString();}
   const rgb=hexToRgb(startHex);
   const hsv=rgbToHsv(rgb.r,rgb.g,rgb.b);
   cpState.h=hsv.h;cpState.s=hsv.s;cpState.v=hsv.v;
@@ -1904,6 +1955,7 @@ function renderPlacedDecalControls(){
 const history=[];let historyIdx=-1;
 function captureState(){
   return{
+    pieces:capturePieceColors(),
     body:bodyZM.zones.map(z=>'#'+z.color.getHexString()),
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
@@ -1926,7 +1978,9 @@ function pushHistory(){
   if(history.length>60){history.shift();historyIdx--;}
 }
 function applyState(s){
-  s.body.forEach((hex,i)=>bodyZM.setZoneColor(i,hex));
+  // pre-per-piece snapshots only carry `body` — migrate them the same way a
+  // stored team design gets migrated, so old history/presets still restore.
+  applyPieceColors(s.pieces||ihtPiecesFromBody(s.body));
   s.stick.forEach((hex,i)=>stickZM.setZoneColor(i,hex));
   if(s.neck)neckZone.setColor(s.neck);
   jerseyName=s.name||'';
@@ -1992,6 +2046,7 @@ function promptSavePreset(){
   const presets=loadPresets();
   presets.push({
     id:'p'+Date.now(),name,
+    pieces:capturePieceColors(),
     body:bodyZM.zones.map(z=>'#'+z.color.getHexString()),
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
@@ -2004,7 +2059,7 @@ function promptSavePreset(){
 }
 function applyPreset(id){
   const p=loadPresets().find(x=>x.id===id);if(!p)return;
-  p.body.forEach((hex,i)=>bodyZM.setZoneColor(i,hex));
+  applyPieceColors(p.pieces||ihtPiecesFromBody(p.body)); // presets saved before per-piece colors carry only `body`
   p.stick.forEach((hex,i)=>stickZM.setZoneColor(i,hex));
   if(p.neck)neckZone.setColor(p.neck);
   jerseyName=p.jname||'';jerseyNumber=p.jnumber||'';
