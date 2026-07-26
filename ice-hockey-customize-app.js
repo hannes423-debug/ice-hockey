@@ -108,10 +108,19 @@ const CAM_PRESETS={
 const camState={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
 const camGoal={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
 let autoRotate=true,dragMode=null,lastPX=0,lastPY=0,currentPresetName='full';
+/* Pitch limits are clamped where the pitch is SET, not where the camera is
+   positioned. Clamping only at the render step let camGoal.pitch keep
+   integrating past the limit while the view stayed frozen: a normal upward
+   drag ran it to ~8.6 rad against a 0.58 ceiling, and the camera then ignored
+   1600px of downward drag before it moved again — it read as a stuck camera.
+   The top limit is high enough to actually look DOWN on the crown of the
+   helmet, which is what painting the top of it needs. */
+const CAM_PITCH_MIN=-0.35,CAM_PITCH_MAX=1.15;
+const clampPitch=p=>Math.max(CAM_PITCH_MIN,Math.min(CAM_PITCH_MAX,p));
 
 function goToPreset(name){
   const p=CAM_PRESETS[name]||CAM_PRESETS.full;
-  camGoal.yaw=p.yaw;camGoal.pitch=p.pitch;camGoal.dist=p.dist;
+  camGoal.yaw=p.yaw;camGoal.pitch=clampPitch(p.pitch);camGoal.dist=p.dist;
   camGoal.target.set(p.target[0],p.target[1],p.target[2]);
   currentPresetName=name;
   document.querySelectorAll('#camPresets .cam-btn').forEach(b=>b.classList.toggle('active',b.dataset.cam===name));
@@ -123,7 +132,7 @@ function updateCamera(dt){
   camState.dist+=(camGoal.dist-camState.dist)*k;
   camState.target.lerp(camGoal.target,k);
   if(autoRotate&&!dragMode)camGoal.yaw+=dt*0.16;
-  const p=Math.max(-0.2,Math.min(0.58,camState.pitch));
+  const p=camState.pitch;
   const x=camState.target.x+Math.sin(camState.yaw)*Math.cos(p)*camState.dist;
   const y=camState.target.y+Math.sin(p)*camState.dist;
   const z=camState.target.z+Math.cos(camState.yaw)*Math.cos(p)*camState.dist;
@@ -177,7 +186,7 @@ renderer.domElement.addEventListener('pointermove',e=>{
     if(uv)moveSelectedDecal(uv);
   }else if(dragMode==='orbit'){
     const dx=e.clientX-lastPX,dy=e.clientY-lastPY;lastPX=e.clientX;lastPY=e.clientY;
-    camGoal.yaw-=dx*0.0068;camGoal.pitch+=dy*0.005;
+    camGoal.yaw-=dx*0.0068;camGoal.pitch=clampPitch(camGoal.pitch+dy*0.005);
     camState.yaw=camGoal.yaw;camState.pitch=camGoal.pitch; // direct while dragging, no lag
   }
 });
@@ -531,8 +540,57 @@ function getPaintTargetMeshes(){
   const names=PAINT_TARGET_MESHES[paintTarget]||[];
   return names.map(n=>player.visual.getObjectByName(n)).filter(Boolean);
 }
+/* ----- skinned raycast proxy -----
+   three.js r128 raycasts a SkinnedMesh against its BIND-POSE vertices:
+   Mesh.raycast reads geometry.attributes.position straight off the buffer and
+   never applies boneTransform. The editor's player stands in a posed,
+   idle-swaying stance, so the invisible thing the ray actually hits sits well
+   below the body you see. Measured on the helmet: it RENDERS spanning world Y
+   1.740-2.061, its collider spans 1.581-1.870 — a 19cm drop.
+   Everything below the crown still appeared to work because the two shells
+   overlap enough to catch a ray (at a subtly wrong UV), but the top ~79 screen
+   pixels of the helmet had no collider behind them at all, so every stroke
+   there was silently swallowed — "the top of the helmet can't be painted on".
+   Same family as the bind-pose bounding-sphere frustum-culling bug that hid
+   the grip tape, and the fix has the same shape: mirror the skinned positions
+   into a plain Mesh and raycast THAT. It shares the source uv/index buffers,
+   so the stock raycaster still does its own barycentric UV interpolation and
+   painting behaves exactly as before everywhere it already worked.
+   Refresh is gated on the render frame: the idle sway moves the head every
+   frame, so a cached pose would go stale, but re-skinning more than once per
+   frame is pure waste (~1ms per target mesh). */
+let paintProxyFrame=-1;
+const _ppv=new THREE.Vector3();
+function skinnedPaintProxy(mesh){
+  if(!mesh.isSkinnedMesh||!mesh.geometry.attributes.skinIndex)return mesh;
+  let p=mesh.userData._paintProxy;
+  if(!p){
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(
+      new Float32Array(mesh.geometry.attributes.position.count*3),3));
+    if(mesh.geometry.attributes.uv)g.setAttribute('uv',mesh.geometry.attributes.uv);
+    if(mesh.geometry.index)g.setIndex(mesh.geometry.index);
+    // never added to the scene and never rendered — it exists only to be hit
+    p=new THREE.Mesh(g,mesh.material);
+    p.matrixAutoUpdate=false;p.frustumCulled=false;p.visible=false;
+    mesh.userData._paintProxy=p;
+    mesh.userData._paintProxyFrame=-1;
+  }
+  if(mesh.userData._paintProxyFrame!==paintProxyFrame){
+    mesh.userData._paintProxyFrame=paintProxyFrame;
+    const src=mesh.geometry.attributes.position,dst=p.geometry.attributes.position;
+    // boneTransform returns MESH-LOCAL skinned position (it applies
+    // bindMatrixInverse last), which is exactly the space the proxy's own
+    // matrixWorld then takes to world — so copying mesh.matrixWorld is right.
+    for(let i=0;i<src.count;i++){mesh.boneTransform(i,_ppv);dst.setXYZ(i,_ppv.x,_ppv.y,_ppv.z);}
+    dst.needsUpdate=true;
+    p.geometry.computeBoundingSphere();
+    p.matrix.copy(mesh.matrixWorld);p.matrixWorld.copy(mesh.matrixWorld);
+  }
+  return p;
+}
 function raycastUV(clientX,clientY){
-  const meshes=getPaintTargetMeshes();
+  const meshes=getPaintTargetMeshes().map(skinnedPaintProxy);
   if(!meshes.length)return null;
   const r=renderer.domElement.getBoundingClientRect();
   pointerNDC.x=((clientX-r.left)/r.width)*2-1;
@@ -1706,7 +1764,11 @@ function renderLogoLibraryGrid(){
   });
 }
 function placeDecal(logoId){
-  const meshes=getPaintTargetMeshes();
+  // same skinned-proxy raycast the brush uses — without it a centre-screen
+  // drop onto the helmet missed the bind-pose collider and fell back to the
+  // atlas centre (0.5,0.5), which is outside the helmet's UV island entirely,
+  // so the logo landed on no visible surface at all.
+  const meshes=getPaintTargetMeshes().map(skinnedPaintProxy);
   let uv={x:0.5,y:0.5},side=1;
   if(meshes.length){
     raycaster.setFromCamera(new THREE.Vector2(0,0),camera);
@@ -2175,6 +2237,7 @@ loadCharacter(()=>{
   function tick(){
     requestAnimationFrame(tick);
     const dt=Math.min(clock.getDelta(),0.05);
+    paintProxyFrame++;   // invalidates the skinned raycast proxies once per frame
     updateCamera(dt);
     animateIdle(dt);
     renderer.render(scene,camera);
