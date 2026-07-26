@@ -4168,6 +4168,12 @@ const CONFIG={
   snapAlong:0.06,gripLock:1,
   lMode:0,lSlideT:0.45,lFreeX:-0.25,lFreeY:0.9,lFreeZ:0.35,
   rPalmX:0.06,rPalmY:0,rPalmZ:0.015,lPalmX:0.06,lPalmY:0,lPalmZ:0.015,
+  /* FINGER GRIP (see poseFingers — axis/signs measured on this rig). Segment
+     curls run base->mid->tip; the middle knuckle folds hardest, which is what
+     a hand wrapped around a shaft actually does. gripThumb is negative because
+     the thumb has to oppose. gripCurlRelax is how much curl an OPEN hand keeps
+     (a released hand is not a flat plank). */
+  gripCurlBase:0.75,gripCurlMid:1.00,gripCurlTip:0.72,gripThumb:-0.62,gripCurlRelax:0.25,
   gripOrient:1,rGripAxX:0,rGripAxY:0,rGripAxZ:1,rHandTwist:0,
   lGripAxX:0,lGripAxY:0,lGripAxZ:1,lHandTwist:0,
   puckEdit:0,puckEdX:0.35,puckEdY:0.03,puckEdZ:0.9,
@@ -4281,6 +4287,74 @@ const CONFIG={
      which is what actually happens. */
   strideFwdGain:1.1,strideBackGain:1.4,strideKneeLift:0.26,strideKneeAmp:0.55,strideAbdGain:0.35,
   cadenceIdleHz:0.9, // only used when there is no skating state to read a cycle from
+  /* SKATING BODY DYNAMICS ("no weight, no hip/shoulder sway"). The stride was
+     entirely legs: the pelvis and shoulders never moved, so the skater read as
+     a torso being carried along on top of moving feet. Everything here runs off
+     the SAME strideCyclePhase the legs do, so the body can never drift out of
+     sync with the feet.
+     ALL OF IT IS SPINE ROTATION, deliberately — this rig has no foot IK, the
+     legs hang off the root, so translating the root to sway the hips would
+     slide both skates sideways (and a vertical bob would push them through the
+     ice or lift them off it). Rotating at spine_01 moves the upper body about
+     the pelvis and leaves the legs alone, which is where hip/shoulder sway is
+     actually read from anyway.
+       swayHipRoll  - torso rolls over the SUPPORT leg (the COM rides the
+                      gliding leg; it does not sit centred between the skates)
+       swayChestCounter - how much of that roll the chest cancels. >1 means the
+                      shoulders actively tilt the OTHER way, which is the
+                      visible shoulder sway rather than a rigid leaning post
+       swayHipTwist - pelvis rotates as the driving leg goes back
+       swayShoulderCounter - shoulders counter-rotate against that twist (the
+                      classic skating separation between hips and shoulders)
+       swayDrivePitch - torso pitches forward into each push, twice a cycle,
+                      which is the "weight" beat; foot-safe because it's pitch
+                      at the spine, not a root bob
+       swayHeadLevel - fraction of the roll the head cancels to keep eyes level */
+  swayHipRoll:0.115,swayChestCounter:1.45,swayHipTwist:0.10,swayShoulderCounter:1.6,
+  swayDrivePitch:0.095,swayHeadLevel:0.55,
+  /* swayHipShift — the one part that CANNOT be done as a spine rotation: the
+     pelvis itself travelling laterally over the support leg. Rotating the spine
+     leans the chest over that leg but leaves the hips bolted to the centre
+     line, which still reads as a torso wobbling on a rigid base.
+     This does translate the root, so both skates come with it — the honest cost
+     of having no foot IK. Kept deliberately small: at 0.045 the planted skate
+     slides a few cm, far less than the stride's own abduction already sweeps
+     it, so it disappears into the footwork instead of looking like a glide.
+     Raise it for a more exaggerated sway and the skates will start to skid. */
+  swayHipShift:0.045,
+  /* AUTO STICK MOTION — only while the anchored skill stick is OFF (with it on
+     the blade is the player's to steer, see ssUpdate). Without this the stick
+     is welded to a fixed point in front of the chest whenever the player isn't
+     aiming, which is most of the time and is what makes the upper body look
+     frozen while the legs skate.
+       stickSway/stickFwd - the stick riding along with the stride (puck or no
+                      puck) because it is held in two hands off a twisting torso
+       cradle*      - the extra puck-control figure-eight while actually
+                      carrying. cradleHz is per second; real stickhandling runs
+                      roughly 1-2 cradles/s and tightens up at speed
+                      (cradleSprintMul), it is not stride-locked. */
+  stickSway:0.10,stickFwd:0.06,
+  cradleSide:0.20,cradleFwd:0.085,cradleHz:1.35,cradleSprintMul:0.55,
+  /* idle handling while the skill stick is ON (see ssUpdate/autoStickScale).
+     ssIdleDefMax/MoveMax are the "is the player actually holding it still"
+     thresholds; the fade-out is much faster than the fade-in so grabbing the
+     stick back is instant while it drifts into motion gently. */
+  ssIdleDelay:0.8,ssIdleDefMax:0.10,ssIdleMoveMax:1.5,
+  ssIdleFadeIn:1.6,ssIdleFadeOut:9,ssIdleHandleMul:0.45,
+  /* ONE-HAND SPRINT CARRY (see updateArmCarry / the armCarry block in
+     poseStick). Sprinting with no puck: bottom hand releases, the free arm
+     pumps with the stride, and the blade comes up off the ice — dragging a
+     stick along the ice at full speed is both wrong and slow.
+     armCarryLift raises the blade, armCarryBack pulls the stick in toward the
+     body so it isn't speared out front while the arm is pumping. */
+  armCarryRate:5,
+  /* where the BLADE goes while carrying one-handed: out in front at roughly
+     shin height, angled across the body. These set the shaft ANGLE, which is
+     what actually decides the tip height (see the carry block in updatePlayer). */
+  armCarryReach:1.55,armCarryBladeY:0.45,armCarrySideAim:-0.18,
+  /* where the FREE (bottom) hand goes, and how hard it pumps */
+  armCarryHeight:1.12,armCarrySide:0.36,armCarryFwd:0.02,armCarrySwing:0.32,
+  armCarryMinSpeedFrac:0.7,
   reachRadius:1.3,
   /* puck sits ~0.88m in front of the skates — the distance a 1.45m stick
      held at a real waist-height grip (gripUp/gripFwd) actually reaches with
@@ -4336,6 +4410,20 @@ const CONFIG={
   aimErrSkillMax:0.08,aimErrSkillMin:0,
   aimErrSpeedMax:0.025,aimErrTurnMax:0.11,aimErrPushMax:0.175,
   aimErrDistRef:8,aimErrDistMax:0.05,aimErrCap:0.275,
+  /* TURN-INTO-THE-SHOT (see startTurnShot). You cannot shoot at something
+     behind you without turning to it first — the old code just fired instantly
+     at any angle, so a slapshot straight backwards left the puck while the
+     skater faced the other way. Past turnShotMin off the facing, the release is
+     HELD while the player wheels around, then the puck is struck out of that
+     rotation. Three consequences, all of them the point:
+       - the release is slower, scaled by how far there is to turn
+       - accuracy drops (turnShotErrPerRad feeds computeAimError, which is what
+         the aim preview ribbon is drawn from, so the cone visibly widens)
+       - it looks like hockey instead of a turret
+     turnShotMin 0.62 rad is ~35 degrees: anything inside that is a normal
+     shoulder-and-hip rotation you can take without repositioning your feet. */
+  turnShotEnable:1,turnShotMin:0.62,turnShotSecPerRad:0.16,turnShotMaxDur:0.42,
+  turnShotErrPerRad:0.10,turnShotErrCap:0.22,
   /* EA-PACE: shot speeds pushed back toward the real-NHL numbers EA uses
      (wrist ~54-74mph here). The old "crosses the screen too fast" objection
      was mostly a camera-height artifact — re-judged after the broadcast
@@ -5151,6 +5239,38 @@ function createPlayer(gltf){
   // goaliePose can reset to a known-good base every frame before flexing —
   // see resetPoseJoints() for why this matters without an AnimationMixer.
   for(const k in ent.joints)ent.joints[k].userData.restQuat=ent.joints[k].quaternion.clone();
+  /* FINGERS. This rig carries a full hand (4 fingers x 3 segments + a 3-segment
+     thumb + 4 palm bones per side, Blender metarig names like "f_index.01.R"),
+     but nothing ever posed them, so every finger rendered in its BIND pose —
+     flat and splayed open. That is the "hands look off / fingers extended when
+     they should be closed" report: the hands were being oriented onto the shaft
+     correctly, they just were not GRIPPING it.
+     Captured separately from ent.joints because the names never go through
+     remapBoneNames and nothing else needs them by key. Same restQuat treatment,
+     for the same reason — flexBone premultiplies, so without a per-frame reset
+     the curl would compound every frame (see resetPoseJoints). */
+  ent.fingers={r:[],l:[]};
+  const FGRP=['f_index','f_middle','f_ring','f_pinky'],FSEG=['01','02','03'];
+  ['r','l'].forEach(sd=>{
+    const S=sd.toUpperCase();
+    FGRP.forEach(g=>{
+      const chain=[];
+      FSEG.forEach(seg=>{
+        const b=v.getObjectByName(g+'.'+seg+'.'+S)||v.getObjectByName(g+seg+S);
+        if(b)chain.push(b);
+      });
+      if(chain.length)ent.fingers[sd].push({kind:'finger',bones:chain});
+    });
+    const th=[];
+    FSEG.forEach(seg=>{
+      const b=v.getObjectByName('thumb.'+seg+'.'+S)||v.getObjectByName('thumb'+seg+S);
+      if(b)th.push(b);
+    });
+    if(th.length)ent.fingers[sd].push({kind:'thumb',bones:th});
+  });
+  ent.fingers.r.forEach(f=>f.bones.forEach(b=>b.userData.restQuat=b.quaternion.clone()));
+  ent.fingers.l.forEach(f=>f.bones.forEach(b=>b.userData.restQuat=b.quaternion.clone()));
+  if(!ent.fingers.r.length)console.warn('street_hockey: no finger bones found — hands will not close on the stick');
   if(!ent.armL2)console.warn('street_hockey: left arm IK chain not found — off-hand will not track the stick');
   ihNoCull(v); // posed skinned meshes: bind-pose bounding spheres cull wrongly
   return ent;
@@ -5212,6 +5332,48 @@ function snapHandToShaft(arm,ax,ay,az,dirWorld,twist){
   const pq=new THREE.Quaternion();hb.parent.getWorldQuaternion(pq);
   hb.quaternion.copy(pq.clone().invert().multiply(qTarget));
   hb.updateWorldMatrix(true,true);
+}
+
+/* ----- FINGER GRIP -----
+   Nothing ever posed the fingers, so they rendered in bind pose: splayed wide
+   open, which is what read as "the hands look off / fingers extended when they
+   should be closed". The hands were being oriented onto the shaft correctly —
+   they simply were not closing on it.
+   AXIS AND SIGN ARE MEASURED, NOT ASSUMED (the usual rule on this rig). Sweeping
+   each candidate local axis and watching the mean fingertip distance from the
+   shaft axis:
+     local Y  0.205 flat across the whole sweep  -> Y is the bone's LONG axis,
+              rotating about it only spins the finger (Blender convention)
+     local X  0.205 at rest -> 0.128 at +1.4, and 0.143 at -1.4
+     local Z  behaves almost identically to X (the two are near-degenerate here)
+   So +X closes and it closes on BOTH hands (not mirrored, as it would be on
+   many rigs — worth knowing before "fixing" the left hand). Confirmed visually
+   at an extreme 2.0 rad: the open splayed glove folds into a fist.
+   The thumb runs the other way, as it must to oppose the fingers: measured
+   0.137 -> 0.039 at -1.2 on the right.
+   Written as an ABSOLUTE local rotation (rest quaternion * curl) rather than
+   through flexBone, so it is idempotent — calling it every frame cannot
+   compound the way a premultiplied relative rotation would. */
+const _fingerAxis=new THREE.Vector3(1,0,0);
+const _fingerQ=new THREE.Quaternion();
+function poseFingers(ent,side,close){
+  const set=ent.fingers&&ent.fingers[side];
+  if(!set||!set.length)return;
+  const c=clamp(close===undefined?1:close,0,1);
+  const seg=[CONFIG.gripCurlBase,CONFIG.gripCurlMid,CONFIG.gripCurlTip];
+  for(let g=0;g<set.length;g++){
+    const f=set[g],isThumb=f.kind==='thumb';
+    for(let i=0;i<f.bones.length;i++){
+      const b=f.bones[i];
+      if(!b.userData.restQuat)continue;
+      /* an OPEN hand isn't a flat hand — a released bottom hand still rests
+         with a little natural curl, so relax toward gripCurlRelax, not zero */
+      const full=isThumb?CONFIG.gripThumb:(seg[i]!==undefined?seg[i]:seg[seg.length-1]);
+      const ang=full*(CONFIG.gripCurlRelax+(1-CONFIG.gripCurlRelax)*c);
+      b.quaternion.copy(b.userData.restQuat)
+        .multiply(_fingerQ.setFromAxisAngle(_fingerAxis,ang));
+    }
+  }
 }
 
 /* measured arm length (upper+forearm), cached per entity, for grip-lock reach solving */
@@ -5432,9 +5594,45 @@ function applyJointFlex(ent,dt){
   const strideAmp=(strideOn?(0.4+0.6*speedFrac):0.05)*(1-strideSuppress);
   legStridePose(J,'r',ent.strideCyclePhase,strideAmp,Rv,F0);
   legStridePose(J,'l',ent.strideCyclePhase+Math.PI,strideAmp,Rv,F0);
-  // lateral weight rock: hips/spine sway toward whichever leg is gliding,
-  // same phase signal as the stride so it doesn't fight the push/recovery.
-  flexBone(J.spine_01,F0,Math.sin(ent.strideCyclePhase)*0.05*strideAmp);
+  /* ----- WEIGHT / HIP SWAY / SHOULDER SWAY -----
+     This used to be one line: a 0.05 rad roll at spine_01. That is ~3 degrees,
+     small enough to be invisible, which is why the skating read as having no
+     weight in it at all.
+     Phase convention comes straight from legStridePose: sin(phase) > 0 is the
+     RIGHT leg driving (push = max(0,sin)), so the support/glide leg is the
+     LEFT one, and the body's mass belongs over THAT leg.
+     Sign note, measured on this rig and consistent with the stance-width code
+     just above (`flexBone(thigh_r,F0,-stanceWiden)` spreads the RIGHT leg):
+     a NEGATIVE rotation about F0 goes toward the character's right, a POSITIVE
+     one toward its left. So +sin(phase) leans toward the character's left,
+     which is the support side while the right leg drives. That matches what
+     the old single line was doing — the direction was already right, there was
+     just almost none of it. */
+  const swPh=ent.strideCyclePhase,swS=Math.sin(swPh),swAmp=strideAmp;
+  const hipRoll=swS*CONFIG.swayHipRoll*swAmp;
+  flexBone(J.spine_01,F0,hipRoll);
+  /* the pelvis itself rides over the support leg. Consumed by the root
+     position in updatePlayer (one frame later, which on a smooth sinusoid is
+     invisible) because the root transform is composed before poseStick runs. */
+  ent.swayLat=swS*CONFIG.swayHipShift*swAmp;
+  /* shoulders do NOT ride the hips rigidly. spine_03 is a descendant of
+     spine_01, so its rotation COMPOUNDS: countering by more than 1x leaves the
+     chest tilted the opposite way to the pelvis, which is the actual sway you
+     see on the ice (and at exactly 1x the shoulders would simply stay level). */
+  flexBone(J.spine_03,F0,-hipRoll*CONFIG.swayChestCounter);
+  /* hip/shoulder separation. The driving leg going back rotates the pelvis
+     toward that same side (right leg back = the body turns right), and turning
+     toward this rig's right is a NEGATIVE rotation about `up` — same fact the
+     mohawk lead relies on. The shoulders counter-rotate against it. */
+  const hipTwist=-swS*CONFIG.swayHipTwist*swAmp;
+  flexBone(J.spine_01,up,hipTwist);
+  flexBone(J.spine_03,up,-hipTwist*CONFIG.swayShoulderCounter);
+  /* the weight beat: the torso drives forward into each push and eases back
+     between them. TWICE per cycle (once per leg), hence |sin|. Pitch at the
+     spine rather than a root bob so the skates keep their ice contact. */
+  flexBone(J.spine_02,Rv,-Math.abs(swS)*CONFIG.swayDrivePitch*swAmp);
+  // eyes stay level: the head gives back part of the torso roll
+  flexBone(J.neck_01,F0,-hipRoll*CONFIG.swayHeadLevel);
 }
 
 /* ----- pose locks: per-part "permanent" (always hold this exact stance —
@@ -5530,7 +5728,24 @@ function poseStick(ent,aim,dt){
   const dxz=new THREE.Vector3(dir.x,0,dir.z);let lat=0;
   if(dxz.lengthSq()>1e-6){dxz.normalize();lat=Math.atan2(dxz.x*F.z-dxz.z*F.x,dxz.x*F.x+dxz.z*F.z);}
   const zoneNow=zoneOf(lat); // which reach zone we're in right now, for soft-locked parts
-  ent.lastLat=lat; // read by the shot-type state machine (wrist vs backhand) in updatePlayer
+  ent.lastLat=lat; // drives the spine twist and hand roll — follows the blade, sway included
+  /* STANCE ANGLE: the same lateral angle with the COSMETIC auto stick motion
+     (stride sway + puck cradle, see updateAutoStick) taken back out.
+     lastLat has to keep the sway in it, because the torso and hands genuinely
+     should follow the blade. Gameplay must not: the cradle sweeps ~0.2m each
+     way, which is more than enough to cross zoneMidHalf and silently turn a
+     wrist shot into a backhand depending on when the click lands, and to cross
+     lat=0 with more than dekeMinSwing of travel — which would fire a phantom
+     deke/toe-drag on every single cradle. Everything that makes a DECISION off
+     the stance reads this instead. */
+  let stanceLat=lat;
+  if(ent.autoSway&&ent.autoSway.lengthSq()>1e-9){
+    const dcl=aim.clone().sub(ent.autoSway).sub(anchor);
+    const dxzC=new THREE.Vector3(dcl.x,0,dcl.z);
+    if(dxzC.lengthSq()>1e-6){dxzC.normalize();
+      stanceLat=Math.atan2(dxzC.x*F.z-dxzC.z*F.x,dxzC.x*F.x+dxzC.z*F.z);}
+  }
+  ent.stanceLat=stanceLat;
   /* the ROOT (hips/legs/skates) is driven ONLY by ent.heading — i.e. WASD
      (or the shot-lock/pivot systems in updatePlayer), NEVER by mouse aim.
      Only the SPINE twists toward the aim, clamped to a realistic torso
@@ -5651,6 +5866,22 @@ function poseStick(ent,aim,dt){
         support=butt.clone().addScaledVector(dir,t0);
       }
     }
+    /* ONE-HAND SPRINT CARRY. Flat out with no puck, a real skater doesn't keep
+       both hands on the stick raking the ice — the bottom hand comes off, the
+       stick is carried in the top hand alone, and the free arm pumps with the
+       stride for drive. Blended (ent.armCarry, set in updatePlayer) so it eases
+       in and out instead of snapping.
+       The free arm swings OPPOSITE its own leg — the left arm drives forward as
+       the left leg goes back. The left leg runs at strideCyclePhase+PI, so its
+       push is -sin(phase), and the arm therefore leads on +sin(phase). */
+    if((ent.armCarry||0)>0.02){
+      const swing=Math.sin(ent.strideCyclePhase||0)*CONFIG.armCarrySwing;
+      const free=ent.pos.clone()
+        .addScaledVector(up,CONFIG.armCarryHeight)
+        .addScaledVector(Rv0,CONFIG.armCarrySide)
+        .addScaledVector(F,CONFIG.armCarryFwd+swing);
+      support=support.clone().lerp(free,clamp(ent.armCarry,0,1));
+    }
     if(shL){
       const lSwivelV=lv('lelbow','lSwivel',zoneNow);
       if(lSwivelV){const axL=support.clone().sub(shL).normalize();
@@ -5676,6 +5907,12 @@ function poseStick(ent,aim,dt){
     ent.gz.lhand=support.clone();
     ent.gz.lelbow=lPin?lPin.clone():support.clone().addScaledVector(lPoleF,0.35);
   }
+  /* CLOSE THE HANDS. Runs last, after both arms are IK'd and both hands have
+     been oriented onto the shaft, so the fingers curl around wherever the hand
+     actually ended up. ent.gripCloseR/L let a caller open a hand (the one-hand
+     sprint carry releases the bottom hand, see updateArmCarry). */
+  poseFingers(ent,'r',ent.gripCloseR===undefined?1:ent.gripCloseR);
+  poseFingers(ent,'l',ent.gripCloseL===undefined?1:ent.gripCloseL);
   ent.stickGrip.copy(CONFIG.gripLock>=0.5?butt.clone().addScaledVector(dir,CONFIG.snapAlong):anchor);
   ent.stickTip.copy(tip);ent.stickDir=dir.clone();
   if(stickGroup){
@@ -7721,8 +7958,43 @@ function computeAimError(aimDist){
     +speedFrac*CONFIG.aimErrSpeedMax
     +(player.crossoverBlend||0)*CONFIG.aimErrTurnMax
     +(player.stumbleBlend||0)*CONFIG.aimErrPushMax
-    +distFrac*CONFIG.aimErrDistMax,
-    CONFIG.aimErrCap);
+    +distFrac*CONFIG.aimErrDistMax
+    /* shooting out of a rotation: struck mid-turn off a moving base, so it is
+       genuinely less accurate. Deliberately added OUTSIDE aimErrCap's normal
+       ceiling — an over-the-shoulder blind shot should be allowed to be worse
+       than anything the standing cone can reach. */
+    ,CONFIG.aimErrCap)+(player.turnShotErr||0);
+}
+/* ----- TURN-INTO-THE-SHOT -----
+   Called at the moment of release. If the intended target is far enough off
+   the skater's facing that no real player could strike it, the shot is HELD:
+   the player pivots toward it and the puck is struck out of that rotation
+   (see the turnShot block in updatePlayer). Returns true if it took ownership
+   of the shot, false to fire immediately as before.
+   The intended aim has to be captured HERE. fireShot recomputes its aim from
+   the live reticle, but by the time the turn finishes the buttons are up, so
+   with the skill stick off currentAim has already collapsed back to the
+   neutral carry point — deferring without capturing would fire the puck at
+   the player's own feet. */
+function startTurnShot(type,info){
+  if(!CONFIG.turnShotEnable||player.turnShot)return false;
+  const a=new THREE.Vector3();
+  if(PAD.on&&!mouseCtl.active)padShotAimPoint(a);
+  else if(mouseCtl.active)mouseTPSPoint(a);
+  else a.copy(currentAim);
+  const h=new THREE.Vector3(a.x-player.pos.x,0,a.z-player.pos.z);
+  if(h.lengthSq()<1e-4)return false;
+  h.normalize();
+  const want=Math.atan2(h.x,h.z); // matches fwd(h)=(sin h,0,cos h)
+  let off=(want-player.heading+Math.PI)%(2*Math.PI);
+  if(off<0)off+=2*Math.PI;
+  off-=Math.PI;                   // signed shortest turn, -PI..PI
+  const mag=Math.abs(off);
+  if(mag<CONFIG.turnShotMin)return false; // within a normal torso rotation
+  const dur=Math.min(CONFIG.turnShotMaxDur,mag*CONFIG.turnShotSecPerRad);
+  player.turnShot={t:dur,dur:dur,type:type,info:info,
+    from:player.heading,delta:off,off:mag,aim:a.clone()};
+  return true;
 }
 function fireShot(type,oneTimerInSpeed,gestInfo){
   /* Rocket-League-ball rule: no hard possession requirement — any puck
@@ -7734,7 +8006,7 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
      gating a carried puck on blade distance therefore rejected every
      wound-up shot, which is exactly the "puck doesn't release" bug. */
   if(!puck.possessed&&puck.pos.distanceTo(player.stickTip)>CONFIG.shotReachRadius)return;
-  if(!type)type=zoneOf(player.lastLat||0)===2?'backhand':'wrist';
+  if(!type)type=zoneOf(player.stanceLat||0)===2?'backhand':'wrist';
   /* aim used for direction: the FRESH mouse-projected point, not the
      smoothed/lagged currentAim (currentAim.lerp()'s per-frame smoothing —
      needed so the arm/stick pose eases naturally — meant the puck could
@@ -7744,7 +8016,11 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
      must be computed from that same raw position to always match it
      exactly. */
   let aimForShot=currentAim;
-  if(mouseCtl.active){
+  /* a shot released out of a turn already captured its target at the moment
+     the button came up (see startTurnShot) — the live reticle no longer means
+     anything by the time the rotation finishes. */
+  if(player.forcedAim)aimForShot=player.forcedAim;
+  else if(mouseCtl.active){
     const freshAim=shootHeld?new THREE.Vector3():currentAim;
     if(shootHeld){mouseTPSPoint(freshAim);aimForShot=freshAim;}
   }else if(PAD.on&&shootHeld){
@@ -8455,7 +8731,7 @@ function triggerToeDrag(){
   if(!puck||puck.pos.distanceTo(player.stickTip)>CONFIG.shotReachRadius*1.6)return;
   player.toeDragT=CONFIG.toeDragPullDur+CONFIG.toeDragPushDur;
   player.toeDragCd=CONFIG.toeDragCooldown;
-  player.toeDragSide=(player.lastLat||0)>=0?-1:1; // pull toward the side opposite your current stance
+  player.toeDragSide=(player.stanceLat||0)>=0?-1:1; // pull toward the side opposite your current stance
 }
 /* ----- offense/defense mode (Alt): remaps LMB/RMB from shoot/pass to
    poke check / body check, EA-style role switch. ----- */
@@ -8602,7 +8878,7 @@ function mouseTPSPoint(out){
 }
 const _tpsPlanePt=new THREE.Vector3();
 /* ----- shot types: LMB alone = wrist (forehand/neutral stance) or backhand
-   (backhand stance) — same button, the CURRENT stance (player.lastLat, read
+   (backhand stance) — same button, the CURRENT stance (player.stanceLat, read
    every frame in updatePlayer) decides which. LMB+RMB together = slapshot
    windup; releasing either button while both are down fires it. The actual
    per-frame state machine and firing logic lives in updatePlayer/fireShot;
@@ -8700,8 +8976,16 @@ function toggleSkillStick(){
   ssAnchorReset();
   flashMsg('SKILL STICK '+(skillStickOn?'ON':'OFF'));
 }
+/* IDLE HANDLING WHILE THE SKILL STICK IS ON.
+   Holding the stick at neutral used to freeze the blade completely, which is
+   the one moment a real player is MOST active with the puck — you don't stand
+   there with a dead stick, you keep it moving. So once the stick has been
+   parked (near-neutral deflection AND a still cursor) for ssIdleDelay, a
+   reduced version of the auto stick motion eases back in, and any real input
+   cancels it instantly. */
+let ssIdleT=0,ssIdleBlend=0,ssPrevX=0,ssPrevY=0;
 function ssUpdate(dt){ // drift + deflection, once per frame (updatePlayer)
-  if(!skillStickOn||TOUCH){ssDefU=0;ssDefV=0;ssDefMag=0;return;}
+  if(!skillStickOn||TOUCH){ssDefU=0;ssDefV=0;ssDefMag=0;ssIdleT=0;ssIdleBlend=0;return;}
   const k=1-Math.exp(-(dt||0)*CONFIG.ssDriftRate);
   ssAnchor.x+=(mouseClientX-ssAnchor.x)*k;
   ssAnchor.y+=(mouseClientY-ssAnchor.y)*k;
@@ -8710,6 +8994,71 @@ function ssUpdate(dt){ // drift + deflection, once per frame (updatePlayer)
   const m=Math.hypot(u,v);
   if(m>1){u/=m;v/=m;}
   ssDefU=u;ssDefV=v;ssDefMag=Math.min(1,m);
+  // idle tracking: both the deflection and the raw cursor have to be quiet
+  const moved=Math.hypot(mouseClientX-ssPrevX,mouseClientY-ssPrevY);
+  ssPrevX=mouseClientX;ssPrevY=mouseClientY;
+  if(ssDefMag>CONFIG.ssIdleDefMax||moved>CONFIG.ssIdleMoveMax)ssIdleT=0;
+  else ssIdleT+=(dt||0);
+  const want=ssIdleT>CONFIG.ssIdleDelay?1:0;
+  // eases IN slowly, drops OUT fast — picking the stick back up must feel instant
+  const rate=want>ssIdleBlend?CONFIG.ssIdleFadeIn:CONFIG.ssIdleFadeOut;
+  ssIdleBlend+=(want-ssIdleBlend)*Math.min(1,(dt||0)*rate);
+}
+/* ----- AUTO STICK MOTION — the anchored skill stick's OFF counterpart -----
+   With the skill stick off, the aim collapses to a fixed point in front of the
+   chest, so the stick (and both arms, and the whole upper body that IKs onto
+   it) sat perfectly still while the legs skated. Two motions fill that in:
+     1. STRIDE SWAY — the stick is held in two hands off a torso that is now
+        rolling and twisting every stride (see the weight/sway block in
+        applyJointFlex), so it has to travel with it. Locked to the same
+        strideCyclePhase, so the stick and the body are one motion.
+     2. CRADLE — while actually carrying, nobody holds a puck still. A
+        continuous figure-eight keeps it on the blade. This one runs on its own
+        slower rhythm rather than the stride, because stickhandling isn't
+        stride-locked, and tightens up at speed.
+   Both are COSMETIC: they move the blade, and through stickTip -> the carry
+   spring the puck with it, but never currentAim — where a shot or pass
+   actually goes is untouched. The offset is stashed on ent.autoSway so
+   poseStick can subtract it back out for the STANCE angle (see stanceLat
+   there); without that, this sweep would start driving real decisions. */
+/* how much of the auto stick motion applies right now, 0..1.
+   Not a boolean any more: with the skill stick ON it fades back in once the
+   stick has been parked at neutral for a while (see ssIdleBlend), at a reduced
+   amount — enough that the player keeps working the puck, never enough to
+   fight a deliberate input. */
+function autoStickScale(){
+  if(TOUCH)return 0;                                       // touch steers the blade directly
+  if(PAD.on&&PAD.rsMag>0.14&&PAD.rsHandle)return 0;        // pad skill stick already deflected
+  if(skillStickOn)return ssIdleBlend*CONFIG.ssIdleHandleMul;
+  return 1;
+}
+function updateAutoStick(ent,dt){
+  const sway=ent.autoSway=ent.autoSway||new THREE.Vector3();
+  sway.set(0,0,0);
+  const gate=autoStickScale();
+  if(gate<=0.001)return sway;
+  const F=fwd(ent.heading),Rv=right(ent.heading);
+  const vLen=ent.vel?ent.vel.length():0;
+  const speedFrac=clamp(vLen/CONFIG.moveSpeed,0,1);
+  const sk=ent.skate,moving=!!sk&&sk.state!=='idle';
+  // fades out as the puck is tucked in for protection, which is a deliberate
+  // "stop handling it and shield it" and shouldn't keep swinging
+  const scale=(1-clamp(ent.protectBlend||0,0,1))*gate;
+  if(scale<0.02)return sway;
+  // 1. stride-locked sway, on the same amplitude curve the legs use
+  const strideAmp=(moving?(0.4+0.6*speedFrac):0.15)*scale;
+  const ph=ent.strideCyclePhase||0;
+  sway.addScaledVector(Rv,Math.sin(ph)*CONFIG.stickSway*strideAmp)
+      .addScaledVector(F,Math.cos(ph*2)*CONFIG.stickFwd*strideAmp);
+  // 2. puck cradle — only while this entity is the one actually carrying
+  if(typeof puck!=='undefined'&&puck&&puck.possessed&&ent===player){
+    const tight=(1-(1-CONFIG.cradleSprintMul)*speedFrac)*scale;
+    ent.cradlePhase=((ent.cradlePhase||0)+(dt||0)*CONFIG.cradleHz*Math.PI*2)%(Math.PI*2);
+    const cp=ent.cradlePhase;
+    sway.addScaledVector(Rv,Math.sin(cp)*CONFIG.cradleSide*tight)
+        .addScaledVector(F,Math.cos(cp*2)*CONFIG.cradleFwd*tight);
+  }
+  return sway;
 }
 /* ice-plane intersection from arbitrary CLIENT coords (the virtual aim
    cursor) — same math as mouseIcePoint, which always reads the real one. */
@@ -9077,7 +9426,7 @@ function toeDragGestureTrack(dt){
   if(!TDG.live){
     // engage only from the forehand rim; the sweep itself may then travel
     // (thresholds leave margin: pads with imperfect circularity peak ~0.9)
-    if(r>0.85&&(player.lastLat||0)>0.1){TDG.live=true;TDG.prev=null;TDG.acc=0;}
+    if(r>0.85&&(player.stanceLat||0)>0.1){TDG.live=true;TDG.prev=null;TDG.acc=0;}
   }else if(r<0.78){TDG.live=false;TDG.prev=null;}
   if(TDG.live){
     const ang=Math.atan2(v,u);
@@ -9640,7 +9989,7 @@ function updatePlayer(dt){
        whole hold — stance drift or adding/dropping a button mid-windup can
        no longer change what fires, only release/cancel can end it. */
     let rawShotType=prevShotType==='none'
-      ?(player.protectActive?'none':(bothDown?'slap':lmbHeld?(zoneOf(player.lastLat||0)===2?'backhand':'wrist'):(rmbForShots?'pass':'none')))
+      ?(player.protectActive?'none':(bothDown?'slap':lmbHeld?(zoneOf(player.stanceLat||0)===2?'backhand':'wrist'):(rmbForShots?'pass':'none')))
       :(anyDown?prevShotType:'none');
     /* after a slap fires on a partial (either-button) release, the leftover
        held button is a spent trigger, not a fresh windup — ignore it until
@@ -9685,7 +10034,10 @@ function updatePlayer(dt){
       resetGesture();
       if(rawShotType!=='none'){player.shotSuppressed=true;rawShotType='none';}
     }
-    if(fireType){fireShot(fireType,undefined,fireInfo);player.slapChargeT=0;}
+    if(fireType){
+      // held back if the target is behind the skater — see startTurnShot
+      if(!startTurnShot(fireType,fireInfo)){fireShot(fireType,undefined,fireInfo);player.slapChargeT=0;}
+    }
     player.shotType=rawShotType;
     shootHeld=rawShotType!=='none';
   }
@@ -9923,6 +10275,25 @@ function updatePlayer(dt){
     dirX=dir.x;dirZ=dir.z;
   }
   updateSkating(player,dirX,dirZ,player.sprintOn,braking,dt,!pivotMode&&!shotAimLock);
+  /* drive an in-progress turn-into-the-shot: rotate onto the target, then
+     strike. Runs AFTER updateSkating so it owns the heading for its duration
+     (skating steer would otherwise fight it every frame). */
+  if(player.turnShot){
+    const ts=player.turnShot;
+    ts.t=Math.max(0,ts.t-(dt||0));
+    const k=clamp(1-ts.t/Math.max(0.001,ts.dur),0,1);
+    player.heading=ts.from+ts.delta*(k*k*(3-2*k)); // ease so the whip is at the end
+    player.shotLoadT=CONFIG.shotLoadDur;           // hold the loaded pose through the turn
+    if(ts.t<=0){
+      /* struck out of the rotation: the extra cone is set for this one call
+         and cleared straight after, so it can never leak into a later shot. */
+      player.forcedAim=ts.aim;
+      player.turnShotErr=Math.min(CONFIG.turnShotErrCap,ts.off*CONFIG.turnShotErrPerRad);
+      fireShot(ts.type,undefined,ts.info);
+      player.forcedAim=null;player.turnShotErr=0;
+      player.turnShot=null;player.slapChargeT=0;player.shotLoadT=0;
+    }
+  }
   if(player.skate.reversing&&!player.wasReversing){
     const sprayDir=player.vel.lengthSq()>0.01?player.vel.clone().normalize():fwd(player.heading);
     spawnSpray(player.pos,sprayDir,26);
@@ -9997,7 +10368,7 @@ function updatePlayer(dt){
      briefly widens the reach fan so the pull reads as a real toe-drag
      extension rather than the normal handling sweep, with a cooldown so it
      reads as a deliberate move rather than just jittery mouse noise. */
-  const latNow=player.lastLat||0,prevLatD=player.prevLatForDeke||0;
+  const latNow=player.stanceLat||0,prevLatD=player.prevLatForDeke||0;
   player.dekeCooldown=Math.max(0,(player.dekeCooldown||0)-dtSafe);
   if(!shootHeld&&curSpeed<CONFIG.moveSpeed*1.3&&player.dekeCooldown<=0&&
      Math.sign(latNow)!==0&&Math.sign(prevLatD)!==0&&Math.sign(latNow)!==Math.sign(prevLatD)&&
@@ -10026,7 +10397,7 @@ function updatePlayer(dt){
   // sideways-to-travel yaw for the stop, blended in/out with brakeBlend
   player.brakeYawCur=(player.brakeYawTarget||0)*(player.brakeBlend||0);
   player.root.position.copy(player.pos)
-    .addScaledVector(right(player.heading),CONFIG.bodyOffX)
+    .addScaledVector(right(player.heading),CONFIG.bodyOffX+(player.swayLat||0))
     .addScaledVector(up,CONFIG.bodyOffY-CONFIG.stanceSink-(player.kneelBlend||0)*CONFIG.kneelSink
       -player.shotFollow*CONFIG.shotSink)
     .addScaledVector(fwd(player.heading),CONFIG.bodyOffZ+player.shotFollow*CONFIG.shotLeanFwd);
@@ -10151,7 +10522,29 @@ function updatePlayer(dt){
      during the windup, then a low sweeping follow-through point after
      release — same trick as the reach envelope: gameplay target vs. what
      the body actually does to get there. */
+  /* ONE-HAND SPRINT CARRY blend. Sprinting, no puck, and nothing scripted
+     claiming the stick — then the bottom hand comes off and the free arm pumps
+     (see the armCarry block in poseStick and the blade lift below). */
+  {const wantCarry=(!puck||!puck.possessed)&&(player.sprintOn||(player.skate&&player.skate.state==='sprint_push'))
+      &&curSpeed>CONFIG.moveSpeed*CONFIG.armCarryMinSpeedFrac
+      &&!shootHeld&&(player.pokeT||0)<=0&&(player.diveT||0)<=0&&(player.toeDragT||0)<=0
+      &&(player.shotReleaseT||0)<=0&&!player.kneelActive&&!player.holdPokeActive&&!player.protectActive;
+   player.armCarry=(player.armCarry||0)+((wantCarry?1:0)-(player.armCarry||0))*Math.min(1,dtSafe*CONFIG.armCarryRate);
+   if(player.armCarry<0.002)player.armCarry=0;
+   // the released bottom hand opens up; the top hand keeps its grip
+   player.gripCloseL=1-0.85*player.armCarry;
+   player.gripCloseR=1;}
+  /* the windup pose also has to hold through a turn-into-the-shot: the buttons
+     are already up by then, so shootHeld is false, but the body is still
+     loading the shot right up to the strike. */
+  const _windup=shootHeld||!!player.turnShot;
+  const _windupType=player.turnShot?player.turnShot.type:player.shotType;
   let poseAimPt=currentAim;
+  /* cleared up front, set again only if the plain-skating branch at the end of
+     this chain is reached. Without this reset a scripted branch (shot, poke,
+     dive...) would run with whatever sway the last ordinary frame left behind,
+     and poseStick would subtract a sway that is no longer being applied. */
+  if(player.autoSway)player.autoSway.set(0,0,0);
   /* puck protection (hold C while carrying): the aim point — and via the
      stickTip→carry-spring chain, the puck itself — blends to a tucked spot
      on the body's off side, slightly behind the hip, so the torso sits
@@ -10210,7 +10603,7 @@ function updatePlayer(dt){
     if(aimDir2.lengthSq()<1e-4)aimDir2=F.clone();else aimDir2.normalize();
     poseAimPt=player.pos.clone().addScaledVector(aimDir2,CONFIG.holdPokeReach);
     poseAimPt.y=CONFIG.iceHeight;
-  }else if(shootHeld&&player.shotType==='slap'){
+  }else if(_windup&&_windupType==='slap'){
     // slapshot backswing: the real move is the opposite of a wrister — the
     // blade goes UP high over the shoulder on the strong side, not grounded.
     const chargeFrac=clamp((player.slapChargeT||0)/CONFIG.slapWindupTime,0,1);
@@ -10218,7 +10611,7 @@ function updatePlayer(dt){
       .addScaledVector(F,CONFIG.slapBackFwd)
       .addScaledVector(right(player.heading),CONFIG.slapBackSide)
       .addScaledVector(up,CONFIG.slapBackHeight*(0.5+0.5*chargeFrac));
-  }else if(shootHeld){
+  }else if(_windup){
     /* WINDUP = LOADING THE SHOT, not pointing at the target. This used to be
        `poseAimPt=currentAim`, so aiming simply swung the blade around to
        point wherever the reticle was — a skater "aiming" with a laser
@@ -10246,6 +10639,37 @@ function updatePlayer(dt){
     const followT=1-clamp(player.shotReleaseT/fDur,0,1);
     poseAimPt=player.shotOrigin.clone().addScaledVector(player.shotDir,fReach*(0.35+0.65*followT));
     poseAimPt.y=CONFIG.iceHeight+CONFIG.shotBladeLift*(1-followT*0.6);
+  }else{
+    /* nothing scripted is driving the stick — ordinary skating, with or
+       without the puck. This is the ONLY branch the auto stick motion applies
+       to, which is exactly right: every branch above is a deliberate action
+       (shot windup, follow-through, poke, dive, toe-drag, kneel) that owns the
+       blade outright and must not have a cradle layered on top of it.
+       Reaching this branch is also what leaves ent.autoSway non-zero, so
+       poseStick's stanceLat correction only kicks in when there is really a
+       sway to remove. */
+    const sway=updateAutoStick(player,dt);
+    if(sway.lengthSq()>1e-9)poseAimPt=poseAimPt.clone().add(sway);
+    /* one-hand sprint carry: bring the blade up off the ice and pull the stick
+       in toward the body. Only here, in the plain-skating branch — every
+       scripted action needs its own blade placement, and a shot fired out of a
+       sprint re-plants it anyway (armCarry drops the moment shootHeld goes up). */
+    const ac=player.armCarry||0;
+    if(ac>0.02){
+      /* Blend to an EXPLICIT carry point rather than nudging the normal one.
+         Nudging does not work here: the blade tip sits a fixed stick-length
+         along the shaft from the hand, so what decides its height is the
+         shaft's ANGLE, not how far the aim moved. The carry aim is only
+         ~0.15m ahead of the top hand horizontally, which leaves the stick
+         hanging almost vertically — a measured 0.42m of lift still left the
+         tip on the ice at y=0.005. Placing the point well forward and at
+         blade height instead sets the angle directly. */
+      const carryPt=player.pos.clone()
+        .addScaledVector(fwd(player.heading),CONFIG.armCarryReach)
+        .addScaledVector(right(player.heading),CONFIG.armCarrySideAim)
+        .addScaledVector(up,CONFIG.armCarryBladeY);
+      poseAimPt=poseAimPt.clone().lerp(carryPt,ac);
+    }
   }
   poseStick(player,poseAimPt,dt);
   animateBody(player,curSpeed,dt);
@@ -11091,6 +11515,44 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
     ['body','BODY — isolated',[
       ['bodyOffX','Offset right',-1.0,1.0,0.005],['bodyOffY','Offset up',-1.0,1.0,0.005],
       ['bodyOffZ','Offset fwd',-1.0,1.0,0.005],['bodyRotY','Rotate yaw',-3.14,3.14,0.02]]],
+    ['chain','SKATING WEIGHT + SWAY (stride-driven)',[
+      ['swayHipShift','Hip sway: pelvis shift (m, >0.08 skids skates)',0,0.15,0.005],
+      ['swayHipRoll','Hip sway: torso roll over support leg',0,0.4,0.005],
+      ['swayChestCounter','Shoulder counter-roll (>1 = opposite tilt)',0,3,0.05],
+      ['swayHipTwist','Hip twist with the drive',0,0.4,0.005],
+      ['swayShoulderCounter','Shoulder counter-rotation',0,3,0.05],
+      ['swayDrivePitch','Forward drive pitch per push',0,0.25,0.005],
+      ['swayHeadLevel','Head leveling (cancels roll)',0,1.5,0.05]]],
+    ['chain','HAND GRIP (finger curl)',[
+      ['gripCurlBase','Knuckle curl',0,1.6,0.02],['gripCurlMid','Middle joint curl',0,1.6,0.02],
+      ['gripCurlTip','Fingertip curl',0,1.6,0.02],['gripThumb','Thumb (negative = opposes)',-1.6,0.6,0.02],
+      ['gripCurlRelax','Curl kept by an OPEN hand',0,1,0.05]]],
+    ['chain','ONE-HAND SPRINT CARRY (no puck)',[
+      ['armCarryReach','Blade reach in front',0.4,2.5,0.02],['armCarryBladeY','Blade height off the ice',0,1.2,0.02],
+      ['armCarrySideAim','Blade across the body',-0.8,0.8,0.02],
+      ['armCarryHeight','Free hand height',0.4,1.8,0.02],['armCarrySide','Free hand out to the side',0,0.9,0.02],
+      ['armCarryFwd','Free hand fwd bias',-0.5,0.5,0.02],['armCarrySwing','Arm pump amplitude',0,0.9,0.02],
+      ['armCarryMinSpeedFrac','Speed needed to engage',0.2,1,0.05],['armCarryRate','Blend rate',1,15,0.5]]],
+    ['chain','TURN INTO THE SHOT (off-angle release)',[
+      ['turnShotEnable','Enabled (0/1)',0,1,1],
+      ['turnShotMin','Angle that forces a turn (rad)',0,2,0.02],
+      ['turnShotSecPerRad','Turn time per radian (s)',0,0.6,0.01],
+      ['turnShotMaxDur','Max turn time (s)',0.05,1.2,0.02],
+      ['turnShotErrPerRad','Extra aim cone per radian',0,0.4,0.005],
+      ['turnShotErrCap','Extra aim cone cap',0,0.6,0.005]]],
+    ['chain','IDLE HANDLING (skill stick ON, held still)',[
+      ['ssIdleDelay','Delay before it eases in (s)',0,4,0.05],
+      ['ssIdleHandleMul','Amount vs. full auto motion',0,1,0.05],
+      ['ssIdleDefMax','Deflection that counts as idle',0,0.5,0.01],
+      ['ssIdleMoveMax','Cursor px/frame that counts as idle',0,10,0.5],
+      ['ssIdleFadeIn','Fade in rate',0.2,8,0.1],['ssIdleFadeOut','Fade out rate',1,20,0.5]]],
+    ['chain','AUTO STICK MOTION (skill stick OFF)',[
+      ['stickSway','Stride sway: lateral (m)',0,0.5,0.005],
+      ['stickFwd','Stride sway: fore/aft (m)',0,0.4,0.005],
+      ['cradleSide','Cradle: lateral (m)',0,0.6,0.005],
+      ['cradleFwd','Cradle: fore/aft (m)',0,0.4,0.005],
+      ['cradleHz','Cradle rate (per second)',0,4,0.05],
+      ['cradleSprintMul','Cradle tightening at full speed',0.1,1,0.05]]],
     ['puck','PUCK — editor',[
       ['puckEdit','Puck edit mode (0/1)',0,1,1],
       ['puckEdX','Puck right',-3,3,0.01],['puckEdZ','Puck fwd',-1,4,0.01],['puckEdY','Puck height',0,1.2,0.005]]],
