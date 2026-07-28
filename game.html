@@ -4077,9 +4077,22 @@ const CONFIG={
   protectSpeedMul:0.55,protectSide:-0.7,protectFwd:0.2,protectBlendRate:9,
   /* skateDecel dropped 3.0→1.0 (EA-PACE): a glide should carry you across a
      zone — momentum is the whole feel of ice. Stopping is what the brake
-     (hockeyStopDecel/brakeDecel) is for. */
+     (Space; softStopDecel/brakeDecel) is for.
+     reverseRedirect: what pushing the movement input AGAINST your own travel
+     does WITHOUT the stop button. It used to be a third stop in disguise
+     (hockeyStopDecel, 9.5 m/s2 — it arrested you in 0.63s, barely slower
+     than the committed hockey stop's 0.53s and more than twice as fast as
+     the stop button on its own), which is exactly why Space stopped reading
+     as two grades: the fastest way to stop was to not press it.
+     It is now a REDIRECT, and deliberately the slowest of the three ways to
+     lose speed — which is also the honest physics. You cannot brake by
+     pushing backwards on skates; there is no backward traction to brake
+     with. A skater who wants their speed gone turns their blades across it
+     (snowplow or hockey stop, i.e. the Space grades); a skater who pushes
+     the other way is transitioning, and only loses speed to the edge scrub
+     of the turn itself. So: redirect < soft stop < hard stop, always. */
   skateAccel:3.8,skateDecel:1.0,explosiveBurstMul:1.2,explosiveBurstSpeed:3.0,
-  hockeyStopDecel:9.5,brakeDecel:13,playerR:0.5,
+  reverseRedirect:3.2,brakeDecel:13,playerR:0.5,
   /* ===== TWO STOPS (Space) =====
      A skater has more than one way to shed speed and they look nothing
      alike, so Space is now two moves rather than one:
@@ -4092,21 +4105,28 @@ const CONFIG={
      player actually does when they just need to scrub a bit of speed or
      settle before receiving a pass.
 
-     HARD STOP — Space PLUS the movement input pushed against your own
-     travel (stopHardDot; the dot of the input direction against the
-     velocity direction, so any roughly-opposing WASD combination or stick
-     angle counts). Now you commit: skates snap perpendicular, both edges
-     bite, the body drops and tilts, and brakeDecel takes the speed off in
-     a fraction of a second. stopSideBias>0 means the lateral part of that
-     input also chooses WHICH way you turn into the stop (push back-left and
-     you spin your feet to the left), rather than always taking the nearer
-     perpendicular.
+     HARD STOP — Space PLUS Shift, in EITHER ORDER (pad: L2 + L3). Now you
+     commit: skates snap perpendicular, both edges bite, the body drops and
+     tilts, and brakeDecel takes the speed off in a fraction of a second.
+     The movement input no longer decides the grade — it only picks WHICH
+     way you turn into the stop (stopSideBias: push back-left and you spin
+     your feet left), falling back to the nearer perpendicular with no
+     input. Deciding the grade by "is your WASD roughly opposing your
+     travel" was too easy to trigger by accident mid-crossover and too easy
+     to MISS when you were already skating the way you wanted to face.
+
+     stopComboWindow: Shift is the sprint toggle on its own, so the combo
+     has to survive being pressed in the wrong order. Shift while Space is
+     already down never toggles sprint at all; Space arriving within this
+     many seconds of a Shift press that DID toggle sprint takes that toggle
+     back (you meant "stop", not "sprint"). Press Shift, wait, then hit
+     Space and the sprint toggle stands — you meant both.
 
      softStopEnterSpeed/holdSpeed: hysteresis — a stop engages above the
      first and stays engaged down to the second, so the pose doesn't
      flicker on/off as you coast to a crawl. */
-  softStopDecel:4.2,softStopSteerRate:1.1,stopHardDot:-0.4,stopHardMinSpeed:0.8,stopHardMinMag:0.35,
-  softStopEnterSpeed:0.25,softStopHoldSpeed:0.12,stopSideBias:1,
+  softStopDecel:4.2,softStopSteerRate:1.1,stopHardMinSpeed:0.8,stopHardMinMag:0.35,
+  softStopEnterSpeed:0.25,softStopHoldSpeed:0.12,stopSideBias:1,stopComboWindow:0.4,
   /* SOFT-STOP POSE. Snowplow biomechanics: hip INTERNAL rotation (toes in —
      the exact opposite of the skating stance's turnout), moderate hip and
      knee flexion as the weight settles back over the heels, ankles
@@ -5162,14 +5182,21 @@ function updateSkating(E,dirX,dirZ,sprint,braking,dt,steerHeading){
        following it. */
     sk.cycleDur=Math.max(0.12,2*(pushDur+glideDur));
     if(reversing||vLen<CONFIG.carveMinSpeed){
-      // reversal / near-stand: free instant steering, no carve arc,
-      // no push/glide gating — "turn on a dime near a stop" plus the
-      // existing sharper auto-hockey-stop on a hard direction flip.
-      const rate=(reversing?CONFIG.hockeyStopDecel:CONFIG.skAccel)*(backMove?CONFIG.backskateAccelMul:1)*balStopMul;
+      /* reversal / near-stand: free instant steering, no carve arc, no
+         push/glide gating — "turn on a dime near a stop", and a hard
+         direction flip at speed is a TRANSITION, not a brake. It runs at
+         reverseRedirect (slower than either Space grade — see the CONFIG
+         note) so that stopping is something you ask for with the stop
+         button rather than something that happens to you for pressing the
+         other key. Only the flip is redirect-rated; the near-stand case
+         keeps full skAccel so low-speed agility is untouched. */
+      const rate=(reversing?CONFIG.reverseRedirect:CONFIG.skAccel)*(backMove?CONFIG.backskateAccelMul:1)*balStopMul;
       moveToward(E.vel,tv,rate*dt);
       sk.angVel=0;sk.turnRadius=0;sk.turn='straight';sk.pushForce=0;
-      effort+=rate*dt*0.6;leanTarget=reversing?-0.7:0;
-      if(reversing)E.balance=clamp(E.balance-CONFIG.skBalanceLossBrake*dt,0,1);
+      // a transition leans, it doesn't sit down into a stop (-0.7 was the
+      // old brake lean, and it made the redirect LOOK like a third stop too)
+      effort+=rate*dt*0.6;leanTarget=reversing?-0.3:0;
+      if(reversing)E.balance=clamp(E.balance-CONFIG.skBalanceLossBrake*0.4*dt,0,1);
     }else{
       const curAng=Math.atan2(E.vel.x,E.vel.z);
       let dA=((Math.atan2(tv.x,tv.z)-curAng+Math.PI)%(2*Math.PI))-Math.PI;
@@ -5244,7 +5271,10 @@ function updateSkating(E,dirX,dirZ,sprint,braking,dt,steerHeading){
       const hk=CONFIG.turnLerp/(1+(vLen/CONFIG.moveSpeed)*CONFIG.turnSpeedPenalty);
       E.heading=angLerp(E.heading,Math.atan2(dir.x,dir.z),1-Math.pow(1-hk,dt*60));
     }
-    sk.state=backMove?'backward':(reversing?'hardstop':(sk.phase==='push'?(sprint?'sprint_push':'push'):'glide'));
+    // 'transition', not 'hardstop': a flip against your travel is a change of
+    // direction now, and only Space produces a stop state (see the two-stop
+    // branch above, which runs first and always wins)
+    sk.state=backMove?'backward':(reversing?'transition':(sk.phase==='push'?(sprint?'sprint_push':'push'):'glide'));
   }
   // effort-based stamina: near-zero effort this frame regens (idle
   // tier if basically stopped, glide tier otherwise); any real
@@ -9951,16 +9981,34 @@ function pollPad(dt){
     rmbHeld=offense?b(5):b(1);
     mmbHeld=false;
   }
-  if(eDown(10))toggleSprint();
+  /* L3 = sprint toggle, and the hockey-stop modifier while the brake is
+     down — the pad's half of the Space+Shift combo, held (not toggled) for
+     as long as the stick is clicked in, and routed through keys['shift'] so
+     there is exactly one grade rule for both devices. */
+  if(eDown(10)){
+    if(keys[' ']){keys['shift']=true;PAD.ownShift=true;}
+    else{toggleSprint();STOPCOMBO.t=nowSec();STOPCOMBO.armed=true;PAD.sprintClick=true;}
+  }
+  if(eUp(10)){
+    if(PAD.ownShift){keys['shift']=false;PAD.ownShift=false;}
+    if(PAD.sprintClick){PAD.sprintClick=false;STOPCOMBO.armed=false;}
+  }
   if(!eaCore){ // EA core owns LB (deke mod / shot block) and LT (vision control) itself
     if(eDown(4)){
       if(!offense&&(player.hitChargeT||0)>0){startKneel();keys['control']=true;PAD.ownCtrl=true;}
       else togglePivot();
     }
     if(eUp(4)&&PAD.ownCtrl){keys['control']=false;PAD.ownCtrl=false;}
-    if(eDown(6)){keys[' ']=true;PAD.ownSpace=true;}
+    if(eDown(6)){
+      keys[' ']=true;PAD.ownSpace=true;
+      // brake pressed second: take back the sprint that click just toggled
+      if(b(10)&&STOPCOMBO.armed&&nowSec()-STOPCOMBO.t<CONFIG.stopComboWindow){
+        toggleSprint();STOPCOMBO.armed=false;keys['shift']=true;PAD.ownShift=true;
+      }
+    }
   }
-  if(eUp(6)&&PAD.ownSpace){keys[' ']=false;PAD.ownSpace=false;}
+  if(eUp(6)&&PAD.ownSpace){keys[' ']=false;PAD.ownSpace=false;
+    if(PAD.ownShift){keys['shift']=false;PAD.ownShift=false;}}
   if(padScheme==='hybrid'){
   /* Cross/A: offense = protect puck (pure hold); defense = stick-lift jab */
   if(offense&&b(0)&&!PAD.ownC){keys['c']=true;PAD.ownC=true;}
@@ -10067,6 +10115,12 @@ function pollPad(dt){
   PAD.gPrevType=st;
   snap();
 }
+/* HOCKEY-STOP COMBO bookkeeping, shared by the keyboard and the pad (whose
+   L3 sprint click goes through the same path): `t` is when a sprint toggle
+   was last caused by a modifier press and `armed` says that press is still
+   down, which is all the stop key needs to know to take it back. */
+const STOPCOMBO={t:-9,armed:false};
+const nowSec=()=>performance.now()/1000;
 addEventListener('keydown',e=>{
   // typing into a real text/number field (debug preset name, etc.) is never a
   // gameplay key — leave it to the browser's normal text-entry behavior
@@ -10078,7 +10132,14 @@ addEventListener('keydown',e=>{
   // normally (Tab moves focus between menu buttons, etc.)
   const gameplayActive=!GAME.menuEl||GAME.menuEl.style.display==='none';
   if(gameplayActive&&(k===' '||k.startsWith('arrow'))){e.preventDefault();e.stopPropagation();} // brake / steering — never scroll the hosting page
-  if(k==='shift'&&!e.repeat)toggleSprint(); // tap to toggle sprint on/off
+  /* SHIFT: sprint toggle on its own, hockey-stop modifier together with
+     Space — and the combo must work in EITHER order (see CONFIG's two-stop
+     note). Shift pressed while Space is already down is purely the stop
+     modifier and never touches sprint; the other order is undone by the
+     Space branch just below. */
+  if(k==='shift'&&!e.repeat&&!(gameplayActive&&keys[' '])){toggleSprint();STOPCOMBO.t=nowSec();STOPCOMBO.armed=true;}
+  if(k===' '&&!e.repeat&&gameplayActive&&keys['shift']&&STOPCOMBO.armed
+     &&nowSec()-STOPCOMBO.t<CONFIG.stopComboWindow){toggleSprint();STOPCOMBO.armed=false;} // that Shift meant "stop", not "sprint"
   if(k==='control'&&!e.repeat&&gameplayActive){e.preventDefault();e.stopPropagation();
     // while charging a hit in defense, Ctrl drops into the double-knee
     // block stance instead of toggling pivot
@@ -10107,6 +10168,7 @@ addEventListener('keyup',e=>{
   const te=document.activeElement;
   if(te&&(te.tagName==='INPUT'||te.tagName==='TEXTAREA'||te.isContentEditable))return;
   const k=e.key.toLowerCase();keys[k]=false;
+  if(k==='shift')STOPCOMBO.armed=false; // that press is over — its sprint toggle stands
   const gameplayActive=!GAME.menuEl||GAME.menuEl.style.display==='none';
   if(gameplayActive&&(k==='alt'||k==='tab'||k==='control'||k===' ')){e.preventDefault();e.stopPropagation();}
 });
@@ -10213,7 +10275,7 @@ if(TOUCH){
   app.addEventListener('pointerup',fsOnce); // fullscreen needs a completed user gesture, so pointerUP
 }
 document.getElementById('hintL').textContent=TOUCH?'LEFT THUMB — MOVE':'WASD — MOVE';
-document.getElementById('hintR').textContent=TOUCH?'DRAG INSIDE YOUR RING = STICKHANDLE · DRAG FROM OUTSIDE = AIM, SWIPE + LIFT = SHOOT (CURVED = CHIP/SAUCER), LIFT ON YOURSELF = FAKE · 2ND FINGER = PASS/SLAP · DEFEND: HOLD+DRAG = CHECK, TAP = POKE':'HOLD LMB (SHOT) / RMB (PASS) / BOTH (SLAP), RELEASE = SHOOT — SWIPE SPEED = POWER, STRAIGHT = CLEAN, CURVED = CHIP/SAUCER (DEEPER = HIGHER) · PULL RETICLE ONTO YOURSELF + RELEASE = FAKE · C = PROTECT · ALT = DEFENSE · X = TOE-DRAG · SPACE = STOP (+ OPPOSITE WASD = HOCKEY STOP) · SHIFT = SPRINT · CTRL = ANGLE LOCK (BACKSKATE · FACES THE NET IN THE O-ZONE) · Q/E = PIVOT PUMP — TAP = QUICK PIVOT, HOLD = KEEP TURNING, LET GO = SQUARE UP ·, . = CAMERA · F = SKILL STICK · G = FACE CAM';
+document.getElementById('hintR').textContent=TOUCH?'DRAG INSIDE YOUR RING = STICKHANDLE · DRAG FROM OUTSIDE = AIM, SWIPE + LIFT = SHOOT (CURVED = CHIP/SAUCER), LIFT ON YOURSELF = FAKE · 2ND FINGER = PASS/SLAP · DEFEND: HOLD+DRAG = CHECK, TAP = POKE':'HOLD LMB (SHOT) / RMB (PASS) / BOTH (SLAP), RELEASE = SHOOT — SWIPE SPEED = POWER, STRAIGHT = CLEAN, CURVED = CHIP/SAUCER (DEEPER = HIGHER) · PULL RETICLE ONTO YOURSELF + RELEASE = FAKE · C = PROTECT · ALT = DEFENSE · X = TOE-DRAG · SPACE = STOP (+ SHIFT = HOCKEY STOP) · SHIFT = SPRINT · CTRL = ANGLE LOCK (BACKSKATE · FACES THE NET IN THE O-ZONE) · Q/E = PIVOT PUMP — TAP = QUICK PIVOT, HOLD = KEEP TURNING, LET GO = SQUARE UP ·, . = CAMERA · F = SKILL STICK · G = FACE CAM';
 setTimeout(()=>document.querySelectorAll('.hint').forEach(el=>el.style.opacity=0),6500);
 
 /* ----- main update / camera lock ----- */
@@ -10286,6 +10348,17 @@ function updatePlayer(dt){
     let rawShotType=prevShotType==='none'
       ?(player.protectActive?'none':(bothDown?'slap':lmbHeld?(zoneOf(player.stanceLat||0)===2?'backhand':'wrist'):(rmbForShots?'pass':'none')))
       :(anyDown?prevShotType:'none');
+    /* SLAP UPGRADE — the one exception to the lock above. Both buttons down
+       means a slapshot no matter which one got there first: the lock exists
+       so stance drift can't silently change your shot, not to punish you for
+       rolling onto the second button a few ms late. Pressing LMB then RMB
+       used to leave you winding up a wrister with both buttons held, which
+       is the one combination nobody asks for. It winds up from zero on the
+       promotion (slapChargeT restarts below, since prevShotType isn't 'slap'
+       yet) and the gesture restarts with it — the swipe that fires a slap
+       should be the one you make AS a slap. */
+    const slapUpgrade=bothDown&&rawShotType!=='none'&&rawShotType!=='slap'&&!player.protectActive;
+    if(slapUpgrade)rawShotType='slap';
     /* after a slap fires on a partial (either-button) release, the leftover
        held button is a spent trigger, not a fresh windup — ignore it until
        everything is physically up */
@@ -10293,7 +10366,7 @@ function updatePlayer(dt){
       if(!anyDown)player.shotSuppressed=false;
       rawShotType='none';
     }
-    if(rawShotType!=='none'&&prevShotType==='none'){resetGesture();if(skillStickOn)ssAnchorReset();}
+    if(rawShotType!=='none'&&(prevShotType==='none'||slapUpgrade)){resetGesture();if(skillStickOn)ssAnchorReset();}
     if(rawShotType!=='none'&&mouseCtl.active)updateGesture(dt||0);
     /* the FAKE is now a deliberate spatial act, not a timing one: pull the
        ice reticle INSIDE your own player-circle indicator and release —
@@ -10621,15 +10694,14 @@ function updatePlayer(dt){
   /* hysteresis: engage above softStopEnterSpeed, hold down to
      softStopHoldSpeed, so the pose doesn't strobe as you coast to a crawl */
   const stopHeld=!!keys[' ']&&stopSpeed>((player.stopMode||0)>0?CONFIG.softStopHoldSpeed:CONFIG.softStopEnterSpeed);
-  let stopMode=0,stopOppose=0;
+  let stopMode=0;
   if(stopHeld){
-    stopMode=1;
-    if(mag>CONFIG.stopHardMinMag&&stopSpeed>CONFIG.stopHardMinSpeed){
-      // dot of the desired direction against the direction you're actually
-      // travelling: -1 is dead against it, 0 is straight across it
-      stopOppose=(dirX*player.vel.x+dirZ*player.vel.z)/stopSpeed;
-      if(stopOppose<CONFIG.stopHardDot)stopMode=2;
-    }
+    /* the grade is chosen by the MODIFIER, not by where your feet happen to
+       be pointing: Space = the snowplow, Space + Shift (either order, and
+       L2 + L3 on the pad, which routes through the same keys) = the
+       committed hockey stop. The movement input still picks which side you
+       turn into it, further down. */
+    stopMode=(!!keys['shift']&&stopSpeed>CONFIG.stopHardMinSpeed)?2:1;
   }
   player.stopMode=stopMode;
   const brakingHard=stopMode>=2;
@@ -10751,8 +10823,11 @@ function updatePlayer(dt){
     }
   }
   if(player.skate.reversing&&!player.wasReversing){
+    /* a transition scrapes its edges, but it is not a stop — 26 was
+       stop-sized spray and it read as "I just hockey-stopped" on what is
+       now a redirect. The stops keep their own (much bigger) sprays. */
     const sprayDir=player.vel.lengthSq()>0.01?player.vel.clone().normalize():fwd(player.heading);
-    spawnSpray(player.pos,sprayDir,26);
+    spawnSpray(player.pos,sprayDir,10);
   }
   player.wasReversing=player.skate.reversing;
   updateSkateDebug();
@@ -11989,10 +12064,11 @@ loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
       ['netLockLerp','Net tracking rate',0.02,0.6,0.01],
       ['netLockOffMax','Max Q/E offset off the net (rad)',0,2.5,0.05]]],
     ['chain','STOPS — soft stop vs hockey stop (Space)',[
+      ['reverseRedirect','Flip w/o Space: redirect (m/s2)',0.5,12,0.1],
       ['softStopDecel','Soft stop decel (m/s2)',0.5,12,0.1],
       ['softStopSteerRate','Soft stop steering (rad/s)',0,3,0.05],
       ['brakeDecel','Hockey stop decel (m/s2)',4,25,0.5],
-      ['stopHardDot','Input-vs-travel dot that commits',-1,0,0.02],
+      ['stopComboWindow','Space+Shift either-order window (s)',0,1.5,0.05],
       ['stopHardMinSpeed','Speed needed to commit (m/s)',0,4,0.1],
       ['stopSideBias','Input picks the stop side (0/1)',0,1,1],
       ['softStopToeIn','Soft: toes in (snowplow)',0,0.8,0.02],
