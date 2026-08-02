@@ -172,6 +172,29 @@ h1,h2,p{margin:0}
    Assemble local players here, once, before picking a game mode
    (Quick Match / Practice / Match Mode all read the same party).
    ============================================================ */
+/* Fullscreen chip — same pill language as the party chip so the topnav keeps
+   one shape vocabulary. Sits left of PARTY, after the auto-margin tab strip,
+   so it rides the right-hand cluster. */
+.fs-chip{
+  display:flex;align-items:center;gap:7px;flex:none;
+  padding:6px 12px;border-radius:999px;margin-right:8px;
+  border:1px solid var(--line-strong);background:rgba(255,255,255,.04);
+  cursor:pointer;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease);
+}
+.fs-chip:hover{background:var(--accent-soft);border-color:var(--accent)}
+.fs-chip.is-on{background:var(--accent-soft);border-color:var(--accent)}
+.fs-chip .fs-icon{font-size:13px;line-height:1;color:var(--ink-dim)}
+.fs-chip.is-on .fs-icon{color:var(--accent)}
+.fs-chip .fs-label{
+  font-family:var(--font-display);font-weight:600;font-size:11.5px;
+  letter-spacing:.08em;color:var(--ink-dim);
+}
+.fs-chip.is-on .fs-label{color:var(--ink)}
+/* the label is the first thing worth dropping when the topnav gets tight —
+   the icon alone still reads, and the tab strip matters more */
+@media (max-width:900px){.fs-chip .fs-label{display:none}.fs-chip{padding:6px 9px}}
+
 .party-chip{
   display:flex;align-items:center;gap:8px;flex:none;
   padding:6px 12px 6px 8px;border-radius:999px;

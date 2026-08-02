@@ -25,6 +25,11 @@
     <nav class="tabs" id="tabs" role="tablist" aria-label="Main sections">
       <span class="tab-indicator" id="tabIndicator" aria-hidden="true"></span>
     </nav>
+    <button class="fs-chip" id="fsChip" type="button" data-fullscreen-toggle aria-pressed="false" title="Enter fullscreen (F11)">
+      <span class="fs-icon" data-fs-icon aria-hidden="true">⛶</span>
+      <span class="fs-label" data-fs-label>FULLSCREEN</span>
+    </button>
+
     <button class="party-chip" id="partyChip" type="button" aria-haspopup="true" aria-expanded="false">
       <span class="party-dots" id="partyDots"></span>
       <span class="party-label" id="partyLabel">PARTY</span>
@@ -89,6 +94,7 @@
      settings are chosen and confirmed HERE, not on a second screen in-game. -->
 <div class="confirm-overlay" id="confirmOverlay" aria-hidden="true"></div>
 
+<script src="fullscreen.js"></script>
 <script src="script.js"></script>
 <!-- 3D player preview: your ★ favourite team+jersey look from the Locker
      Room, rendered into #player-placeholder. Deferred so the menu itself

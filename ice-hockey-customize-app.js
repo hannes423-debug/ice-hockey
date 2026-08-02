@@ -108,6 +108,11 @@ const CAM_PRESETS={
 const camState={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
 const camGoal={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
 let autoRotate=true,dragMode=null,lastPX=0,lastPY=0,currentPresetName='full';
+/* Where the pointer went DOWN, and whether it has travelled far enough to be
+   an orbit rather than a click on a part. A few px of slop keeps a click from
+   being lost to hand tremor or a trackpad. */
+let downPX=0,downPY=0,orbitMoved=false;
+const CLICK_SLOP=5;
 /* Pitch limits are clamped where the pitch is SET, not where the camera is
    positioned. Clamping only at the render step let camGoal.pitch keep
    integrating past the limit while the view stayed frozen: a normal upward
@@ -154,6 +159,8 @@ renderer.domElement.addEventListener('pointerdown',e=>{
   renderer.domElement.setPointerCapture(e.pointerId);
   if(e.button===1){
     dragMode='orbit';lastPX=e.clientX;lastPY=e.clientY;
+    // middle-drag is always a camera move — never let it select a part
+    downPX=e.clientX;downPY=e.clientY;orbitMoved=true;
     e.preventDefault();
     return;
   }
@@ -175,7 +182,10 @@ renderer.domElement.addEventListener('pointerdown',e=>{
     if(uv)moveSelectedDecal(uv);
     return;
   }
+  /* An orbit drag and a select click start identically — which one it was is
+     only known on pointerup, from how far the pointer travelled. */
   dragMode='orbit';lastPX=e.clientX;lastPY=e.clientY;
+  downPX=e.clientX;downPY=e.clientY;orbitMoved=false;
 });
 renderer.domElement.addEventListener('pointermove',e=>{
   if(dragMode==='paint'){
@@ -185,6 +195,7 @@ renderer.domElement.addEventListener('pointermove',e=>{
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
   }else if(dragMode==='orbit'){
+    if(Math.hypot(e.clientX-downPX,e.clientY-downPY)>CLICK_SLOP)orbitMoved=true;
     const dx=e.clientX-lastPX,dy=e.clientY-lastPY;lastPX=e.clientX;lastPY=e.clientY;
     camGoal.yaw-=dx*0.0068;camGoal.pitch=clampPitch(camGoal.pitch+dy*0.005);
     camState.yaw=camGoal.yaw;camState.pitch=camGoal.pitch; // direct while dragging, no lag
@@ -195,6 +206,16 @@ addEventListener('pointerup',()=>{
     paintStrokes.push(currentStroke);
     renderPaintLayersList();
     pushHistory();
+  }
+  /* A click that never became a drag selects the part under it. Only from the
+     orbit branch: in paint or decal-move mode the click already meant
+     something, and stealing it would move the panel out from under the brush. */
+  if(dragMode==='orbit'&&!orbitMoved){
+    const pid=raycastPiece(downPX,downPY);
+    if(pid){
+      const def=ihcPiece(pid);
+      if(selectPieceInEditor(pid)&&def)showToast(def.icon+' '+def.label);
+    }
   }
   currentStroke=null;dragMode=null;lastPaintUV=null;
 });
@@ -606,6 +627,81 @@ function raycastUV(clientX,clientY){
   uv.side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
   return uv;
 }
+/* ---------- click a part on the MODEL to open that part's editor ----------
+   Until now the model was only ever a paint surface: the three ways to choose
+   a part (sidebar category, the Decals & Paint target strip, and clicking the
+   model) each drove different state and none of them updated the others, so
+   picking a part in one place left the other two pointing somewhere else.
+   selectPieceInEditor is now the single entry point all three funnel into.
+   This raycast deliberately does NOT reuse raycastUV: that one only tests the
+   CURRENT paint target's meshes, which is exactly the set you are trying to
+   change when you click something else. */
+function pieceMeshMap(){
+  const byMesh={};
+  if(player&&player.visual)player.visual.traverse(o=>{if(o.isMesh)byMesh[o.name]=o;});
+  return byMesh;
+}
+function raycastPiece(clientX,clientY){
+  if(!player||!player.visual)return null;
+  const byMesh=pieceMeshMap(),list=[];
+  /* Visible meshes only. three.js r128's raycaster does NOT skip invisible
+     objects (the skinned paint proxies rely on exactly that), so without this
+     filter an isolated view would still let you click the parts it is hiding. */
+  IHC_PIECES.forEach(def=>{const m=byMesh[def.mesh];
+    if(m&&m.visible&&list.indexOf(m)<0)list.push(m);});
+  if(!list.length)return null;
+  const proxies=list.map(skinnedPaintProxy);
+  const r=renderer.domElement.getBoundingClientRect();
+  pointerNDC.x=((clientX-r.left)/r.width)*2-1;
+  pointerNDC.y=-((clientY-r.top)/r.height)*2+1;
+  raycaster.setFromCamera(pointerNDC,camera);
+  const hits=raycaster.intersectObjects(proxies,false);
+  if(!hits.length)return null;
+  const src=list[proxies.indexOf(hits[0].object)];
+  if(!src)return null;
+  const defs=IHC_PIECES.filter(p=>p.mesh===src.name);
+  if(defs.length===1)return defs[0].id;
+  /* Pants and socks are ONE continuous leg mesh split at the shorts hem. The
+     split is defined on the BIND pose (IHC_SPLIT_Y — the same constant the
+     shader's vIhY compares against), so measure the hit triangle on the source
+     mesh's untouched position attribute, NOT on the skinned proxy: the proxy
+     holds posed vertices, and a raised knee would read as the wrong garment. */
+  const pos=src.geometry.attributes.position,f=hits[0].face;
+  if(!f||!pos)return defs[0].id;
+  const y=(pos.getY(f.a)+pos.getY(f.b)+pos.getY(f.c))/3;
+  const want=y>=IHC_SPLIT_Y?'above':'below';
+  return (defs.find(d=>d.splitSide===want)||defs[0]).id;
+}
+/* piece id -> the paint target that owns its mesh (targets are a coarser
+   grouping than pieces: helmet+cage are one paint surface, and so on).
+   Returns null for pieces with no paint surface at all — 'laces' (Plane004)
+   and 'blades'/'neck' are in no PAINT_TARGET_MESHES list, so they are
+   colour-zone-only. Selecting one still opens its category; the paint target
+   just stays where it was rather than being pointed at something unpaintable. */
+function paintTargetForPiece(pieceId){
+  const def=ihcPiece(pieceId);
+  if(!def)return null;
+  return Object.keys(PAINT_TARGET_MESHES)
+    .find(t=>PAINT_TARGET_MESHES[t].indexOf(def.mesh)>=0)||null;
+}
+/* The one place a part gets selected, whoever asked. Moves the editor mode if
+   the part lives in the other one, opens its category, and points the paint
+   target at it so Decals & Paint is already aimed where you just clicked. */
+function selectPieceInEditor(pieceId){
+  if(!pieceId)return false;
+  const cat=CATEGORIES.find(c=>c.piece===pieceId)
+        ||(pieceId==='neck'?CATEGORIES.find(c=>c.id==='skin'):null);
+  if(!cat)return false;
+  const pt=paintTargetForPiece(pieceId);
+  if(pt&&availablePaintTargets().some(t=>t.id===pt))paintTarget=pt;
+  if(cat.mode!==currentEditorMode&&categoriesForMode(cat.mode).length){
+    /* selectEditorMode lands on that mode's FIRST category; the selectCategory
+       below then moves to the one actually clicked. */
+    selectEditorMode(cat.mode);
+  }
+  selectCategory(cat.id);
+  return true;
+}
 /* stampSegment/ihcPaintCanvasXY/SEAM_JUMP_UV + stroke/decal replay moved to
    core (the menu preview replays the exact same stored layers). */
 function paintStamp(uv,prevUV){
@@ -814,7 +910,67 @@ function selectCategory(id){
   currentCategory=CATEGORIES.find(c=>c.id===id)||CATEGORIES[0];
   document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('active',el.dataset.cat===id));
   goToPreset(currentCategory.cam);
+  applyPartIsolation();
   renderRightPanel();
+}
+
+/* ---------------------- PART ISOLATION ----------------------
+   Opening a part's editor shows only that part. Categories that aren't about
+   one piece (Decals & Paint, Stick, roster, policies) keep the whole player,
+   because you need the body to aim at.
+   Pants and socks are ONE mesh, so hiding by mesh cannot separate them: that
+   pair is isolated with a world-space CLIPPING PLANE at the shorts hem instead
+   — the model stands in a posed idle, so the hem is taken from the live posed
+   bone rather than the bind-pose constant IHC_SPLIT_Y, which would sit at the
+   wrong height the moment the legs move. */
+let isolationOn=true;
+const _isoPlanes=[new THREE.Plane(new THREE.Vector3(0,-1,0),0),
+                  new THREE.Plane(new THREE.Vector3(0, 1,0),0)];
+function pieceIsolationTarget(){
+  if(!isolationOn||!currentCategory)return null;
+  return currentCategory.piece||(currentCategory.id==='skin'?'neck':null);
+}
+/* World Y of the shorts hem on the CURRENT pose. IHC_SPLIT_Y is a bind-pose
+   local value; converting it through the mesh's own matrixWorld is only right
+   while the legs are near bind, so prefer a real bone when one is there. */
+function hemWorldY(mesh){
+  const v=new THREE.Vector3(0,IHC_SPLIT_Y,0).applyMatrix4(mesh.matrixWorld);
+  const thigh=player&&player.visual&&(player.visual.getObjectByName('thigh_l')||
+              player.visual.getObjectByName('thigh_r'));
+  if(thigh){const p=new THREE.Vector3();thigh.getWorldPosition(p);return p.y;}
+  return v.y;
+}
+function applyPartIsolation(){
+  if(!player||!player.visual)return;
+  const target=pieceIsolationTarget();
+  const byMesh=pieceMeshMap();
+  const def=target?ihcPiece(target):null;
+  // pieces sharing the target's mesh (pants/socks) still have to render
+  const keepMesh=def?def.mesh:null;
+  renderer.localClippingEnabled=false;
+  IHC_PIECES.forEach(p=>{
+    const m=byMesh[p.mesh];
+    if(!m)return;
+    if(m.userData._isoBaseVisible===undefined)m.userData._isoBaseVisible=m.visible;
+    m.visible=target?(p.mesh===keepMesh):m.userData._isoBaseVisible;
+    if(m.material&&m.material.clippingPlanes!==undefined)m.material.clippingPlanes=null;
+  });
+  // the stick is its own GLB, not an IHC piece — hide it unless a piece is not
+  // what's open (Stick category and the whole-player views keep it)
+  if(stickGroup)stickGroup.visible=!target;
+  if(!def)return;
+  if(def.splitSide){
+    const m=byMesh[def.mesh];
+    if(m&&m.material){
+      const y=hemWorldY(m);
+      // 'above' = pants (keep y >= hem), 'below' = socks (keep y <= hem)
+      const pl=def.splitSide==='above'?_isoPlanes[1]:_isoPlanes[0];
+      pl.normal.set(0,def.splitSide==='above'?1:-1,0);
+      pl.constant=def.splitSide==='above'?-y:y;
+      m.material.clippingPlanes=[pl];
+      renderer.localClippingEnabled=true;
+    }
+  }
 }
 
 function zoneRowHTML(zone,idx,mgr,locked){
@@ -927,7 +1083,11 @@ function renderRightPanel(){
         <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
       <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
         <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
-      ${actingRole==='admin'?`<div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>`:''}
+      ${/* Not admin-gated any more. Mirroring changes what the PLAYER sees on
+            their own gear, and hiding the switch behind the admin role left a
+            player painting a helmet with no way to stop it copying to the other
+            side. It writes the same per-design field either role already wrote. */''}
+      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
       <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
       <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
       <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint & Decals mirrors both freehand strokes AND placed logos across symmetric parts (pants, gloves) — turn it off to decorate each side independently; flipping it re-splits every existing stroke/decal, so it's simplest to decide before you start a side. With Mirror off, a logo placed right at dead-center (near a belt/waistband seam) can land in an odd spot — drag it onto the leg/arm proper with "Move on Model" and it'll behave.</div>
@@ -1268,9 +1428,15 @@ function wireDecalsPanel(){
   document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';
   opSlider.addEventListener('input',()=>{paintBrushOpacity=+opSlider.value;document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';});
 
-  /* admin-only control (absent from the player-role panel): the mirror
-     convention is part of the TEAM design — one shader uniform governs both
-     the team layers and any player accents, so the admin decides it. */
+  /* Visible to BOTH roles. The mirror convention is still design-wide — one
+     packing convention governs the team layers and any player accents together
+     (see paintMirrorOn) — but a player painting their own helmet has to be able
+     to stop it copying across, so the switch can no longer be admin-only.
+     Still design-wide rather than per-piece: pieces share ONE paint canvas, and
+     the two conventions write to different places on it, so a piece reading the
+     raw UV picks up strokes a piece packed into halves left there. Measured at
+     texel level: 25 of 72 ordered piece pairs bleed. Per-piece needs a second
+     canvas pair (raw + split) threaded through all three renderers. */
   const mirrorBtn=document.getElementById('mirrorPaintBtn');
   if(mirrorBtn){
     const syncMirrorBtn=()=>{
@@ -2160,6 +2326,27 @@ document.getElementById('toggleReflection').addEventListener('click',e=>{
    pushHistory, which every edit path funnels through) — this button exists
    for the explicit "I'm done" moment: force one last save, confirm it, then
    hand off back to the site menu. */
+/* Isolation is a VIEW setting, not part of the design — it lives in the topbar
+   next to fullscreen rather than in any one part's panel, and is remembered
+   across sessions so the editor opens the way you left it. */
+(function(){
+  const b=document.getElementById('isoBtn');
+  if(!b)return;
+  try{isolationOn=localStorage.getItem('ihc.isolate')!=='0';}catch(e){}
+  const sync=()=>{
+    b.classList.toggle('action',isolationOn);
+    b.textContent=isolationOn?'👤 Isolate part: ON':'👤 Isolate part: OFF';
+  };
+  sync();
+  b.addEventListener('click',()=>{
+    isolationOn=!isolationOn;
+    try{localStorage.setItem('ihc.isolate',isolationOn?'1':'0');}catch(e){}
+    sync();
+    applyPartIsolation();
+    showToast(isolationOn?'Showing only the part you are editing':'Showing the whole player');
+  });
+})();
+
 document.getElementById('saveExitBtn').addEventListener('click',()=>{
   saveToStore();
   showToast('Saved — returning to menu…');

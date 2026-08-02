@@ -640,7 +640,13 @@ function ihtDesignPieces(design){
 }
 function ihtDesign(body,font){
   return{body,pieces:ihtPiecesFromBody(body),font:font||'Arial',
-    paintStrokes:[],decals:[],paintMirrorOn:true};
+    /* Mirror defaults OFF for NEW designs. It used to default on, which made
+       every helmet/glove stroke appear on both sides with no visible way to
+       stop it (the toggle was admin-only). Designs already saved keep whatever
+       they stored — the loaders read `paintMirrorOn!==false`, so an older
+       design with no field at all still reads as ON and renders exactly as it
+       always did. Only genuinely new designs start unmirrored. */
+    paintStrokes:[],decals:[],paintMirrorOn:false};
 }
 function ihtSeedStore(){
   /* Migration: whatever look the player had already built in the editor

@@ -6861,6 +6861,52 @@ function buildStartMenu(){
     document.body.classList.remove('hideCursor');}; // menu needs the real OS pointer back
   mBtn.addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();window.__openMenu();});
   document.body.appendChild(mBtn);
+  /* FULLSCREEN toggle. This file is deliberately self-contained (no asset or
+     script fetches), so it carries its own copy of deploy/fullscreen.js rather
+     than loading it — keep the two in step. The shared bit that matters is the
+     'ih.fullscreen' key: the menu and the customizer write the same preference,
+     so it follows the player across the three pages.
+     It cannot be re-applied on load — requestFullscreen is rejected without a
+     user gesture — so a wanted-but-absent fullscreen is re-entered on the first
+     interaction on this page instead (see arm below). */
+  (function(){
+    const KEY='ih.fullscreen';
+    const want=()=>{try{return localStorage.getItem(KEY)==='1';}catch(e){return false;}};
+    const setWant=v=>{try{localStorage.setItem(KEY,v?'1':'0');}catch(e){}};
+    const isOn=()=>!!(document.fullscreenElement||document.webkitFullscreenElement);
+    function enter(){
+      const el=document.documentElement,fn=el.requestFullscreen||el.webkitRequestFullscreen;
+      if(!fn)return;
+      try{const p=fn.call(el);if(p&&p.catch)p.catch(()=>{});}catch(e){}
+    }
+    function leave(){
+      if(!isOn())return;
+      const fn=document.exitFullscreen||document.webkitExitFullscreen;
+      if(!fn)return;
+      try{const p=fn.call(document);if(p&&p.catch)p.catch(()=>{});}catch(e){}
+    }
+    const fBtn=document.createElement('div');
+    fBtn.style.cssText='position:fixed;top:12px;left:86px;z-index:20;padding:7px 11px;border-radius:8px;border:1px solid rgba(196,92,255,.55);background:rgba(30,20,50,.6);color:#e9d5ff;font-weight:800;font-size:12px;letter-spacing:.07em;cursor:pointer;';
+    const paint=()=>{fBtn.textContent=isOn()?'⤡ WINDOWED':'⛶ FULLSCREEN';
+      fBtn.title=(isOn()?'Leave fullscreen':'Enter fullscreen')+' (F11)';};
+    fBtn.addEventListener('pointerdown',e=>{
+      e.stopPropagation();e.preventDefault();
+      if(isOn()){leave();setWant(false);}else{enter();setWant(true);}
+    });
+    /* Esc/F11 out means they no longer want it — otherwise every later page
+       would drag them straight back in. */
+    const onChange=()=>{if(!isOn()&&want())setWant(false);paint();};
+    document.addEventListener('fullscreenchange',onChange);
+    document.addEventListener('webkitfullscreenchange',onChange);
+    paint();
+    document.body.appendChild(fBtn);
+    if(want()&&!isOn()){
+      const types=['pointerdown','keydown','touchstart'];
+      const once=()=>{types.forEach(t=>document.removeEventListener(t,once,true));
+                      if(want()&&!isOn())enter();};
+      types.forEach(t=>document.addEventListener(t,once,true));
+    }
+  })();
   /* boot: game waits frozen behind the menu until START */
   window.__poseFrozen=true;
   /* AUTOSTART: the front-end menu (index.html) already collects and confirms
