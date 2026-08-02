@@ -92,9 +92,16 @@ button{font-family:inherit;}
 .cam-btn:hover{color:var(--text);border-color:var(--line-lit);}
 .cam-btn.active{color:#fff;background:rgba(124,92,255,.28);border-color:var(--accent);}
 
-.viewport-hint{position:absolute;right:16px;top:16px;z-index:10;background:rgba(14,16,23,.72);
-  backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:8px;padding:8px 12px;
-  font-size:12.5px;color:var(--text-faint);max-width:210px;line-height:1.5;}
+/* The hint and the mode banner are ONE status slot, bottom-centre, and only
+   ever one of them is on screen (see syncModeBanner). They used to sit at
+   top-right and top-centre on the same row as the tool options bar, which
+   grows with the armed tool's settings — three absolutely-positioned things
+   all at top:16px, so a wide options bar ran straight through both of them. */
+.viewport-hint{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:10;
+  background:rgba(14,16,23,.72);backdrop-filter:blur(6px);border:1px solid var(--line);
+  border-radius:999px;padding:8px 16px;font-size:12.5px;color:var(--text-faint);
+  line-height:1.5;max-width:calc(100% - 240px);text-align:center;pointer-events:none;}
+.viewport-hint.hidden{display:none;}
 
 .viewport-toolbar{position:absolute;left:16px;bottom:16px;display:flex;gap:8px;z-index:10;}
 .tool-btn{width:38px;height:38px;border-radius:10px;background:rgba(14,16,23,.72);backdrop-filter:blur(6px);
@@ -121,9 +128,15 @@ button{font-family:inherit;}
 .rail-sep{height:1px;background:var(--line);margin:2px 4px;}
 
 /* ===== TOOL OPTIONS BAR (the active tool's own settings) ===== */
-.tool-options{position:absolute;left:70px;top:16px;z-index:11;display:none;align-items:center;gap:14px;
+/* Owns the whole top row to the right of the rail — nothing else sits at
+   top:16px any more, so it may wrap to as many lines as the armed tool needs.
+   left + max-width (not `right`): with left, right and a width all set, `right`
+   is the one the browser drops, and the bar would overflow the viewport. */
+/* left 82px = the rail's own 16px offset + its measured 56px width + a 10px
+   gap. It was 70px, which put the options bar 2px INSIDE the rail. */
+.tool-options{position:absolute;left:82px;top:16px;z-index:11;display:none;align-items:center;gap:14px;
   background:rgba(14,16,23,.82);backdrop-filter:blur(8px);border:1px solid var(--line);
-  border-radius:11px;padding:9px 14px;max-width:calc(100% - 100px);flex-wrap:wrap;}
+  border-radius:11px;padding:9px 14px;max-width:calc(100% - 98px);flex-wrap:wrap;}
 .tool-options.open{display:flex;}
 .to-group{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-dim);white-space:nowrap;}
 .to-group b{color:var(--text);font-weight:700;min-width:34px;display:inline-block;text-align:right;}
@@ -132,10 +145,12 @@ button{font-family:inherit;}
 .to-sep{width:1px;height:22px;background:var(--line);}
 
 /* ===== MODE BANNER (you are never guessing which mode you are in) ===== */
-.mode-banner{position:absolute;left:50%;top:16px;transform:translateX(-50%);z-index:11;display:none;
-  align-items:center;gap:10px;background:rgba(124,92,255,.22);border:1px solid var(--accent);
+/* Shares the bottom-centre status slot with .viewport-hint — never both. */
+.mode-banner{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:11;display:none;
+  align-items:center;justify-content:center;gap:10px;background:rgba(124,92,255,.22);
+  border:1px solid var(--accent);
   backdrop-filter:blur(8px);border-radius:999px;padding:7px 16px;font-size:12.5px;font-weight:600;
-  color:#fff;white-space:nowrap;pointer-events:none;}
+  color:#fff;pointer-events:none;max-width:calc(100% - 240px);text-align:center;flex-wrap:wrap;}
 .mode-banner.open{display:flex;}
 .mode-banner.erase{background:rgba(255,180,84,.2);border-color:var(--warn);}
 .mode-banner span{color:rgba(255,255,255,.72);font-weight:500;}

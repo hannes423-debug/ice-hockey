@@ -11341,7 +11341,6 @@ let ihNameCanvas,ihNameCtx,ihNameTexture;
 let ihPaintCanvas,ihPaintCtx,ihPaintTexture,ihLogoCanvas,ihLogoCtx,ihLogoTexture;
 /* second pair holding the UNMIRRORED (half-packed) convention — see the note
    on the shader above for why it cannot share the mirrored canvas */
-let ihPaintCanvasS,ihPaintCtxS,ihPaintTextureS,ihLogoCanvasS,ihLogoCtxS,ihLogoTextureS;
 
 function ihGetImageDataFromTexture(tex){
   const img=tex.image;
@@ -11491,24 +11490,22 @@ function ihInstallRecolorShader(material,maskTexture,zoneColors,decals,split){
       }
       /* paint + placed logos: the same shared atlas-space canvases the editor
          composites, in the same order (logos under paint), sampled with the
-         same left/right-half remap when the editor's Mirror toggle is off. */
+         same left/right-half remap. */
       if(decals.paintMap){
         shader.uniforms.logoMap={value:decals.logoMap};
         shader.uniforms.paintMap={value:decals.paintMap};
-        /* Mirror is PER PART now, so mirrored and unmirrored paint have to
-           coexist — and they cannot share one canvas: the unmirrored packing
-           lands on top of other pieces' raw islands (25 of 72 ordered piece
-           pairs overlap at texel level). Each convention gets its own canvas
-           and every piece samples the one its own uMirrorPaint selects. */
-        shader.uniforms.logoMapSplit={value:decals.logoMapSplit||decals.logoMap};
-        shader.uniforms.paintMapSplit={value:decals.paintMapSplit||decals.paintMap};
-        shader.uniforms.uMirrorPaint={value:decals.mirror===false?0.0:1.0};
-        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform sampler2D logoMapSplit;\nuniform sampler2D paintMapSplit;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
+        /* THERE IS NO MIRRORING — a stroke renders on the side it was
+           painted on and nowhere else. The half-pack remap stays, because the
+           rig's left and right share one UV island: a raw-UV lookup cannot
+           express "this side only", so the canvas is packed into left/right
+           halves by u and each fragment samples its own side. Must stay
+           identical to ihPaintCanvasXY and to the editor's shader. */
+        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nvarying float vIhSide;';
         extraCode+=`
           vec2 sUv = vec2( vUv.x*0.5 + (vIhSide>=0.0?0.5:0.0), vUv.y );
-          vec4 lg = mix( texture2D(logoMapSplit,sUv), texture2D(logoMap,vUv), uMirrorPaint );
+          vec4 lg = texture2D( logoMap, sUv );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, lg.rgb, lg.a );
-          vec4 pt = mix( texture2D(paintMapSplit,sUv), texture2D(paintMap,vUv), uMirrorPaint );
+          vec4 pt = texture2D( paintMap, sUv );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, pt.rgb, pt.a );`;
       }
     }
@@ -11558,8 +11555,7 @@ function ihBuildPieceKit(visual,decals){
     const belowDef=defs.find(d=>d.splitSide==='below');
     const below=belowDef?mk():null;
     if(below)out[belowDef.id]=below;
-    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap,
-      logoMapSplit:decals.logoMapSplit,paintMapSplit:decals.paintMapSplit,mirror:decals.mirror}):null;
+    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap}):null;
     ihInstallRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
       below?{y:IH_SPLIT_Y,colors:below.colors}:null);
   });
@@ -11807,18 +11803,9 @@ function ihSetupLockerRoomMaterials(){
   ihLogoCanvas.width=ihLogoCanvas.height=IH_DECAL_SIZE;
   ihLogoCtx=ihLogoCanvas.getContext('2d');
   ihLogoTexture=ihMakeDecalTexture();
-  ihPaintCanvasS=document.createElement('canvas');
-  ihPaintCanvasS.width=ihPaintCanvasS.height=IH_DECAL_SIZE;
-  ihPaintCtxS=ihPaintCanvasS.getContext('2d');
-  ihPaintTextureS=ihMakeDecalTexture();
-  ihLogoCanvasS=document.createElement('canvas');
-  ihLogoCanvasS.width=ihLogoCanvasS.height=IH_DECAL_SIZE;
-  ihLogoCtxS=ihLogoCanvasS.getContext('2d');
-  ihLogoTextureS=ihMakeDecalTexture();
 
   ihPlayerPieces=ihBuildPieceKit(player.visual,
-    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture,
-     logoMapSplit:ihLogoTextureS,paintMapSplit:ihPaintTextureS});
+    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture});
   if(!ihPlayerPieces)return false;
   ihBodyColors=ihPlayerPieces.jersey.colors;      // the name/number plate reads these
   ihNeckColors=ihPlayerPieces.neck.colors;
@@ -11858,20 +11845,11 @@ function ihTargetForPieceId(pid){
   if(!d)return null;
   return IH_TARGET_IDS.find(t=>IH_TARGET_MESHES[t].indexOf(d.mesh)>=0)||null;
 }
-/* Same resolution core's ihcMirrorMap does: prefer the per-target map, fall
-   back to the old design-wide boolean, default mirrored when neither exists. */
-function ihMirrorMap(paint){
-  const out={},legacy=!paint||paint.mirror!==false;
-  IH_TARGET_IDS.forEach(t=>{out[t]=legacy;});
-  if(paint&&paint.mirrorByTarget){
-    IH_TARGET_IDS.forEach(t=>{
-      if(typeof paint.mirrorByTarget[t]==='boolean')out[t]=paint.mirrorByTarget[t];
-    });
-  }
-  return out;
-}
-function ihPaintCanvasXY(uv,side,mirrorOn){
-  if(mirrorOn)return{x:uv.x*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
+/* The canvas is one atlas packed into left/right HALVES by u; a point's real
+   side picks the half. Mirroring is gone, so this is the only convention —
+   loadouts saved with the old `mirror`/`mirrorByTarget` flags still load, the
+   flags are just ignored. Must match the shader's sUv remap exactly. */
+function ihPaintCanvasXY(uv,side){
   return{x:(uv.x*0.5+(side>=0?0.5:0))*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
 }
 /* `opts` is optional and every field defaults to the old behaviour, so a
@@ -11920,26 +11898,22 @@ function ihStampSegment(ctx,x,y,px,py,size,color,opacity,seamJump,opts){
   for(let i=1;i<=n;i++)dab(px+dx*i/n,py+dy*i/n);
   ctx.restore();
 }
-/* ctxs={raw,split}; mirrorFor=fn(targetId)->bool. A stroke goes to the canvas
-   its own target's mirror setting selects, packed to match. */
-function ihReplayStrokes(ctxs,strokes,mirrorFor){
+function ihReplayStrokes(ctx,strokes){
+  if(!ctx)return;
   (strokes||[]).forEach(s=>{
     if(s.visible===false||!s.points)return;
-    const mirrorOn=mirrorFor(s.target);
-    const ctx=mirrorOn?ctxs.raw:ctxs.split;
-    if(!ctx)return;
     let prevXY=null,prev=null;
     s.points.forEach(p=>{
-      const xy=ihPaintCanvasXY(p,p.side,mirrorOn);
+      const xy=ihPaintCanvasXY(p,p.side);
+      // a side change is always a seam: the halves are opposite ends of the atlas
       const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>IH_SEAM_JUMP_UV)||
-        (!mirrorOn&&prev&&prev.side!==p.side);
+        (prev&&prev.side!==p.side);
       ihStampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
         s.size,s.color,s.opacity,seamJump,{mode:s.mode,hardness:s.hardness});
       prevXY=xy;prev=p;
     });
   });
-  if(ctxs.raw)ctxs.raw.globalAlpha=1;
-  if(ctxs.split)ctxs.split.globalAlpha=1;
+  ctx.globalAlpha=1;
 }
 /* Replays several OWNERSHIP stacks bottom-first, keeping each one's erase
    strokes inside its own stack. Playing them back-to-back into one context is
@@ -11949,34 +11923,30 @@ function ihReplayStrokes(ctxs,strokes,mirrorFor){
    a jersey the Locker Room never showed. Each stack gets its own scratch
    canvas and the results are flattened with drawImage, which the erase inside
    cannot reach through. */
-function ihReplayStackedStrokes(ctxs,stacks,mirrorFor){
+function ihReplayStackedStrokes(ctx,stacks){
+  if(!ctx)return;
   const live=(stacks||[]).filter(s=>s&&s.length);
   if(live.length<2){
-    if(live.length)ihReplayStrokes(ctxs,live[0],mirrorFor);
+    if(live.length)ihReplayStrokes(ctx,live[0]);
     return;
   }
-  const mk=()=>{const c=document.createElement('canvas');
-    c.width=c.height=IH_DECAL_SIZE;return{canvas:c,ctx:c.getContext('2d')};};
-  const sr=mk(),ss=mk();
+  const c=document.createElement('canvas');
+  c.width=c.height=IH_DECAL_SIZE;
+  const s=c.getContext('2d');
   live.forEach(list=>{
-    sr.ctx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-    ss.ctx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-    ihReplayStrokes({raw:sr.ctx,split:ss.ctx},list,mirrorFor);
-    if(ctxs.raw){ctxs.raw.globalAlpha=1;ctxs.raw.globalCompositeOperation='source-over';
-      ctxs.raw.drawImage(sr.canvas,0,0);}
-    if(ctxs.split){ctxs.split.globalAlpha=1;ctxs.split.globalCompositeOperation='source-over';
-      ctxs.split.drawImage(ss.canvas,0,0);}
+    s.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+    ihReplayStrokes(s,list);
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+    ctx.drawImage(c,0,0);
   });
 }
-function ihReplayDecals(ctxs,decals,logoLib,mirrorFor){
+function ihReplayDecals(ctx,decals,logoLib){
+  if(!ctx)return;
   (decals||[]).forEach(d=>{
     if(d.visible===false)return;
     const lib=(logoLib||[]).find(l=>l.id===d.logoId);
     if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    const mirrorOn=mirrorFor(d.target);
-    const ctx=mirrorOn?ctxs.raw:ctxs.split;
-    if(!ctx)return;
-    const xy=ihPaintCanvasXY({x:d.u,y:d.v},d.side,mirrorOn);
+    const xy=ihPaintCanvasXY({x:d.u,y:d.v},d.side);
     const size=IH_DECAL_SIZE*d.scale;
     ctx.save();
     ctx.translate(xy.x,xy.y);ctx.rotate(d.rotation||0);
@@ -11995,19 +11965,11 @@ let ihLogoLib=null,ihLastPaint=null;
 function ihApplyPaintLayers(paint){
   if(!ihPaintCtx||!paint)return;
   ihLastPaint=paint;
-  // the packing has to match what each stroke was drawn with — resolved per
-  // paint target, exactly as the editor and the menu preview resolve it
-  const mirrorMap=ihMirrorMap(paint);
-  const mirrorFor=t=>!!mirrorMap[t];
-  ihSetMirrorUniformWhenReady(mirrorFor);
   ihPaintCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  ihPaintCtxS.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  const pc={raw:ihPaintCtx,split:ihPaintCtxS};
   // stacked, not sequential — see ihReplayStackedStrokes: a personal ERASE
   // stroke must not reach the team design underneath it
-  ihReplayStackedStrokes(pc,[paint.strokes,paint.accStrokes],mirrorFor);
+  ihReplayStackedStrokes(ihPaintCtx,[paint.strokes,paint.accStrokes]);
   ihSyncCanvasToTexture(ihPaintCtx,ihPaintTexture);
-  ihSyncCanvasToTexture(ihPaintCtxS,ihPaintTextureS);
   if(ihLogoLib===null){
     try{ihLogoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){ihLogoLib=[];}
     ihLogoLib.forEach(l=>{l.img=new Image();l.img.onload=()=>ihRedrawLogoLayer();l.img.src=l.dataURL;});
@@ -12016,43 +11978,10 @@ function ihApplyPaintLayers(paint){
 }
 function ihRedrawLogoLayer(){
   if(!ihLogoCtx||!ihLastPaint)return;
-  const mirrorMap=ihMirrorMap(ihLastPaint);
-  const mirrorFor=t=>!!mirrorMap[t];
   ihLogoCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  ihLogoCtxS.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  const lc={raw:ihLogoCtx,split:ihLogoCtxS};
-  ihReplayDecals(lc,ihLastPaint.decals,ihLogoLib,mirrorFor);
-  ihReplayDecals(lc,ihLastPaint.accDecals,ihLogoLib,mirrorFor);
+  ihReplayDecals(ihLogoCtx,ihLastPaint.decals,ihLogoLib);
+  ihReplayDecals(ihLogoCtx,ihLastPaint.accDecals,ihLogoLib);
   ihSyncCanvasToTexture(ihLogoCtx,ihLogoTexture);
-  ihSyncCanvasToTexture(ihLogoCtxS,ihLogoTextureS);
-}
-/* Per PIECE, from that piece's own paint target. No material de-duping here:
-   pieces that share a mesh (pants/socks, helmet/cage) also share a target and
-   therefore agree, but two pieces on the SAME material with different targets
-   must each get their own value written rather than the first one winning. */
-function ihSetMirrorUniform(mirrorFor){
-  if(!ihPlayerPieces)return true;
-  const ids=Object.keys(ihPlayerPieces).filter(id=>ihPlayerPieces[id].material);
-  let n=0;
-  ids.forEach(id=>{
-    const ref=ihPlayerPieces[id].material.userData.ihShaderRef;
-    if(!ref||!ref.uniforms.uMirrorPaint)return;
-    const t=ihTargetForPieceId(id);
-    ref.uniforms.uMirrorPaint.value=(t&&mirrorFor(t))?1:0;
-    n++;
-  });
-  return n===ids.length;
-}
-/* A material's shaderRef only exists once it has COMPILED, which happens on its
-   first render — and the loadout is applied before that. Until the uniform is
-   written the shader falls back to its own default (mirrored), so an unmirrored
-   part would render mirrored on arrival. Retry until every piece has taken it. */
-function ihSetMirrorUniformWhenReady(mirrorFor){
-  if(ihSetMirrorUniform(mirrorFor))return;
-  let tries=0;
-  const iv=setInterval(()=>{
-    if(ihSetMirrorUniform(mirrorFor)||++tries>120)clearInterval(iv);
-  },50);
 }
 /* The stick is its own GLB with its own texture, so it keeps the simple
    whole-texture clustering the body used to use (no UV-island split needed —

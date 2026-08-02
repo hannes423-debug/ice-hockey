@@ -132,18 +132,7 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
     if(decals){
       shader.uniforms.logoMap={value:decals.logoMap};
       shader.uniforms.paintMap={value:decals.paintMap};
-      /* Mirrored and unmirrored paint cannot share one canvas. The two
-         conventions write to DIFFERENT places on it, and the pieces' UV islands
-         overlap once one of them is packed into halves — measured at texel
-         level, 25 of 72 ordered piece pairs bleed, so a mirrored jersey would
-         pick up strokes an unmirrored pants layer left behind. Each convention
-         gets its own canvas instead, and every piece samples the one its own
-         mirror setting selects. Fall back to the raw maps when a caller has not
-         supplied split ones, so an old two-map caller still renders. */
-      shader.uniforms.logoMapSplit={value:decals.logoMapSplit||decals.logoMap};
-      shader.uniforms.paintMapSplit={value:decals.paintMapSplit||decals.paintMap};
-      shader.uniforms.uMirrorPaint={value:decals.mirror===false?0.0:1.0};
-      extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform sampler2D logoMapSplit;\nuniform sampler2D paintMapSplit;\nuniform float uMirrorPaint;';
+      extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;';
       /* The name/number PLATE only exists on the jersey's own UV region, so
          only the jersey's material samples it — every other piece would just
          be paying for a sampler that can never contribute a pixel (and could
@@ -153,23 +142,32 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
         shader.uniforms.nameNumberMap={value:decals.nameNumberMap};
         extraUniforms+='\nuniform sampler2D nameNumberMap;';
       }
-      /* Mirror ON (default, unchanged behavior): sample logoMap/paintMap at
-         the raw (shared/mirrored) UV — whatever's painted/placed on one leg
-         shows on both, same as it always has. Mirror OFF: the canvas is
-         packed into left/right HALVES by ihcPaintCanvasXY() (see its own
-         comment) — sample whichever half matches this fragment's real side
-         (vIhSide, the per-fragment counterpart to the JS-side raycast hit
-         test used while painting/placing) instead of the raw shared UV.
-         Logos share the exact same mirrored-UV problem paint had (confirmed:
-         a decal placed once showed up on both legs) so they use the exact
-         same remap/uniform — no separate "mirror decals" toggle. */
+      /* THERE IS NO MIRRORING. A stroke lands where it was painted and
+         nowhere else.
+
+         This still needs the half-pack remap, because the rig's left and right
+         share one UV island — that shared island is what used to make
+         mirroring happen "for free", and it also means a raw-UV lookup CANNOT
+         express "this side only". So the paint canvas is one atlas packed into
+         left/right HALVES by u, and each fragment samples the half matching
+         its own real side (vIhSide, the per-fragment counterpart to the
+         raycast hit test the painter uses). ihcPaintCanvasXY() writes with the
+         identical formula — the two must stay in exact agreement.
+
+         There used to be a second, raw-UV canvas for mirrored strokes and a
+         uMirrorPaint uniform to pick between them. Both are gone: only the
+         jersey ever received the split maps (every other piece was handed a
+         stripped {logoMap,paintMap} and silently fell back to the raw canvas
+         for its split sampler), so turning mirror off on a helmet sampled an
+         empty texture and wiped every stroke on it. One canvas, one formula,
+         and that whole class of mismatch cannot happen. */
       extraCode=(decals.nameNumberMap?`
           vec4 nn = texture2D( nameNumberMap, vUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );`:'')+`
           vec2 sUv = vec2( vUv.x*0.5 + (vIhSide>=0.0?0.5:0.0), vUv.y );
-          vec4 lg = mix( texture2D(logoMapSplit,sUv), texture2D(logoMap,vUv), uMirrorPaint );
+          vec4 lg = texture2D( logoMap, sUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
-          vec4 pt = mix( texture2D(paintMapSplit,sUv), texture2D(paintMap,vUv), uMirrorPaint );
+          vec4 pt = texture2D( paintMap, sUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
       extraUniforms+='\nvarying float vIhSide;';
     }
@@ -284,8 +282,8 @@ function ihcAssemblyOf(pid){
   return IHC_ASSEMBLIES.find(x=>x.pieces.indexOf(pid)>=0)||null;
 }
 /* PAINT TARGETS: the surfaces paint/decals are tagged with. Coarser than
-   pieces — helmet+cage are one paintable shell, skates+blades one boot — and
-   they are what mirror is set per, because a stroke stores its target id.
+   pieces — helmet+cage are one paintable shell, skates+blades one boot — so a
+   stroke that crosses from shell to cage stays one stroke.
    Plane004 (laces) is in none: it has no paint surface at all. */
 const IHC_TARGET_MESHES={
   jersey:['Cube','Cube001'],pants:['Cube002'],gloves:['Cube003'],
@@ -298,22 +296,14 @@ function ihcTargetForMesh(mesh){
 function ihcTargetForPieceId(pid){
   const d=ihcPiece(pid);return d?ihcTargetForMesh(d.mesh):null;
 }
-/* Every renderer resolves a design's mirror settings through THIS, so the
-   editor, the menu preview and the game can never disagree about which side a
-   stroke lands on. Migration: a design carrying the old design-wide
-   `paintMirrorOn` boolean maps that one value onto every target, and a design
-   with neither field reads as mirrored — which is how it always rendered. */
-function ihcMirrorMap(design){
-  const out={};
-  const legacy=design?design.paintMirrorOn!==false:true;
-  IHC_TARGET_IDS.forEach(t=>{out[t]=legacy;});
-  if(design&&design.paintMirrorByTarget){
-    IHC_TARGET_IDS.forEach(t=>{
-      if(typeof design.paintMirrorByTarget[t]==='boolean')out[t]=design.paintMirrorByTarget[t];
-    });
-  }
-  return out;
-}
+/* MIRRORING IS GONE. Every stroke lands on the side it was painted on and
+   nowhere else, in all three renderers — editor, menu preview and game.
+   Designs saved while the old per-target mirror flags existed still load; the
+   flags (`paintMirrorOn`, `paintMirrorByTarget`) are simply ignored, and a
+   stroke that was drawn expecting a mirrored twin now shows only the half that
+   was actually painted. That is the intended behaviour, not a migration bug —
+   nothing needs rewriting on load, because every stroke already stores the
+   `side` it was drawn on. */
 /* Fills `cov` (1 byte per texel) with 1 wherever this mesh's UV triangles
    land. Triangles are expanded ~1.5px outward from their centroid so the
    island EDGES (where the texture's own antialiasing/bleed lives) count as
@@ -672,44 +662,39 @@ function ihcFadeToTransparent(hex){
   if(isNaN(v))return'rgba(255,255,255,0)';
   return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+',0)';
 }
-/* Where a UV point actually lands on the paint canvas. Mirror ON (default):
-   raw UV, unchanged — both sides share the same canvas region, which is
-   exactly what makes the mirroring happen "for free" via the mesh's own
-   mirrored UV layout. Mirror OFF: the canvas is split into left/right
-   HALVES by u — a point's real side decides which half it lands in. The
-   shader's pUv remap (installRecolorShader) must stay in exact agreement. */
-function ihcPaintCanvasXY(uv,side,mirrorOn){
-  if(mirrorOn)return{x:uv.x*DECAL_SIZE,y:uv.y*DECAL_SIZE};
+/* Where a UV point lands on the paint canvas. The canvas is one atlas packed
+   into left/right HALVES by u: a point's real side decides which half it lands
+   in, which is the only way to address one side of a rig whose left and right
+   share a UV island. The shader's sUv remap (installRecolorShader) must stay
+   in exact agreement. There is no second, mirrored convention. */
+function ihcPaintCanvasXY(uv,side){
   return{x:(uv.x*0.5+(side>=0?0.5:0))*DECAL_SIZE,y:uv.y*DECAL_SIZE};
 }
 /* Replays stored stroke lists in order onto ctx (does NOT clear — callers
-   clear once, then replay team layers under personal layers). */
-/* Mirror is per PAINT TARGET now, so a stroke is routed by its own target:
-   mirrored strokes onto the RAW canvas at the raw UV, unmirrored ones onto the
-   SPLIT canvas packed into left/right halves. `ctxs` is {raw,split} and
-   `mirrorFor` is a fn(targetId)->bool. Passing a single context and a boolean
-   still works (old two-arg callers) — see ihcCtxPair. */
-function ihcCtxPair(ctxs){return ctxs&&ctxs.raw!==undefined?ctxs:{raw:ctxs,split:ctxs};}
-function ihcMirrorFn(m){return typeof m==='function'?m:()=>!!m;}
-function ihcReplayStrokes(ctxs,strokes,mirrorFor){
-  const C=ihcCtxPair(ctxs),M=ihcMirrorFn(mirrorFor);
+   clear once, then replay team layers under personal layers).
+   Extra trailing arguments are tolerated: callers used to pass a {raw,split}
+   context pair and a mirror lookup, and a stale one must not silently paint
+   into `undefined`. */
+function ihcCtx(ctx){return ctx&&ctx.split!==undefined?ctx.split:ctx;}
+function ihcReplayStrokes(ctxs,strokes){
+  const ctx=ihcCtx(ctxs);
+  if(!ctx)return;
   (strokes||[]).forEach(s=>{
     if(s.visible===false)return;
-    const mirrorOn=M(s.target);
-    const ctx=mirrorOn?C.raw:C.split;
-    if(!ctx)return;
     let prevXY=null,prev=null;
     s.points.forEach(p=>{
-      const xy=ihcPaintCanvasXY(p,p.side,mirrorOn);
+      const xy=ihcPaintCanvasXY(p,p.side);
+      /* A side change mid-drag is always a seam: the two sides land on
+         opposite halves of the canvas, so joining them would draw a line
+         straight across the atlas. */
       const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV)||
-        (!mirrorOn&&prev&&prev.side!==p.side);
+        (prev&&prev.side!==p.side);
       stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
         s.size,s.color,s.opacity,seamJump,{mode:s.mode,hardness:s.hardness});
       prevXY=xy;prev=p;
     });
   });
-  if(C.raw)C.raw.globalAlpha=1;
-  if(C.split)C.split.globalAlpha=1;
+  ctx.globalAlpha=1;
 }
 /* Replays SEVERAL ownership stacks, bottom-first, keeping each one's erase
    strokes inside its own stack.
@@ -726,39 +711,33 @@ function ihcReplayStrokes(ctxs,strokes,mirrorFor){
    `stacks` is an array of stroke lists, bottom first. Single-stack callers
    should keep using ihcReplayStrokes — this only earns its two extra canvases
    when there is genuinely a second owner to protect. */
-function ihcReplayStackedStrokes(ctxs,stacks,mirrorFor){
-  const C=ihcCtxPair(ctxs);
+function ihcReplayStackedStrokes(ctxs,stacks){
+  const ctx=ihcCtx(ctxs);
+  if(!ctx)return;
   const live=(stacks||[]).filter(s=>s&&s.length);
   if(live.length<2){
-    if(live.length)ihcReplayStrokes(ctxs,live[0],mirrorFor);
+    if(live.length)ihcReplayStrokes(ctx,live[0]);
     return;
   }
-  const size=(C.raw&&C.raw.canvas?C.raw.canvas.width:0)||DECAL_SIZE;
-  const scratch=k=>{
-    const c=document.createElement('canvas');c.width=c.height=size;
-    return{canvas:c,ctx:c.getContext('2d')};
-  };
-  const sr=scratch(),ss=scratch();
+  const size=(ctx.canvas?ctx.canvas.width:0)||DECAL_SIZE;
+  const c=document.createElement('canvas');c.width=c.height=size;
+  const s=c.getContext('2d');
   live.forEach(list=>{
-    sr.ctx.clearRect(0,0,size,size);ss.ctx.clearRect(0,0,size,size);
-    ihcReplayStrokes({raw:sr.ctx,split:ss.ctx},list,mirrorFor);
-    if(C.raw){C.raw.globalAlpha=1;C.raw.globalCompositeOperation='source-over';
-      C.raw.drawImage(sr.canvas,0,0);}
-    if(C.split){C.split.globalAlpha=1;C.split.globalCompositeOperation='source-over';
-      C.split.drawImage(ss.canvas,0,0);}
+    s.clearRect(0,0,size,size);
+    ihcReplayStrokes(s,list);
+    ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+    ctx.drawImage(c,0,0);
   });
 }
 /* Same idea for placed logo/shape decals; logoLib entries need a loaded .img. */
-function ihcReplayDecals(ctxs,decals,logoLib,mirrorFor){
-  const C=ihcCtxPair(ctxs),M=ihcMirrorFn(mirrorFor);
+function ihcReplayDecals(ctxs,decals,logoLib){
+  const ctx=ihcCtx(ctxs);
+  if(!ctx)return;
   (decals||[]).forEach(d=>{
     if(d.visible===false)return;
     const lib=(logoLib||[]).find(l=>l.id===d.logoId);
     if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    const mirrorOn=M(d.target);
-    const ctx=mirrorOn?C.raw:C.split;
-    if(!ctx)return;
-    const xy=ihcPaintCanvasXY({x:d.u,y:d.v},d.side,mirrorOn);
+    const xy=ihcPaintCanvasXY({x:d.u,y:d.v},d.side);
     const size=DECAL_SIZE*d.scale;
     ctx.save();
     ctx.translate(xy.x,xy.y);ctx.rotate(d.rotation||0);
@@ -818,14 +797,7 @@ function ihtDesignPieces(design){
 }
 function ihtDesign(body,font){
   return{body,pieces:ihtPiecesFromBody(body),font:font||'Arial',
-    /* Mirror defaults OFF for NEW designs. It used to default on, which made
-       every helmet/glove stroke appear on both sides with no visible way to
-       stop it (the toggle was admin-only). Designs already saved keep whatever
-       they stored — the loaders read `paintMirrorOn!==false`, so an older
-       design with no field at all still reads as ON and renders exactly as it
-       always did. Only genuinely new designs start unmirrored. */
-    paintStrokes:[],decals:[],paintMirrorOn:false,
-    paintMirrorByTarget:ihcMirrorMap({paintMirrorOn:false})};
+    paintStrokes:[],decals:[]};
 }
 function ihtSeedStore(){
   /* Migration: whatever look the player had already built in the editor
@@ -926,13 +898,8 @@ function ihtEffectiveLoadout(s,kit,teamId,jerseyId){
     v:1,
     body:j.design.body.slice(),
     pieces:JSON.parse(JSON.stringify(ihtDesignPieces(j.design))),
-    /* `mirror` stays for older readers; mirrorByTarget is what the game and the
-       menu preview actually use now, so a kit that mirrors the helmet but not
-       the pants renders the same in all three places. */
     paint:{strokes:j.design.paintStrokes||[],decals:j.design.decals||[],
-           accStrokes:ctx.accStrokes||[],accDecals:ctx.accDecals||[],
-           mirror:j.design.paintMirrorOn!==false,
-           mirrorByTarget:ihcMirrorMap(j.design)},
+           accStrokes:ctx.accStrokes||[],accDecals:ctx.accDecals||[]},
     neck:kit.skin||'#c68863',
     stick:(ctx.stick||kit.defaultStick||IHT_DEFAULT_STICK).slice(),
     name:kit.name||'',
