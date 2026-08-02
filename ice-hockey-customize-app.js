@@ -107,7 +107,7 @@ const CAM_PRESETS={
 };
 const camState={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
 const camGoal={yaw:0.55,pitch:0.11,dist:3.35,target:new THREE.Vector3(0,0.95,0)};
-let autoRotate=true,dragMode=null,lastPX=0,lastPY=0,currentPresetName='full';
+let dragMode=null,lastPX=0,lastPY=0,currentPresetName='full';
 /* Where the pointer went DOWN, and whether it has travelled far enough to be
    an orbit rather than a click on a part. A few px of slop keeps a click from
    being lost to hand tremor or a trackpad. */
@@ -128,7 +128,6 @@ function goToPreset(name){
   camGoal.yaw=p.yaw;camGoal.pitch=clampPitch(p.pitch);camGoal.dist=p.dist;
   camGoal.target.set(p.target[0],p.target[1],p.target[2]);
   currentPresetName=name;
-  document.querySelectorAll('#camPresets .cam-btn').forEach(b=>b.classList.toggle('active',b.dataset.cam===name));
 }
 function updateCamera(dt){
   const k=1-Math.pow(0.0015,Math.min(dt,0.1));
@@ -136,7 +135,6 @@ function updateCamera(dt){
   camState.pitch+=(camGoal.pitch-camState.pitch)*k;
   camState.dist+=(camGoal.dist-camState.dist)*k;
   camState.target.lerp(camGoal.target,k);
-  if(autoRotate&&!dragMode)camGoal.yaw+=dt*0.16;
   const p=camState.pitch;
   const x=camState.target.x+Math.sin(camState.yaw)*Math.cos(p)*camState.dist;
   const y=camState.target.y+Math.sin(p)*camState.dist;
@@ -811,7 +809,6 @@ let currentEditorMode='team';
    rather than three sliders that would move nothing. */
 const CATEGORIES=[
   {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',piece:'jersey',mode:'team'},
-  {id:'decals',label:'Decals & Paint', icon:'🎨',cam:'upper',group:'decals',mode:'team'},
   {id:'helmet',label:'Helmet', icon:'⛑️',cam:'helmet',group:'body',piece:'helmet',mode:'team'},
   {id:'cage',  label:'Cage',   icon:'🥅',cam:'helmet',group:'body',piece:'cage',  mode:'team'},
   {id:'gloves',label:'Gloves', icon:'🧤',cam:'gloves',group:'body',piece:'gloves',mode:'team'},
@@ -872,15 +869,28 @@ function selectEditorMode(mode){
   buildSidebar();
   selectCategory(categoriesForMode(mode)[0].id);
 }
-/* Is this category actually editable in the current role/policy context? */
-function categoryEditable(cat){
+/* A part has TWO independent permissions, and conflating them is what used to
+   leave a player staring at a kit where every part said 🔒 and the only way in
+   was a separate "Decals & Paint" category:
+     colours/material — the team's uniform design, admin only
+     paint/decals     — the player's own accents, per team/league policy
+   A player may well be allowed to paint a helmet they cannot recolour. */
+function categoryColorEditable(cat){
   if(actingRole==='admin')return cat.mode==='team'||cat.mode==='admin';
   if(cat.mode==='player'){
     if(cat.id==='stick')return catAllowed('stick');
     return true; // skin + nameplate are always the player's own
   }
-  if(cat.id==='decals')return availablePaintTargets().length>0;
   return false; // uniform design is team-controlled
+}
+function categoryPaintable(cat){
+  if(!cat.piece)return false;
+  const pt=paintTargetForPiece(cat.piece);
+  return !!pt&&availablePaintTargets().some(t=>t.id===pt);
+}
+/* Drives the sidebar's 🔒 chip: unlocked if there is ANYTHING to do here. */
+function categoryEditable(cat){
+  return categoryColorEditable(cat)||categoryPaintable(cat);
 }
 function buildSidebar(){
   const list=document.getElementById('sbList');
@@ -895,19 +905,17 @@ function buildSidebar(){
     list.appendChild(el);
   });
 }
-function buildCamPresetButtons(){
-  const wrap=document.getElementById('camPresets');
-  wrap.innerHTML='';
-  [['full','Full Body'],['upper','Upper Body'],['helmet','Helmet'],['gloves','Gloves'],
-   ['pants','Legs'],['skates','Skates'],['stick','Stick'],['free','Free Cam']].forEach(([id,label])=>{
-    const b=document.createElement('div');
-    b.className='cam-btn';b.dataset.cam=id;b.textContent=label;
-    b.addEventListener('click',()=>goToPreset(id));
-    wrap.appendChild(b);
-  });
-}
 function selectCategory(id){
   currentCategory=CATEGORIES.find(c=>c.id===id)||CATEGORIES[0];
+  /* The part you open IS the paint target. This is the whole reason the old
+     "Paint Target" strip could disagree with the sidebar — two selections, no
+     link. Only moves when the part actually has a paint surface, so opening
+     Laces or Blades leaves the brush where it was rather than pointing it at
+     something unpaintable. */
+  if(currentCategory.piece){
+    const pt=paintTargetForPiece(currentCategory.piece);
+    if(pt&&availablePaintTargets().some(t=>t.id===pt))paintTarget=pt;
+  }
   document.querySelectorAll('.sb-item').forEach(el=>el.classList.toggle('active',el.dataset.cat===id));
   goToPreset(currentCategory.cam);
   applyPartIsolation();
@@ -1003,6 +1011,50 @@ function presetStripHTML(){
   return html;
 }
 
+/* The paint/decal tools, scoped to ONE piece. These used to be a category of
+   their own ("Decals & Paint") with a Paint Target strip inside it, which meant
+   a part could be chosen in two unrelated places and the two disagreed. The
+   part you have open IS the paint target now (selectCategory points it there),
+   so the strip is gone and these sections render inside the part's own panel. */
+function paintToolsHTML(label){
+  let html=`<div class="rp-section"><div class="rp-section-title">Freehand Paint</div>
+      <div class="zone-row" id="paintColorRow"><div class="zone-swatch" id="paintColorSwatch" style="background:${paintBrushColor}"></div>
+        <div class="zone-info"><div class="zone-name">Brush Color</div></div></div>
+      <div class="mat-slider-row"><div class="mat-slider-label"><span>Brush Size</span><b id="brushSizeVal"></b></div>
+        <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
+      <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
+        <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
+      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
+      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
+      <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
+      <div class="rp-note" style="margin-top:10px;" id="paintNote">Paint Mode makes dragging on the model paint instead of turning it — scroll still zooms. Every drag becomes its own layer below, so it can be reordered, hidden or deleted on its own, and it saves into presets and undo. Mirror copies both strokes AND placed logos to the other side of a symmetric part; turn it off to decorate each side separately. Flipping it re-packs every existing stroke and decal, so it is simplest to decide before you start a side.</div>
+    </div>`;
+  html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
+      <div class="lc-shape-grid" id="quickShapeGrid">
+        <div class="lc-shape-btn" data-qshape="circle" title="Circle">●</div>
+        <div class="lc-shape-btn" data-qshape="square" title="Square">■</div>
+        <div class="lc-shape-btn" data-qshape="triangle" title="Triangle">▲</div>
+        <div class="lc-shape-btn" data-qshape="star" title="Star">★</div>
+        <div class="lc-shape-btn" data-qshape="hexagon" title="Hexagon">⬡</div>
+        <div class="lc-shape-btn" data-qshape="shield" title="Shield">🛡</div>
+      </div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps a decal straight onto the ${label} — drag, scale and rotate it below just like a placed logo. Use the Logo Creator for multi-layer text+shape combos.</div>
+    </div>`;
+  html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
+      <div class="palette-grid" id="logoLibraryGrid"></div>
+      <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
+    </div>`;
+  html+=`<div class="rp-section"><div class="rp-section-title">Layers<span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${(paintStrokes.length+placedDecals.length)} total</span></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;">Decals and paint strokes are separate stacks — within each, later draws on top; paint always renders above decals overall. The lists below show every layer on the whole kit, not just this part.</div>
+      <div class="rp-section-title" style="margin-top:2px;">🖼 Decals</div>
+      <div id="placedDecalsList"></div>
+      <div id="placedDecalControls"></div>
+      <div class="rp-section-title" style="margin-top:14px;">🖌 Paint Strokes</div>
+      <div id="paintLayersList"></div>
+      <div id="paintLayerControls"></div>
+    </div>`;
+  return html;
+}
 function renderRightPanel(){
   const rp=document.getElementById('rightpanel');
   const cat=currentCategory;
@@ -1053,71 +1105,6 @@ function renderRightPanel(){
     html+=`<div class="rp-note">Only an admin-ASSIGNED number appears on the jersey and in-game — a pending or rejected request never renders. Switch to Team Admin (top bar) to approve it yourself.</div>`;
     rp.innerHTML=html;
     wireNameplatePanel();
-    return;
-  }
-  if(cat.group==='decals'){
-    const targets=availablePaintTargets();
-    if(!targets.length){
-      // player role, everything locked out by league/team policy
-      const src=catLockLabel('accents')||catLockLabel('helmetStyle')||catLockLabel('skates')||ctxTeam().name;
-      html+=`<p class="rp-sub">Personal accents</p>
-        <div class="rp-note">🔒 ${src} does not allow personal paint or decals on this uniform. The team's own design layers still show on the model — they're just not yours to edit. Switch to Team Admin (top bar) to change the policy.</div>`;
-      rp.innerHTML=html;return;
-    }
-    if(!targets.some(t=>t.id===paintTarget))paintTarget=targets[0].id;
-    if(actingRole==='admin'){
-      html+=`<p class="rp-sub">TEAM design layers — every player on the roster wears these. The player's own accents (if policy allows any) draw on top and aren't editable from here.</p>`;
-    }else{
-      html+=`<p class="rp-sub">YOUR personal accent layers — they draw on top of the team's design, which stays locked underneath. Allowed surfaces are set by team/league policy.</p>`;
-    }
-    html+=`<div class="rp-section"><div class="rp-section-title">Paint Target</div>
-      <div class="preset-strip" id="paintTargetStrip" style="flex-wrap:wrap;">${targets.map(t=>
-        `<div class="cam-btn paint-target-btn" data-ptarget="${t.id}" style="flex:none;">${t.icon} ${t.label}</div>`).join('')}
-      </div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Paint only affects the selected piece — pick one before you drag.${actingRole!=='admin'?' The jersey itself is team-controlled and never paintable by players.':''}</div>
-    </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Freehand Paint</div>
-      <div class="zone-row" id="paintColorRow"><div class="zone-swatch" id="paintColorSwatch" style="background:${paintBrushColor}"></div>
-        <div class="zone-info"><div class="zone-name">Brush Color</div></div></div>
-      <div class="mat-slider-row"><div class="mat-slider-label"><span>Brush Size</span><b id="brushSizeVal"></b></div>
-        <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
-      <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
-        <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
-      ${/* Not admin-gated any more. Mirroring changes what the PLAYER sees on
-            their own gear, and hiding the switch behind the admin role left a
-            player painting a helmet with no way to stop it copying to the other
-            side. It writes the same per-design field either role already wrote. */''}
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
-      <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
-      <div class="rp-note" style="margin-top:10px;" id="paintNote">While Paint Mode is on, dragging on the model paints instead of rotating the camera — scroll still rotates the view. Each drag is its own layer below (reorder/hide/delete individually), and paint now saves into presets and undo. Mirror Paint & Decals mirrors both freehand strokes AND placed logos across symmetric parts (pants, gloves) — turn it off to decorate each side independently; flipping it re-splits every existing stroke/decal, so it's simplest to decide before you start a side. With Mirror off, a logo placed right at dead-center (near a belt/waistband seam) can land in an odd spot — drag it onto the leg/arm proper with "Move on Model" and it'll behave.</div>
-    </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
-      <div class="lc-shape-grid" id="quickShapeGrid">
-        <div class="lc-shape-btn" data-qshape="circle" title="Circle">●</div>
-        <div class="lc-shape-btn" data-qshape="square" title="Square">■</div>
-        <div class="lc-shape-btn" data-qshape="triangle" title="Triangle">▲</div>
-        <div class="lc-shape-btn" data-qshape="star" title="Star">★</div>
-        <div class="lc-shape-btn" data-qshape="hexagon" title="Hexagon">⬡</div>
-        <div class="lc-shape-btn" data-qshape="shield" title="Shield">🛡</div>
-      </div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps a Forza-style decal straight onto the selected paint target — drag/scale/rotate it below, just like a placed logo. Use the Logo Creator for multi-layer text+shape combos.</div>
-    </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
-      <div class="palette-grid" id="logoLibraryGrid"></div>
-      <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
-    </div>`;
-    html+=`<div class="rp-section"><div class="rp-section-title">Layers<span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${(paintStrokes.length+placedDecals.length)} total</span></div>
-      <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;">Decals (logos/shapes) and paint strokes are separate stacks — within each, later = drawn on top; paint always renders above decals overall. Reorder/hide/delete either independently.</div>
-      <div class="rp-section-title" style="margin-top:2px;">🖼 Decals</div>
-      <div id="placedDecalsList"></div>
-      <div id="placedDecalControls"></div>
-      <div class="rp-section-title" style="margin-top:14px;">🖌 Paint Strokes</div>
-      <div id="paintLayersList"></div>
-      <div id="paintLayerControls"></div>
-    </div>`;
-    rp.innerHTML=html;
-    wireDecalsPanel();
     return;
   }
   if(cat.group==='roster'){
@@ -1172,13 +1159,18 @@ function renderRightPanel(){
   }
   const mgrKey=cat.group==='stick'?'stick':cat.piece;
   const mgr=mgrByKey(mgrKey);
-  const editable=categoryEditable(cat);
+  /* colours and paint are separate permissions — a player may be allowed to
+     paint a part whose team colours are locked to them. `editable` still means
+     "may change the team design", which is what the colour/material/preset
+     controls below are gated on. */
+  const editable=categoryColorEditable(cat);
+  const paintable=categoryPaintable(cat);
   const lockSrc=cat.id==='stick'?catLockLabel('stick'):null;
   html+=`<p class="rp-sub">${cat.group==='stick'?'Independent material — shaft &amp; blade tape.':'Own material, own zones — recolors this piece only.'}</p>`;
   if(!editable){
     html+=`<div class="rp-note">${cat.group==='stick'
       ?`🔒 ${lockSrc||ctxTeam().name} does not allow personal stick customization — these are the colors you'll play with. Switch to Team Admin to change the policy.`
-      :`🔒 Uniform design is decided by the ${ctxTeam().name} admin — you're viewing it, not editing it. Switch to Team Admin (top bar) to redesign it, or pick another jersey set / team above.`}</div>`;
+      :`🔒 The ${ctxTeam().name} admin decides this part's colors — you're viewing them, not editing them.${paintable?' Your own paint and decals for it are further down and are yours to change.':' Switch to Team Admin (top bar) to redesign it, or pick another jersey set / team above.'}`}</div>`;
   }
   if(cat.note)html+=`<div class="rp-note">${cat.note}</div>`;
 
@@ -1226,8 +1218,17 @@ function renderRightPanel(){
     html+=`<div class="rp-section"><div class="rp-section-title">Loadout Presets</div>${presetStripHTML()}</div>`;
   }
 
+  /* Paint/decals for THIS part. selectCategory has already pointed paintTarget
+     at it, so everything here acts on the part on screen and nowhere else. */
+  if(paintable)html+=paintToolsHTML(cat.label.toLowerCase());
+  else if(cat.group==='body'&&actingRole!=='admin'){
+    const src=catLockLabel('accents')||catLockLabel('helmetStyle')||catLockLabel('skates')||ctxTeam().name;
+    html+=`<div class="rp-note">🔒 ${src} does not allow personal paint or decals on this part. The team's own layers still show on the model — they're just not yours to edit.</div>`;
+  }
+
   rp.innerHTML=html;
   wireRightPanel(mgrKey,mgr,editable);
+  if(paintable)wireDecalsPanel();
 }
 
 function wireRightPanel(mgrKey,mgr,editable){
@@ -1404,17 +1405,10 @@ function wirePoliciesPanel(){
     });
   });
 }
+/* Wires the paint/decal tools now rendered inside a PART's panel. The old
+   paint-target strip is gone — selectCategory points paintTarget at whatever
+   part is open, so there is nothing here to pick a target with any more. */
 function wireDecalsPanel(){
-  document.querySelectorAll('.paint-target-btn').forEach(el=>{
-    el.classList.toggle('active',el.dataset.ptarget===paintTarget);
-    el.addEventListener('click',()=>{
-      paintTarget=el.dataset.ptarget;
-      document.querySelectorAll('.paint-target-btn').forEach(b=>b.classList.toggle('active',b.dataset.ptarget===paintTarget));
-      const t=PAINT_TARGET_LIST.find(x=>x.id===paintTarget);
-      if(t)goToPreset(t.cam);
-    });
-  });
-
   document.getElementById('paintColorRow').addEventListener('click',e=>{
     openColorPicker(document.getElementById('paintColorSwatch'),'paint',null);
   });
@@ -2315,9 +2309,6 @@ function showToast(msg){
   const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');
   clearTimeout(toastT);toastT=setTimeout(()=>el.classList.remove('show'),1600);
 }
-document.getElementById('toggleRotate').addEventListener('click',e=>{
-  autoRotate=!autoRotate;e.currentTarget.classList.toggle('active',autoRotate);
-});
 document.getElementById('toggleReflection').addEventListener('click',e=>{
   reflectionOn=!reflectionOn;e.currentTarget.classList.toggle('active',reflectionOn);
   if(reflectionClone)reflectionClone.visible=reflectionOn;
@@ -2405,7 +2396,7 @@ function wireContextBar(){
 
 /* ============================== BOOT ============================== */
 handleResize();
-buildEditorModeTabs();buildSidebar();buildCamPresetButtons();
+buildEditorModeTabs();buildSidebar();
 loadCharacter(()=>{
   buildMaterialManagers();
   // first-run: remember the asset's true stick colors so contexts the player
