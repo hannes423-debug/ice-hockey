@@ -145,16 +145,20 @@ function updateCamera(dt){
 /* dragMode tracks which single interaction is active for THIS drag, decided
    once on pointerdown, so pointermove never has to guess. Middle mouse is
    reserved for camera control ALWAYS — it forces dragMode='orbit' even
-   while Paint Mode / decal Move Mode is on, before either of them gets a
+   while a paint or decal tool is armed, before either of them gets a
    chance to claim the drag. (Previously the paint/decal checks ran first
    and unconditionally captured every pointerdown regardless of button, so
-   a middle-click while Paint Mode was on painted instead of orbiting — and
+   a middle-click while the brush was armed painted instead of orbiting — and
    because pointermove checked `paintModeOn`/`decalMoveModeOn` rather than
    "is THIS drag actually a paint/decal drag", a middle-drag would silently
    do nothing at all once those modes were on, since it fell into the
    paint/decal branch without ever setting their per-drag flag.) */
 renderer.domElement.addEventListener('pointerdown',e=>{
-  renderer.domElement.setPointerCapture(e.pointerId);
+  /* Capture is an optimisation (it keeps a drag alive when the pointer leaves
+     the canvas), not a precondition. It THROWS for a pointer the browser no
+     longer considers active, and being the first statement in the handler that
+     used to abort the entire interaction — no stroke, no orbit, no select. */
+  try{renderer.domElement.setPointerCapture(e.pointerId);}catch(err){}
   if(e.button===1){
     dragMode='orbit';lastPX=e.clientX;lastPY=e.clientY;
     // middle-drag is always a camera move — never let it select a part
@@ -162,19 +166,27 @@ renderer.domElement.addEventListener('pointerdown',e=>{
     e.preventDefault();
     return;
   }
-  if(paintModeOn){
+  if(isPickTool()){
+    // a pick is a single click, never a drag — resolve it here and be done
+    dragMode='pick';
+    pickColorAt(e.clientX,e.clientY);
+    return;
+  }
+  if(isPaintTool()){
     dragMode='paint';
     // one drag = one layer: points accumulate on currentStroke (drawn live,
     // fast, exactly like before) and only land in the persisted paintStrokes
     // list on pointerup — see redrawPaintLayer() for why storing POINTS
     // instead of raw pixels is what makes strokes individually deletable/
     // reorderable/hideable and finally savable into presets+undo.
-    currentStroke={id:'PS'+Date.now(),target:paintTarget,color:paintBrushColor,size:paintBrushSize,opacity:paintBrushOpacity,visible:true,points:[]};
+    currentStroke={id:'PS'+Date.now(),target:paintTarget,color:paintBrushColor,
+      size:paintBrushSize,opacity:paintBrushOpacity,hardness:paintBrushHardness,
+      mode:activeTool==='erase'?'erase':'paint',visible:true,points:[]};
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv){currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,null);lastPaintUV=uv;}
     return;
   }
-  if(decalMoveModeOn&&selectedDecalIdx>=0){
+  if(isDecalTool()&&selectedDecalIdx>=0){
     dragMode='decal';
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -186,6 +198,10 @@ renderer.domElement.addEventListener('pointerdown',e=>{
   downPX=e.clientX;downPY=e.clientY;orbitMoved=false;
 });
 renderer.domElement.addEventListener('pointermove',e=>{
+  // the brush ring follows the pointer whenever a paint tool is armed, drag
+  // or no drag — seeing the footprint BEFORE committing is the whole point
+  if(isPaintTool())updateBrushRing(e.clientX,e.clientY);
+  else hideBrushRing();
   if(dragMode==='paint'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv){if(currentStroke)currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
@@ -203,6 +219,7 @@ addEventListener('pointerup',()=>{
   if(dragMode==='paint'&&currentStroke&&currentStroke.points.length){
     paintStrokes.push(currentStroke);
     renderPaintLayersList();
+    buildSidebar(); // the Decorate rows carry a live layer count
     pushHistory();
   }
   /* A click that never became a drag selects the part under it. Only from the
@@ -219,7 +236,7 @@ addEventListener('pointerup',()=>{
 });
 renderer.domElement.addEventListener('wheel',e=>{
   e.preventDefault();
-  if(paintModeOn||decalMoveModeOn){
+  if(isPaintTool()||isDecalTool()){
     // dragging paints/moves a decal while either mode is on, so the wheel
     // takes over rotation instead of zoom — otherwise there'd be no way to
     // turn the model to reach the other side without leaving that mode.
@@ -387,7 +404,15 @@ function redrawNameNumber(){
    you wear in-game until you star it. */
 let TSTORE=ihtLoad(),PKIT=ihtLoadKit();
 let ctxTeamId=TSTORE.favourite.teamId,ctxJerseyId=TSTORE.favourite.jerseyId;
-let actingRole='player';
+/* SOLO MODE (default ON) — see the ACTIVITIES block for the full reasoning.
+   It is declared here because it decides the acting role, and the role decides
+   which layer stack is the editable one on the very first load. Solo acts as
+   the ADMIN: that is the role that owns the uniform design, so in solo every
+   edit lands in the team design and the jersey is editable out of the box
+   (as a player the editor used to open on a Jersey with zero live controls). */
+let soloMode=true;
+try{soloMode=localStorage.getItem('ihc.solo')!=='0';}catch(e){}
+let actingRole=soloMode?'admin':'player';
 /* the OTHER party's layers for the current role: replayed underneath (team
    design) or on top (player accents) but never selectable/editable */
 let basePaintStrokes=[],baseDecals=[];
@@ -473,20 +498,19 @@ function loadContext(){
     basePaintStrokes=j.design.paintStrokes||[];
     baseDecals=j.design.decals||[];
   }
-  selectedStrokeIdx=-1;selectedDecalIdx=-1;paintModeOn=false;decalMoveModeOn=false;
+  selectedStrokeIdx=-1;selectedDecalIdx=-1;setActiveTool('orbit',true);
   redrawPaintLayer();redrawLogoLayer();
   suppressStore=false;
   refreshSwatches(); // also redraws the plate + saves the store once
   history.length=0;historyIdx=-1;pushHistory();
   updateContextBar();
-  buildEditorModeTabs();buildSidebar();
-  selectCategory(categoriesForMode(currentEditorMode)[0].id);
+  buildEditorModeTabs();
+  selectActivity(currentActivity,currentCategory&&currentCategory.id);
 }
 function switchContext(teamId,jerseyId,role){
   ctxTeamId=teamId;ctxJerseyId=jerseyId;
   if(role)actingRole=role;
-  const modes=editorModesForRole();
-  if(!modes.some(m=>m.id===currentEditorMode))currentEditorMode=modes[0].id;
+  if(!activitiesAvailable().some(a=>a.id===currentActivity))currentActivity='design';
   loadContext();
 }
 function sanitizeName(raw){
@@ -504,8 +528,43 @@ function sanitizeNumber(raw){
   return String(v);
 }
 
-/* ----- freehand paint (raycast screen -> UV -> canvas brush stamp) ----- */
-let paintModeOn=false,lastPaintUV=null;
+/* ------------------------------ TOOL RAIL ------------------------------
+   One `activeTool` replaces the old pair of independent booleans
+   (paintModeOn / decalMoveModeOn). Those could not both be true, but nothing
+   in the type said so: each was toggled from a button in a different collapsed
+   section of the right panel, each silently switched the other off, and the
+   only on-screen evidence of which was active was the mouse cursor. A single
+   enum makes the illegal state unrepresentable and gives the rail one thing
+   to highlight. */
+const TOOLS=[
+  {id:'orbit',icon:'↻', key:'V',label:'Orbit',       cursor:'',
+   banner:null},
+  {id:'paint',icon:'🖌',key:'B',label:'Brush',       cursor:'crosshair',
+   banner:'Drag on the model to paint',paint:true,decorateOnly:true},
+  {id:'erase',icon:'🧽',key:'E',label:'Eraser',      cursor:'crosshair',
+   banner:'Drag to rub paint off this part',paint:true,decorateOnly:true},
+  {id:'decal',icon:'✥', key:'M',label:'Move decal',  cursor:'move',
+   banner:'Drag to move the selected logo',decorateOnly:true},
+  {id:'pick', icon:'💧',key:'I',label:'Pick colour', cursor:'crosshair',
+   banner:'Click any part to lift its colour'},
+];
+function toolDef(id){return TOOLS.find(t=>t.id===id)||TOOLS[0];}
+let activeTool='orbit';
+/* Held Space is a TEMPORARY orbit override — the single most-missed thing in
+   the old paint mode was any way to turn the model without leaving the brush
+   (only middle-drag worked, and nothing said so). */
+let spaceOrbit=false;
+/* Every predicate also asks whether the armed tool is still OFFERED. Without
+   that check a tool could stay armed after the thing that offered it went away
+   — switching Decorate->Design kept ✥ armed, so the pointerdown handler took
+   the decal branch and swallowed the click that was supposed to select a part
+   on the model. The rail correctly hid the button; hiding a button is not the
+   same as disarming the tool. */
+function toolLive(id){return !spaceOrbit&&activeTool===id&&toolAvailable(toolDef(id));}
+function isPaintTool(){return (toolLive('paint')||toolLive('erase'));}
+function isDecalTool(){return toolLive('decal');}
+function isPickTool(){return toolLive('pick');}
+let lastPaintUV=null;
 /* paintStrokes: one entry per completed drag ("layer"), each storing its own
    UV point path + the brush settings it was drawn with — NOT raw pixels.
    That's what makes strokes individually deletable/reorderable/hideable
@@ -513,7 +572,10 @@ let paintModeOn=false,lastPaintUV=null;
    bonus, small enough to round-trip through JSON — so paint finally saves
    into presets and undo/redo instead of living only in the live canvas. */
 let paintStrokes=[],currentStroke=null,selectedStrokeIdx=-1;
-let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1;
+/* `hardness` 1 = the hard round brush this always had; below 1 the dab falls
+   off to transparent at its rim. Strokes saved before it existed have no
+   field at all and replay as hard, so old designs are pixel-identical. */
+let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1,paintBrushHardness=1;
 /* Mirror is PER PAINT TARGET. Each piece already has its own material and so
    its own uMirrorPaint uniform; what used to force this design-wide was the
    single shared paint canvas, since the two packing conventions overwrite each
@@ -527,11 +589,15 @@ function mirrorForTarget(t){
 }
 /* Repaints the mirror button after a restore, if the open part even has one. */
 function syncMirrorBtnFromTarget(){
-  const mb=document.getElementById('mirrorPaintBtn');
-  if(!mb)return;
   const on=mirrorForTarget(paintTarget);
-  mb.classList.toggle('primary',on);
-  mb.textContent=on?'🪞 Mirror this part: ON':'🪞 Mirror this part: OFF';
+  const mb=document.getElementById('mirrorPaintBtn');
+  if(mb){
+    mb.classList.toggle('primary',on);
+    mb.textContent='🪞 Mirror: '+(on?'ON':'OFF');
+  }
+  // the rail carries the same toggle, so it has to move with it
+  const rm=document.getElementById('railMirror');
+  if(rm){rm.classList.toggle('active',on);rm.style.opacity=on?'1':'.5';}
 }
 function applyPaintMirrorUniform(){
   if(!PIECES)return;
@@ -580,7 +646,7 @@ let paintTarget='jersey';
    pants+gloves ride the 'accents' policy, helmet the 'helmetStyle' policy,
    skates the 'skates' policy. */
 function availablePaintTargets(){
-  if(actingRole==='admin')return PAINT_TARGET_LIST;
+  if(soloMode||actingRole==='admin')return PAINT_TARGET_LIST;
   const ids=[];
   if(catAllowed('accents'))ids.push('pants','gloves');
   if(catAllowed('helmetStyle'))ids.push('helmet');
@@ -640,8 +706,16 @@ function skinnedPaintProxy(mesh){
   }
   return p;
 }
-function raycastUV(clientX,clientY){
-  const meshes=getPaintTargetMeshes().map(skinnedPaintProxy);
+/* Shared by the brush, the eyedropper and the brush-ring preview. Returns the
+   hit UV augmented with the surface data those extras need — the ring has to
+   know how big a UV-space brush is in METRES, which is a per-triangle question
+   because the atlas packs different pieces at wildly different texel density.
+   `_uvHit` carries the geometric extras; the returned value stays a Vector2
+   with .side so every existing caller is untouched. */
+let _uvHit=null;
+const _uvNM=new THREE.Matrix3();
+function raycastUVOnMeshes(meshes,clientX,clientY){
+  _uvHit=null;
   if(!meshes.length)return null;
   const r=renderer.domElement.getBoundingClientRect();
   pointerNDC.x=((clientX-r.left)/r.width)*2-1;
@@ -649,17 +723,42 @@ function raycastUV(clientX,clientY){
   raycaster.setFromCamera(pointerNDC,camera);
   const hits=raycaster.intersectObjects(meshes,false);
   if(!hits.length||!hits[0].uv)return null;
-  const uv=hits[0].uv;
+  const h=hits[0],uv=h.uv;
   // JS-side counterpart to the shader's vIhSide: which real-world side of
   // the body this hit landed on, used by the independent-sides paint
   // feature below. Local space (not world) so it agrees with the shader's
   // own local-space `position.x` regardless of camera orbit.
-  uv.side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
+  uv.side=h.object.worldToLocal(h.point.clone()).x>=0?1:-1;
+  _uvHit={point:h.point.clone(),normal:null,uvToWorld:0,object:h.object};
+  if(h.face){
+    _uvNM.getNormalMatrix(h.object.matrixWorld);
+    _uvHit.normal=h.face.normal.clone().applyMatrix3(_uvNM).normalize();
+    _uvHit.uvToWorld=faceUvToWorldScale(h.object,h.face);
+  }
   return uv;
+}
+/* Metres of surface per 1.0 of UV, measured on the hit triangle itself: take
+   one edge in world space and the same edge in UV space and divide. Measuring
+   it per-face rather than assuming a global scale is what keeps the brush ring
+   honest — the boot and the jersey are packed at very different densities, so
+   one constant would be wrong on nearly every piece. */
+function faceUvToWorldScale(obj,face){
+  const g=obj.geometry,pos=g.attributes.position,uvA=g.attributes.uv;
+  if(!pos||!uvA)return 0;
+  const pa=new THREE.Vector3().fromBufferAttribute(pos,face.a).applyMatrix4(obj.matrixWorld);
+  const pb=new THREE.Vector3().fromBufferAttribute(pos,face.b).applyMatrix4(obj.matrixWorld);
+  const ua=new THREE.Vector2().fromBufferAttribute(uvA,face.a);
+  const ub=new THREE.Vector2().fromBufferAttribute(uvA,face.b);
+  const du=ua.distanceTo(ub);
+  if(du<1e-7)return 0; // degenerate UV edge — caller falls back
+  return pa.distanceTo(pb)/du;
+}
+function raycastUV(clientX,clientY){
+  return raycastUVOnMeshes(getPaintTargetMeshes().map(skinnedPaintProxy),clientX,clientY);
 }
 /* ---------- click a part on the MODEL to open that part's editor ----------
    Until now the model was only ever a paint surface: the three ways to choose
-   a part (sidebar category, the Decals & Paint target strip, and clicking the
+   a part (sidebar category, the old paint-target strip, and clicking the
    model) each drove different state and none of them updated the others, so
    picking a part in one place left the other two pointing somewhere else.
    selectPieceInEditor is now the single entry point all three funnel into.
@@ -716,7 +815,12 @@ function paintTargetForPiece(pieceId){
 }
 /* The one place a part gets selected, whoever asked. Moves the editor mode if
    the part lives in the other one, opens its category, and points the paint
-   target at it so Decals & Paint is already aimed where you just clicked. */
+   target at it so Decorate is already aimed where you just clicked. */
+/* Clicking the MODEL is the primary way to choose a part now, so this has to
+   land somewhere sensible from any activity. Rule: stay in the activity you
+   are in if the clicked part exists there (clicking the pants while decorating
+   the helmet keeps you decorating), otherwise fall back to Design, which lists
+   every part. */
 function selectPieceInEditor(pieceId){
   if(!pieceId)return false;
   const cat=CATEGORIES.find(c=>c.piece===pieceId)
@@ -724,12 +828,22 @@ function selectPieceInEditor(pieceId){
   if(!cat)return false;
   const pt=paintTargetForPiece(pieceId);
   if(pt&&availablePaintTargets().some(t=>t.id===pt))paintTarget=pt;
-  if(cat.mode!==currentEditorMode&&categoriesForMode(cat.mode).length){
-    /* selectEditorMode lands on that mode's FIRST category; the selectCategory
-       below then moves to the one actually clicked. */
-    selectEditorMode(cat.mode);
+  if(categoriesForActivity(currentActivity).some(c=>c.id===cat.id)){
+    selectCategory(cat.id);
+    return true;
   }
-  selectCategory(cat.id);
+  /* Decorating and you clicked a surface that has no paint layer of its own
+     (cage, laces, blades)? Those meshes belong to a paintable target, so
+     retarget to the owning surface rather than yanking the user out of the
+     activity they chose. */
+  if(currentActivity==='decorate'&&pt){
+    const owner=decorateCategories().find(c=>c.id===pt);
+    if(owner&&categoriesForActivity('decorate').some(c=>c.id===owner.id)){
+      selectCategory(owner.id);
+      return true;
+    }
+  }
+  selectActivity('design',cat.id);
   return true;
 }
 /* stampSegment/ihcPaintCanvasXY/SEAM_JUMP_UV + stroke/decal replay moved to
@@ -738,9 +852,26 @@ function paintStamp(uv,prevUV){
   // the stroke belongs to the target being painted, so its mirror decides both
   // the packing AND which of the two canvases it lands on
   const mirrorOn=mirrorForTarget(paintTarget);
-  const ctx=mirrorOn?paintCtx:paintCtxS;
-  const cvs=mirrorOn?paintCanvas:paintCanvasS;
-  const tex=mirrorOn?paintTexture:paintTextureS;
+  const layered=paintNeedsStackLayers();
+  /* Stamping trusts what is already in the layer canvases. If they have never
+     been filled (or were last used in single-stack mode) replay both stacks
+     first, or the other party's paint would silently vanish behind this drag. */
+  if(layered&&!paintStackLayersValid)redrawPaintLayer();
+  /* Layered: stamp into the EDITING stack's own canvas, never the flattened
+     one — that containment is the whole point, and a live erase drag is
+     exactly the case that used to eat through to the other party's strokes.
+     Unlayered: the flattened canvas IS the only stack, so stamp straight
+     into it (one fewer blit per pointermove). */
+  let ctx,cvs,tex;
+  if(layered){
+    const L=ensurePaintStackLayers();
+    const side=activeStackIsAbove()?L.above:L.below;
+    ctx=(mirrorOn?side.raw:side.split).ctx;
+  }else{
+    ctx=mirrorOn?paintCtx:paintCtxS;
+    cvs=mirrorOn?paintCanvas:paintCanvasS;
+    tex=mirrorOn?paintTexture:paintTextureS;
+  }
   const xy=ihcPaintCanvasXY(uv,uv.side,mirrorOn);
   const prevXY=prevUV?ihcPaintCanvasXY(prevUV,prevUV.side,mirrorOn):null;
   // a side change mid-drag (e.g. dragging across the crotch from one leg to
@@ -749,9 +880,126 @@ function paintStamp(uv,prevUV){
   const seamJump=(prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV)||
     (!mirrorOn&&prevUV&&prevUV.side!==uv.side);
   stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-    paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump);
-  syncCanvasToDataTexture(ctx,cvs,tex);
+    paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump,
+    {mode:currentStroke&&currentStroke.mode,hardness:paintBrushHardness});
+  if(layered)compositePaintConvention(mirrorOn);
+  else syncCanvasToDataTexture(ctx,cvs,tex);
 }
+/* ------------------------------ EYEDROPPER ------------------------------
+   Deliberately does NOT sample the framebuffer: the pixel on screen is lit,
+   shadowed and tone-mapped, so picking a "white" jersey would hand back a
+   grey. It samples the same three sources the SHADER composites, in the same
+   order it composites them, and returns the authored colour:
+       paint canvas  ->  logo canvas  ->  the piece's zone palette
+   so a pick always round-trips exactly to the value that produced it. */
+function pickColorAt(clientX,clientY){
+  const pid=raycastPiece(clientX,clientY);
+  if(!pid){showToast('Nothing under the cursor to pick from');return null;}
+  const def=ihcPiece(pid);
+  const mesh=def?pieceMeshMap()[def.mesh]:null;
+  if(!mesh){showToast('Nothing under the cursor to pick from');return null;}
+  const uv=raycastUVOnMeshes([skinnedPaintProxy(mesh)],clientX,clientY);
+  if(!uv){showToast('Nothing under the cursor to pick from');return null;}
+
+  const target=ihcTargetForPieceId(pid);
+  const hex=(target?pickFromDecalCanvas(uv,target):null)||pickFromZoneMask(pid,uv);
+  if(!hex){showToast('No colour to pick there');return null;}
+  applyPickedColor(hex,def);
+  return hex;
+}
+/* Paint sits above logos, which sit above the recoloured base — same order as
+   installRecolorShader's extraCode, so the topmost opaque-enough layer wins. */
+function pickFromDecalCanvas(uv,target){
+  const mirrorOn=mirrorForTarget(target);
+  const xy=ihcPaintCanvasXY(uv,uv.side,mirrorOn);
+  const px=Math.max(0,Math.min(DECAL_SIZE-1,Math.round(xy.x)));
+  const py=Math.max(0,Math.min(DECAL_SIZE-1,Math.round(xy.y)));
+  const layers=[mirrorOn?paintCtx:paintCtxS,mirrorOn?logoCtx:logoCtxS];
+  for(const ctx of layers){
+    if(!ctx)continue;
+    const d=ctx.getImageData(px,py,1,1).data;
+    if(d[3]>24)return rgbToHex(d[0],d[1],d[2]);
+  }
+  return null;
+}
+/* The mask is the same DataTexture the fragment shader reads: R/G/B flag zone
+   0/1/2 and a fully black texel means "not recoloured" (a fixed/baked colour
+   the editor has no slider for). */
+function pickFromZoneMask(pid,uv){
+  const mgr=mgrByKey(pid);
+  if(!mgr||!mgr.material)return null;
+  const ref=mgr.material.userData.shaderRef;
+  const mask=ref&&ref.uniforms&&ref.uniforms.maskMap&&ref.uniforms.maskMap.value;
+  if(!mask||!mask.image||!mask.image.data)return null;
+  const w=mask.image.width,h=mask.image.height,data=mask.image.data;
+  const x=Math.max(0,Math.min(w-1,Math.floor(uv.x*w)));
+  // flipY is false on this texture, so v maps straight to the row index
+  const y=Math.max(0,Math.min(h-1,Math.floor(uv.y*h)));
+  const o=(y*w+x)*4;
+  let zone=-1;
+  if(data[o]>127)zone=0;else if(data[o+1]>127)zone=1;else if(data[o+2]>127)zone=2;
+  if(zone<0||!mgr.zones[zone])return null;
+  return'#'+mgr.zones[zone].color.getHexString();
+}
+function applyPickedColor(hex,def){
+  addRecent(hex);
+  /* If the colour picker is open on a zone, the pick goes THERE — that is the
+     whole "make the gloves match the jersey trim" workflow in one gesture
+     instead of pick, memorise six hex digits, retype. With it closed the pick
+     loads the brush, which is what Decorate wants. */
+  const cp=document.getElementById('colorPicker');
+  if(cp&&cp.classList.contains('open')){
+    setPickerHex(hex);
+    showToast('💧 '+hex.toUpperCase()+' → '+(def?def.label:'selection'));
+    return;
+  }
+  paintBrushColor=hex;
+  renderToolOptions();
+  const sw=document.getElementById('paintColorSwatch');
+  if(sw)sw.style.background=hex;
+  showToast('💧 Picked '+hex.toUpperCase()+' from the '+(def?def.label.toLowerCase():'model')+' — now the brush colour');
+}
+
+/* ------------------------------ BRUSH RING ------------------------------
+   A world-space ring the size of the actual footprint, lying on the surface.
+   Without it the brush size slider is a number with no referent: you find out
+   how big 44 is by painting 44 and undoing. */
+let brushRing=null;
+function ensureBrushRing(){
+  if(brushRing)return brushRing;
+  brushRing=new THREE.Mesh(
+    new THREE.RingGeometry(0.92,1,48),
+    new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.85,
+      side:THREE.DoubleSide,depthTest:false}));
+  brushRing.renderOrder=999; // always on top; it is a cursor, not geometry
+  brushRing.visible=false;
+  scene.add(brushRing);
+  return brushRing;
+}
+function hideBrushRing(){if(brushRing)brushRing.visible=false;}
+const _ringLook=new THREE.Vector3();
+function updateBrushRing(clientX,clientY){
+  const ring=ensureBrushRing();
+  const uv=raycastUV(clientX,clientY);
+  if(!uv||!_uvHit||!_uvHit.normal||!_uvHit.uvToWorld){ring.visible=false;return;}
+  /* Brush size is canvas pixels on a DECAL_SIZE canvas, and ihcPaintCanvasXY
+     maps v across the full height either way — so v is the axis whose scale is
+     the same under both mirror conventions, and the honest one to size from.
+     Unmirrored, u is packed into half the width, which makes the real
+     footprint slightly elliptical; the ring stays round and reads as the
+     vertical extent. */
+  const radiusUV=(paintBrushSize/2)/DECAL_SIZE;
+  const r=radiusUV*_uvHit.uvToWorld;
+  if(!(r>0)||!isFinite(r)){ring.visible=false;return;}
+  ring.scale.setScalar(Math.max(r,0.002));
+  // lift it off the surface so it isn't z-fought into the mesh it describes
+  ring.position.copy(_uvHit.point).addScaledVector(_uvHit.normal,0.004);
+  _ringLook.copy(ring.position).add(_uvHit.normal);
+  ring.lookAt(_ringLook);
+  ring.material.color.set(activeTool==='erase'?0xffb454:paintBrushColor);
+  ring.visible=true;
+}
+
 /* Full reconstruction from the stored stroke lists — needed any time a STACK
    changes shape (delete/reorder/hide/undo), as opposed to live dragging which
    just stamps incrementally onto the existing canvas. Draw order is fixed by
@@ -760,15 +1008,92 @@ function paintStamp(uv,prevUV){
 function paintStackOrder(active,base){
   return actingRole==='admin'?[active,base]:[base,active];
 }
+/* ---------------------- OWNERSHIP-SEPARATED PAINT LAYERS ----------------------
+   Both stacks used to be replayed into ONE canvas, bottom stack first. That is
+   correct for opaque paint and WRONG the moment a stroke erases: an erase
+   stroke composites destination-out against whatever pixels are already on the
+   canvas, so a player rubbing out their own accent also rubbed out the team
+   stroke underneath it — the player could destroy team design they are not even
+   allowed to recolour, and it survived into the saved store because the erase
+   stroke replays the same way on every reload.
+
+   Each ownership stack now composites into its own canvas and the two are
+   flattened with drawImage, so an erase can only ever reach pixels its own
+   stack put down. Which stack sits on top is still paintStackOrder's call —
+   this only changes WHERE each one is drawn, never the order.
+
+   Allocated lazily: with no second stack (solo mode, and any context where the
+   other party has painted nothing) the original single-canvas path is used
+   unchanged, so the common case pays neither the memory nor the extra blit. */
+let paintStackLayers=null;
+/* Whether below/above currently hold a faithful replay of the two stacks.
+   paintStamp draws into them incrementally and trusts what is already there,
+   so it must never run against layers that were merely allocated. */
+let paintStackLayersValid=false;
+function makeLayerSurface(){
+  const c=document.createElement('canvas');
+  c.width=c.height=DECAL_SIZE;
+  return{canvas:c,ctx:c.getContext('2d')};
+}
+function ensurePaintStackLayers(){
+  if(!paintStackLayers){
+    paintStackLayers={
+      below:{raw:makeLayerSurface(),split:makeLayerSurface()},
+      above:{raw:makeLayerSurface(),split:makeLayerSurface()},
+    };
+  }
+  return paintStackLayers;
+}
+/* True when there is a second stack to keep separate. */
+function paintNeedsStackLayers(){return basePaintStrokes.length>0;}
+/* Is the stack the user is EDITING the upper one? Derived from paintStackOrder
+   rather than re-testing the role, so there is one definition of the order. */
+const _stackProbeActive={},_stackProbeBase={};
+function activeStackIsAbove(){
+  return paintStackOrder(_stackProbeActive,_stackProbeBase)[1]===_stackProbeActive;
+}
+function layerCtxPair(side){return{raw:side.raw.ctx,split:side.split.ctx};}
+function clearLayerPair(side){
+  side.raw.ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  side.split.ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+}
+/* Flattens below+above into the GPU-bound canvas for ONE packing convention
+   and uploads just that one. Live drags call this per pointermove, so it
+   deliberately does not touch the other convention: a stroke only ever lands
+   on one of the two, and syncCanvasToDataTexture is a full 2048² readback. */
+function compositePaintConvention(mirrorOn){
+  const L=ensurePaintStackLayers();
+  const key=mirrorOn?'raw':'split';
+  const ctx=mirrorOn?paintCtx:paintCtxS;
+  const cvs=mirrorOn?paintCanvas:paintCanvasS;
+  const tex=mirrorOn?paintTexture:paintTextureS;
+  ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+  ctx.drawImage(L.below[key].canvas,0,0);
+  ctx.drawImage(L.above[key].canvas,0,0);
+  syncCanvasToDataTexture(ctx,cvs,tex);
+}
 function redrawPaintLayer(){
   if(!paintCtx||!paintCtxS)return;
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
   paintCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  const ctxs={raw:paintCtx,split:paintCtxS};
-  paintStackOrder(paintStrokes,basePaintStrokes)
-    .forEach(list=>ihcReplayStrokes(ctxs,list,mirrorForTarget));
-  syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
-  syncCanvasToDataTexture(paintCtxS,paintCanvasS,paintTextureS);
+  if(!paintNeedsStackLayers()){
+    /* One stack only — nothing an erase could reach across, so composite
+       straight into the final canvases exactly as before. */
+    paintStackLayersValid=false;
+    ihcReplayStrokes({raw:paintCtx,split:paintCtxS},paintStrokes,mirrorForTarget);
+    syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
+    syncCanvasToDataTexture(paintCtxS,paintCanvasS,paintTextureS);
+    return;
+  }
+  const L=ensurePaintStackLayers();
+  const order=paintStackOrder(paintStrokes,basePaintStrokes);
+  clearLayerPair(L.below);clearLayerPair(L.above);
+  ihcReplayStrokes(layerCtxPair(L.below),order[0],mirrorForTarget);
+  ihcReplayStrokes(layerCtxPair(L.above),order[1],mirrorForTarget);
+  paintStackLayersValid=true;
+  compositePaintConvention(true);
+  compositePaintConvention(false);
 }
 
 let bodyZM=null,stickZM=null,neckZone=null,PIECES=null;
@@ -830,25 +1155,44 @@ function buildMaterialManagers(){
    player on the roster, while PLAYER properties (stick, skin tone) belong
    to one individual and stay with them regardless of which team/jersey
    they're wearing. */
-const EDITOR_MODES=[
-  {id:'team',  label:'Team Uniform',icon:'🎽'},
-  {id:'player',label:'Player',      icon:'🧑'},
-  {id:'admin', label:'Team Admin',  icon:'🛡️'},
+/* ---------------------------- ACTIVITIES ----------------------------
+   The old top-level nav was three tabs (Team Uniform / Player / Team Admin)
+   whose membership changed with a SEPARATE role toggle in the top bar — so
+   "Team Admin" named both a tab and a role, and which parts you could see
+   depended on two controls that looked unrelated. It also split by WHO OWNS
+   a part, which is an ownership question the user has to already understand
+   before they can find anything.
+
+   Nav is split by WHAT YOU ARE DOING instead, the way every livery/config
+   editor does it:
+     DESIGN   — colours and materials of a part
+     DECORATE — paint, decals and logos on a part
+     TEAM     — numbers, roster, league rules (only when solo mode is off)
+   The same part (Helmet) exists in both Design and Decorate and is the same
+   category object, so switching activity keeps the camera and the part. */
+const ACTIVITIES=[
+  {id:'design',  label:'Design',  icon:'🎨',  hint:'Colours & material'},
+  {id:'decorate',label:'Decorate',icon:'🖌',  hint:'Paint, decals, logos'},
+  {id:'team',    label:'Team',    icon:'🛡️', hint:'Numbers & rules'},
 ];
-/* Acting as PLAYER you see the uniform (mostly view-only, per policy) and
-   your personal tab; acting as TEAM ADMIN you edit the uniform and run the
-   team (numbers, policies) — but you never touch the player's personal gear. */
-function editorModesForRole(){
-  return actingRole==='admin'
-    ?EDITOR_MODES.filter(m=>m.id!=='player')
-    :EDITOR_MODES.filter(m=>m.id!=='admin');
+/* SOLO MODE (declared up in TEAM CONTEXT, default ON): there is no server, no
+   real roster and no second human — so out of the box the whole player-vs-admin
+   permission layer is noise that shipped a locked, uneditable Jersey as the
+   very first screen. Solo hides the roles, the number-approval round trip and
+   the policy matrix; switching it off restores all of it untouched. */
+function activitiesAvailable(){
+  return soloMode?ACTIVITIES.filter(a=>a.id!=='team'):ACTIVITIES;
 }
-let currentEditorMode='team';
+let currentActivity='design';
 /* One category per real equipment PIECE — each drives only its own mesh's
    material now (`piece` is the id in IHC_PIECES/core), so socks recolor
    socks and nothing else. Pieces whose baked texture only ever had one color
    (helmet shell, cage, boot, laces, blade steel) honestly show one zone
    rather than three sliders that would move nothing. */
+/* `mode` is the OWNERSHIP tag (whose data this part lives in — team design vs
+   personal kit) and still drives permissions. `act` is which nav ACTIVITY the
+   part appears under, which is a separate question: a jersey is team-owned
+   (mode) but you both design and decorate it (act). */
 const CATEGORIES=[
   {id:'jersey',label:'Jersey', icon:'🏒',cam:'upper', group:'body',piece:'jersey',mode:'team'},
   {id:'helmet',label:'Helmet', icon:'⛑️',cam:'helmet',group:'body',piece:'helmet',mode:'team'},
@@ -875,9 +1219,23 @@ const CATEGORIES=[
      is a single player being edited, not a squad). */
   {id:'nameplate',label:'Name & Number', icon:'🔢',cam:'upper',group:'nameplate',mode:'player'},
   /* Team Admin tools — only reachable while acting as admin. */
-  {id:'roster',  label:'Numbers & Roster', icon:'🔢',cam:'upper',group:'roster',  mode:'admin'},
-  {id:'policies',label:'Player Freedom',   icon:'⚖️',cam:'full', group:'policies',mode:'admin'},
+  {id:'roster',  label:'Numbers & Roster', icon:'🔢',cam:'upper',group:'roster',  mode:'admin',act:'team'},
+  {id:'policies',label:'Player Freedom',   icon:'⚖️',cam:'full', group:'policies',mode:'admin',act:'team'},
 ];
+/* Everything that isn't an admin tool is a part you design. */
+CATEGORIES.forEach(c=>{if(!c.act)c.act='design';});
+/* Decorate lists only surfaces that actually have a paint/decal layer. Those
+   are the five PAINT TARGETS, and their ids happen to be exactly five
+   category ids — so Decorate reuses the very same category objects rather
+   than inventing a parallel list that could drift out of sync (the old
+   "Paint Target" strip was exactly that kind of second, disagreeing list). */
+function decorateCategories(){
+  return CATEGORIES.filter(c=>PAINT_TARGET_LIST.some(t=>t.id===c.id));
+}
+function categoriesForActivity(act){
+  if(act==='decorate')return decorateCategories().filter(categoryPaintable);
+  return CATEGORIES.filter(c=>c.act===act);
+}
 const SKIN_TONES=['#3d2314','#5c3a21','#8d5a34','#c68863','#e0ac69','#f1c27d','#ffdbac','#f5dbc5'];
 const QUICK_PALETTES=[
   {name:'Original',  colors:['#020c3d','#4c0a16','#ffffff']},
@@ -887,29 +1245,34 @@ const QUICK_PALETTES=[
   {name:'Alternate', colors:['#4b3a52','#3f7a6e','#f0f0f0']},
   {name:'Sunrise',   colors:['#7a1224','#ff9a3c','#111319']},
 ];
-let currentCategory=CATEGORIES.find(c=>c.mode==='team');
+let currentCategory=CATEGORIES.find(c=>c.act==='design');
 
-function categoriesForMode(mode){return CATEGORIES.filter(c=>c.mode===mode);}
 function buildEditorModeTabs(){
   const wrap=document.getElementById('editorModeTabs');
   wrap.innerHTML='';
-  editorModesForRole().forEach(m=>{
+  activitiesAvailable().forEach(a=>{
     const el=document.createElement('div');
-    el.className='editor-mode-tab'+(m.id===currentEditorMode?' active':'');
-    el.dataset.mode=m.id;
-    el.innerHTML=`<span class="em-icon">${m.icon}</span>${m.label}`;
-    el.addEventListener('click',()=>selectEditorMode(m.id));
+    el.className='editor-mode-tab'+(a.id===currentActivity?' active':'');
+    el.dataset.mode=a.id;
+    el.innerHTML=`<span class="em-icon">${a.icon}</span>${a.label}<span class="em-hint">${a.hint}</span>`;
+    el.addEventListener('click',()=>selectActivity(a.id));
     wrap.appendChild(el);
   });
 }
-function selectEditorMode(mode){
-  if(mode===currentEditorMode)return;
-  currentEditorMode=mode;
-  document.querySelectorAll('.editor-mode-tab').forEach(el=>el.classList.toggle('active',el.dataset.mode===mode));
-  document.getElementById('sbHeading').textContent=
-    mode==='team'?'Team Uniform':mode==='admin'?'Team Admin':'Player';
+const ACTIVITY_HEADINGS={design:'Parts',decorate:'Surfaces',team:'Team Admin'};
+/* `keepPart` lets a part survive an activity switch: flipping Design→Decorate
+   on the helmet should stay on the helmet, not jump back to the first row. */
+function selectActivity(act,keepPart){
+  const list=categoriesForActivity(act);
+  if(!list.length){showToast('Nothing to do here on this team');return;}
+  currentActivity=act;
+  document.querySelectorAll('.editor-mode-tab').forEach(el=>el.classList.toggle('active',el.dataset.mode===act));
+  document.getElementById('sbHeading').textContent=ACTIVITY_HEADINGS[act]||'Parts';
+  const want=keepPart&&list.some(c=>c.id===keepPart)?keepPart:null;
+  if(!want&&!list.some(c=>c.id===currentCategory.id))currentCategory=list[0];
   buildSidebar();
-  selectCategory(categoriesForMode(mode)[0].id);
+  syncToolRail();
+  selectCategory(want||currentCategory.id);
 }
 /* A part has TWO independent permissions, and conflating them is what used to
    leave a player staring at a kit where every part said 🔒 and the only way in
@@ -918,6 +1281,7 @@ function selectEditorMode(mode){
      paint/decals     — the player's own accents, per team/league policy
    A player may well be allowed to paint a helmet they cannot recolour. */
 function categoryColorEditable(cat){
+  if(soloMode)return cat.mode!=='admin'; // solo: every part is yours
   if(actingRole==='admin')return cat.mode==='team'||cat.mode==='admin';
   if(cat.mode==='player'){
     if(cat.id==='stick')return catAllowed('stick');
@@ -937,15 +1301,26 @@ function categoryEditable(cat){
 function buildSidebar(){
   const list=document.getElementById('sbList');
   list.innerHTML='';
-  categoriesForMode(currentEditorMode).forEach(cat=>{
+  categoriesForActivity(currentActivity).forEach(cat=>{
     const el=document.createElement('div');
     el.className='sb-item'+(cat.id===currentCategory.id?' active':'');
     el.dataset.cat=cat.id;
-    const chip=categoryEditable(cat)?'':'<div class="sb-chip">🔒</div>';
+    /* In Decorate the row's chip counts what is actually ON that surface —
+       a layer count is far more use there than a padlock, and Decorate only
+       ever lists surfaces you are already allowed to touch. */
+    let chip='';
+    if(currentActivity==='decorate'){
+      const n=layerCountForTarget(cat.id);
+      if(n)chip=`<div class="sb-chip">${n}</div>`;
+    }else if(!categoryEditable(cat))chip='<div class="sb-chip">🔒</div>';
     el.innerHTML=`<div class="sb-icon">${cat.icon}</div><div class="sb-label">${cat.label}</div>${chip}`;
     el.addEventListener('click',()=>selectCategory(cat.id));
     list.appendChild(el);
   });
+}
+function layerCountForTarget(targetId){
+  return paintStrokes.filter(s=>s.target===targetId).length+
+         placedDecals.filter(d=>d.target===targetId).length;
 }
 function selectCategory(id){
   currentCategory=CATEGORIES.find(c=>c.id===id)||CATEGORIES[0];
@@ -962,65 +1337,123 @@ function selectCategory(id){
   goToPreset(currentCategory.cam);
   applyPartIsolation();
   renderRightPanel();
+  syncToolRail();
 }
 
 /* ---------------------- PART ISOLATION ----------------------
-   Opening a part's editor shows only that part. Categories that aren't about
-   one piece (Decals & Paint, Stick, roster, policies) keep the whole player,
-   because you need the body to aim at.
-   Pants and socks are ONE mesh, so hiding by mesh cannot separate them: that
-   pair is isolated with a world-space CLIPPING PLANE at the shorts hem instead
-   — the model stands in a posed idle, so the hem is taken from the live posed
-   bone rather than the bind-pose constant IHC_SPLIT_Y, which would sit at the
-   wrong height the moment the legs move. */
+   Opening a part's editor focuses that part. Categories that aren't about one
+   piece (Stick, roster, policies) keep the whole player, because you need the
+   body to aim at.
+
+   THREE TIERS, not two. A skate is a boot + laces + blade steel, and a helmet
+   is a shell + cage: they are separate EDITORS but one physical item of gear,
+   and you cannot judge a lace colour against a boot that has been ghosted out
+   from under it. So the assembly (IHC_ASSEMBLIES in core) stays clearly
+   readable while its edited member is solid, and only unrelated gear drops to
+   the faint ghost:
+       edited piece      opacity 1.00   (untouched material)
+       assembly siblings opacity 0.55   (present, obviously not the subject)
+       everything else   opacity 0.13   (context + a raycast surface)
+
+   Pants and socks are ONE mesh with ONE material, so neither of those opacity
+   tiers can separate them. They used to be isolated with a world-space
+   CLIPPING PLANE at the shorts hem, which DELETED the sibling half — the same
+   complaint one level down. The fade is now per-fragment in the recolor shader
+   instead (uGhostMode/uGhostAlpha, keyed off the vIhY the split already uses),
+   so socks-under-edit leaves the pants standing at sibling opacity. */
 let isolationOn=true;
-const _isoPlanes=[new THREE.Plane(new THREE.Vector3(0,-1,0),0),
-                  new THREE.Plane(new THREE.Vector3(0, 1,0),0)];
 function pieceIsolationTarget(){
   if(!isolationOn||!currentCategory)return null;
   return currentCategory.piece||(currentCategory.id==='skin'?'neck':null);
 }
-/* World Y of the shorts hem on the CURRENT pose. IHC_SPLIT_Y is a bind-pose
-   local value; converting it through the mesh's own matrixWorld is only right
-   while the legs are near bind, so prefer a real bone when one is there. */
-function hemWorldY(mesh){
-  const v=new THREE.Vector3(0,IHC_SPLIT_Y,0).applyMatrix4(mesh.matrixWorld);
-  const thigh=player&&player.visual&&(player.visual.getObjectByName('thigh_l')||
-              player.visual.getObjectByName('thigh_r'));
-  if(thigh){const p=new THREE.Vector3();thigh.getWorldPosition(p);return p.y;}
-  return v.y;
+const GHOST_OPACITY=0.13;
+const SIBLING_OPACITY=0.55;
+/* opacity===null restores the material's own captured base. */
+function setPieceGhost(m,opacity){
+  const mat=m.material;
+  if(!mat)return;
+  if(m.userData._ghostBase===undefined){
+    m.userData._ghostBase={transparent:mat.transparent,opacity:mat.opacity,
+      depthWrite:mat.depthWrite,colorWrite:mat.colorWrite};
+  }
+  const b=m.userData._ghostBase;
+  if(opacity===null||opacity===undefined){
+    mat.transparent=b.transparent;mat.opacity=b.opacity;mat.depthWrite=b.depthWrite;
+  }else{
+    mat.transparent=true;mat.opacity=opacity;
+    /* Siblings keep depth-writing: at 0.55 a boot that let its own far side
+       show through reads as a mess, and it is meant to look like a solid
+       object you are simply not editing. The 0.13 ghost does not — at that
+       alpha the see-through look IS the point. */
+    mat.depthWrite=opacity>=0.4;
+  }
+  mat.needsUpdate=true;
+}
+/* Per-fragment half-fade for the one mesh that carries two pieces. Written
+   every frame from the tick (a material has no shaderRef until it has actually
+   compiled, i.e. been rendered once — same reason applyPaintMirrorUniform is
+   re-asserted there). */
+let _splitGhost={mesh:null,mode:0,alpha:1};
+function applySplitGhostUniform(){
+  if(!PIECES)return;
+  Object.keys(PIECES).forEach(id=>{
+    const def=ihcPiece(id);
+    if(!def||!def.splitSide)return;               // only the pants/socks mesh
+    const ref=PIECES[id].material&&PIECES[id].material.userData.shaderRef;
+    if(!ref||!ref.uniforms.uGhostMode)return;
+    ref.uniforms.uGhostMode.value=_splitGhost.mode;
+    ref.uniforms.uGhostAlpha.value=_splitGhost.alpha;
+  });
 }
 function applyPartIsolation(){
   if(!player||!player.visual)return;
   const target=pieceIsolationTarget();
   const byMesh=pieceMeshMap();
   const def=target?ihcPiece(target):null;
-  // pieces sharing the target's mesh (pants/socks) still have to render
-  const keepMesh=def?def.mesh:null;
+  /* Siblings by MESH, because that is the granularity opacity works at. The
+     edited piece's own mesh is in here too — anything else sharing it (the
+     pants/socks partner) has to render, and gets faded in the shader below. */
+  const sibs=target?ihcAssemblyPieces(target):[];
+  const solidMeshes=def?[def.mesh]:[];
+  const sibMeshes=sibs.map(id=>{const d=ihcPiece(id);return d&&d.mesh;}).filter(Boolean);
   renderer.localClippingEnabled=false;
   IHC_PIECES.forEach(p=>{
     const m=byMesh[p.mesh];
     if(!m)return;
     if(m.userData._isoBaseVisible===undefined)m.userData._isoBaseVisible=m.visible;
-    m.visible=target?(p.mesh===keepMesh):m.userData._isoBaseVisible;
+    m.visible=m.userData._isoBaseVisible;
+    if(!target)                              setPieceGhost(m,null);
+    else if(solidMeshes.indexOf(p.mesh)>=0)  setPieceGhost(m,null);
+    else if(sibMeshes.indexOf(p.mesh)>=0)    setPieceGhost(m,SIBLING_OPACITY);
+    else                                     setPieceGhost(m,GHOST_OPACITY);
+    /* Nothing clips any more — kept as a reset so a design saved while the old
+       clipping build was running cannot leave a stale plane on a material. */
     if(m.material&&m.material.clippingPlanes!==undefined)m.material.clippingPlanes=null;
   });
-  // the stick is its own GLB, not an IHC piece — hide it unless a piece is not
-  // what's open (Stick category and the whole-player views keep it)
-  if(stickGroup)stickGroup.visible=!target;
-  if(!def)return;
-  if(def.splitSide){
-    const m=byMesh[def.mesh];
-    if(m&&m.material){
-      const y=hemWorldY(m);
-      // 'above' = pants (keep y >= hem), 'below' = socks (keep y <= hem)
-      const pl=def.splitSide==='above'?_isoPlanes[1]:_isoPlanes[0];
-      pl.normal.set(0,def.splitSide==='above'?1:-1,0);
-      pl.constant=def.splitSide==='above'?-y:y;
-      m.material.clippingPlanes=[pl];
-      renderer.localClippingEnabled=true;
-    }
+  /* The stick is its own GLB with its own materials, so it gets the same
+     treatment one level up rather than being switched off outright. It is
+     never part of an assembly — it is carried, not worn. */
+  if(stickGroup){
+    stickGroup.visible=true;
+    stickGroup.traverse(o=>{if(o.isMesh)setPieceGhost(o,target?GHOST_OPACITY:null);});
   }
+  /* The split mesh: fade the half that isn't the subject. 'above' = pants, so
+     editing pants fades BELOW (-1) and editing socks fades ABOVE (+1). Both
+     halves are assembly siblings, so the faded half uses SIBLING_OPACITY; when
+     the whole mesh is a mere bystander its material opacity already handles it
+     and the shader must stay out of the way. */
+  const splitMesh=byMesh[(ihcPiece('pants')||{}).mesh];
+  if(def&&def.splitSide){
+    _splitGhost.mode=def.splitSide==='above'?-1:1;
+    _splitGhost.alpha=SIBLING_OPACITY;
+    if(splitMesh&&splitMesh.material){
+      splitMesh.material.transparent=true;   // per-fragment alpha needs blending
+      splitMesh.material.needsUpdate=true;
+    }
+  }else{
+    _splitGhost.mode=0;_splitGhost.alpha=1;
+  }
+  applySplitGhostUniform();
 }
 
 function zoneRowHTML(zone,idx,mgr,locked){
@@ -1053,25 +1486,24 @@ function presetStripHTML(){
   return html;
 }
 
-/* The paint/decal tools, scoped to ONE piece. These used to be a category of
-   their own ("Decals & Paint") with a Paint Target strip inside it, which meant
-   a part could be chosen in two unrelated places and the two disagreed. The
-   part you have open IS the paint target now (selectCategory points it there),
-   so the strip is gone and these sections render inside the part's own panel. */
+/* The DECORATE panel, scoped to ONE surface. The part you have open IS the
+   paint target (selectCategory points it there), which is what killed the old
+   "Paint Target" strip — a second place to choose a part that could disagree
+   with the sidebar.
+   Brush colour/size/opacity/hardness are deliberately NOT here — they
+   live in the floating tool-options bar next to the rail, where the tool that
+   owns them is, so this panel is only ever about content: what to stamp, and
+   what is already stacked on the model. */
 function paintToolsHTML(label){
-  let html=`<div class="rp-section"><div class="rp-section-title">Freehand Paint</div>
-      <div class="zone-row" id="paintColorRow"><div class="zone-swatch" id="paintColorSwatch" style="background:${paintBrushColor}"></div>
-        <div class="zone-info"><div class="zone-name">Brush Color</div></div></div>
-      <div class="mat-slider-row"><div class="mat-slider-label"><span>Brush Size</span><b id="brushSizeVal"></b></div>
-        <input type="range" id="brushSizeSlider" min="6" max="140" step="2"></div>
-      <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="brushOpVal"></b></div>
-        <input type="range" id="brushOpSlider" min="0.05" max="1" step="0.05"></div>
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="mirrorPaintBtn">🪞 Mirror Paint & Decals: ON</div></div>
-      <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="paintModeBtn">🖌 Enable Paint Mode</div></div>
-      <div class="btn-row"><div class="btn" id="undoStrokeBtn">↶ Undo Last Stroke</div><div class="btn" id="clearPaintBtn">🗑 Clear All Paint</div></div>
-      <div class="rp-note" style="margin-top:10px;" id="paintNote">Paint Mode makes dragging on the model paint instead of turning it — scroll still zooms. Every drag becomes its own layer below, so it can be reordered, hidden or deleted on its own, and it saves into presets and undo. Mirror copies both strokes AND placed logos to the other side of a symmetric part; turn it off to decorate each side separately. Flipping it re-packs every existing stroke and decal, so it is simplest to decide before you start a side.</div>
-    </div>`;
-  html+=`<div class="rp-section"><div class="rp-section-title">Quick Shape Decals</div>
+  const nHere=layerCountForTarget(paintTarget);
+  let html=`<div class="rp-section"><div class="btn-row">
+      <div class="btn" id="mirrorPaintBtn">🪞 Mirror: ON</div>
+      <div class="btn" id="undoStrokeBtn">↶ Undo stroke</div>
+      <div class="btn" id="clearPaintBtn">🗑 Clear paint</div>
+    </div>
+    <div style="font-size:13px;color:var(--text-faint);margin-top:8px;" id="paintNote">Mirror copies strokes and logos to the other side of this part. Flipping it re-packs everything already on the ${label}, so decide before you start a side. Clear paint wipes strokes across the whole kit, not just this part.</div>
+  </div>`;
+  html+=`<div class="rp-section"><div class="rp-section-title">Stamp a shape</div>
       <div class="lc-shape-grid" id="quickShapeGrid">
         <div class="lc-shape-btn" data-qshape="circle" title="Circle">●</div>
         <div class="lc-shape-btn" data-qshape="square" title="Square">■</div>
@@ -1080,27 +1512,45 @@ function paintToolsHTML(label){
         <div class="lc-shape-btn" data-qshape="hexagon" title="Hexagon">⬡</div>
         <div class="lc-shape-btn" data-qshape="shield" title="Shield">🛡</div>
       </div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps a decal straight onto the ${label} — drag, scale and rotate it below just like a placed logo. Use the Logo Creator for multi-layer text+shape combos.</div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps straight onto the ${label} in the current brush colour, then arms the ✥ move tool so you can drag it into place.</div>
     </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
       <div class="palette-grid" id="logoLibraryGrid"></div>
       <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
     </div>`;
-  html+=`<div class="rp-section"><div class="rp-section-title">Layers<span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${(paintStrokes.length+placedDecals.length)} total</span></div>
-      <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;">Decals and paint strokes are separate stacks — within each, later draws on top; paint always renders above decals overall. The lists below show every layer on the whole kit, not just this part.</div>
+  html+=`<div class="rp-section"><div class="rp-section-title">Layers
+      <span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${nHere} on this part · ${(paintStrokes.length+placedDecals.length)} total</span></div>
+      <label class="rp-check" style="margin:0 0 10px;"><input type="checkbox" id="layersThisPartOnly"${layersThisPartOnly?' checked':''}> Only show this part's layers</label>
       <div class="rp-section-title" style="margin-top:2px;">🖼 Decals</div>
       <div id="placedDecalsList"></div>
       <div id="placedDecalControls"></div>
       <div class="rp-section-title" style="margin-top:14px;">🖌 Paint Strokes</div>
       <div id="paintLayersList"></div>
       <div id="paintLayerControls"></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:10px;">Two separate stacks — later draws on top within each, and paint always renders above decals overall.</div>
     </div>`;
   return html;
 }
+/* The layer lists used to always show the whole kit while the tools above them
+   were scoped to one part — two different scopes stacked in one panel with
+   nothing saying so. Default is now "this part", with the old whole-kit view
+   one checkbox away. */
+let layersThisPartOnly=true;
 function renderRightPanel(){
   const rp=document.getElementById('rightpanel');
   const cat=currentCategory;
   let html=`<h2 class="rp-title">${cat.icon} ${cat.label}</h2>`;
+  /* DECORATE is its own panel end-to-end. Paint used to be appended to the
+     bottom of the colour panel, which is how it ended up as section ~10 of a
+     single unbroken scroll — the reason "where is the paint tool" needed
+     asking at all. */
+  if(currentActivity==='decorate'){
+    html+=`<p class="rp-sub">Paint and decals on the ${cat.label.toLowerCase()}. Pick a tool on the rail at the top left of the viewport — 🖌 brush, 🧽 eraser, ✥ move a logo, 💧 lift a colour.</p>`;
+    html+=paintToolsHTML(cat.label.toLowerCase());
+    rp.innerHTML=html;
+    wireDecalsPanel();
+    return;
+  }
   if(cat.group==='fixed'){
     html+=`<p class="rp-sub">Fixed component</p><div class="rp-note">${cat.note}</div>`;
     rp.innerHTML=html;return;
@@ -1123,6 +1573,27 @@ function renderRightPanel(){
   }
   if(cat.group==='nameplate'){
     const t=ctxTeam(),nb=t.number||{};
+    /* Solo mode: no second party, so there is nobody to request a number FROM.
+       The request/approve round trip becomes a plain input that renders on the
+       jersey immediately — the same data (t.number.assigned), one less step. */
+    if(soloMode){
+      html+=`<p class="rp-sub">Name and number on the jersey. Your name carries across every team; the number is per-team.</p>`;
+      html+=`<div class="rp-section"><div class="rp-section-title">Nameplate</div>
+        <input id="nameInput" placeholder="LAST NAME" maxlength="20" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;letter-spacing:.03em;padding:10px 12px;">
+        <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">A–Z, space, hyphen only · max 11 characters (NHL nameplate limit)</div>
+      </div>`;
+      html+=`<div class="rp-section"><div class="rp-section-title">Number — ${t.name}</div>
+        <input id="soloNumberInput" type="number" min="1" max="99" placeholder="—" value="${nb.assigned||''}" style="width:110px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:18px;font-weight:800;padding:10px 12px;">
+        <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">1–99 · appears on the jersey as you type.</div>
+      </div>`;
+      html+=`<div class="rp-section"><div class="rp-section-title">Lettering Font</div>
+        <select id="fontSelect" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:14px;font-weight:600;padding:10px 12px;">
+          ${JERSEY_FONTS.map(f=>`<option value='${f.id}'>${f.label}</option>`).join('')}
+        </select></div>`;
+      rp.innerHTML=html;
+      wireNameplatePanel();
+      return;
+    }
     html+=`<p class="rp-sub">Your name belongs to you and carries across every team. Your NUMBER is per-team — you request it, the team admin has the final say.</p>`;
     html+=`<div class="rp-section"><div class="rp-section-title">Nameplate</div>
       <input id="nameInput" placeholder="LAST NAME" maxlength="20" style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;letter-spacing:.03em;padding:10px 12px;">
@@ -1212,7 +1683,8 @@ function renderRightPanel(){
   if(!editable){
     html+=`<div class="rp-note">${cat.group==='stick'
       ?`🔒 ${lockSrc||ctxTeam().name} does not allow personal stick customization — these are the colors you'll play with. Switch to Team Admin to change the policy.`
-      :`🔒 The ${ctxTeam().name} admin decides this part's colors — you're viewing them, not editing them.${paintable?' Your own paint and decals for it are further down and are yours to change.':' Switch to Team Admin (top bar) to redesign it, or pick another jersey set / team above.'}`}</div>`;
+      :`🔒 The ${ctxTeam().name} admin decides this part's colors — you're viewing them, not editing them.${paintable?' Paint and decals for it are under Decorate and are still yours to change.':' Switch to Team Admin (top bar) to redesign it, or pick another jersey set / team above.'}`}
+      <div style="margin-top:8px;">Turn <b>Solo mode</b> on in the top bar to drop the team-rules layer entirely.</div></div>`;
   }
   if(cat.note)html+=`<div class="rp-note">${cat.note}</div>`;
 
@@ -1247,11 +1719,11 @@ function renderRightPanel(){
       <div class="btn" id="btnUndo">↶ Undo</div><div class="btn" id="btnRedo">↷ Redo</div>
     </div></div>`;
     html+=`<div class="rp-section"><div class="btn-row">
-      <div class="btn" id="btnRandom">🎲 Randomize</div>${actingRole==='admin'?'<div class="btn primary" id="btnSavePreset">💾 Save Preset</div>':''}
+      <div class="btn" id="btnRandom">🎲 Randomize</div>${ownsDesign()?'<div class="btn primary" id="btnSavePreset">💾 Save Preset</div>':''}
     </div></div>`;
   }
 
-  if(actingRole==='admin'){
+  if(ownsDesign()){
     html+=`<div class="rp-section"><div class="btn-row">
       <div class="btn" id="btnExportCode">📤 Export Code</div><div class="btn" id="btnImportCode">📥 Import Code</div>
     </div>
@@ -1260,18 +1732,25 @@ function renderRightPanel(){
     html+=`<div class="rp-section"><div class="rp-section-title">Loadout Presets</div>${presetStripHTML()}</div>`;
   }
 
-  /* Paint/decals for THIS part. selectCategory has already pointed paintTarget
-     at it, so everything here acts on the part on screen and nowhere else. */
-  if(paintable)html+=paintToolsHTML(cat.label.toLowerCase());
-  else if(cat.group==='body'&&actingRole!=='admin'){
+  /* Paint and decals are the DECORATE activity now — this is a one-line
+     handoff instead of ten more sections stacked below the colour controls. */
+  if(paintable){
+    html+=`<div class="rp-section"><div class="btn primary" id="goDecorateBtn">🖌 Paint &amp; decals on the ${cat.label.toLowerCase()}</div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">${layerCountForTarget(paintTarget)||'No'} layer${layerCountForTarget(paintTarget)===1?'':'s'} on this part right now.</div></div>`;
+  }else if(cat.group==='body'&&!ownsDesign()){
     const src=catLockLabel('accents')||catLockLabel('helmetStyle')||catLockLabel('skates')||ctxTeam().name;
     html+=`<div class="rp-note">🔒 ${src} does not allow personal paint or decals on this part. The team's own layers still show on the model — they're just not yours to edit.</div>`;
   }
 
   rp.innerHTML=html;
   wireRightPanel(mgrKey,mgr,editable);
-  if(paintable)wireDecalsPanel();
+  const gd=document.getElementById('goDecorateBtn');
+  if(gd)gd.addEventListener('click',()=>selectActivity('decorate',paintTarget));
 }
+/* "May I edit the team's own design?" — true in solo (you are the only party)
+   and true for the admin role otherwise. Presets/export are design-level
+   operations, so they hang off this rather than off the raw role. */
+function ownsDesign(){return soloMode||actingRole==='admin';}
 
 function wireRightPanel(mgrKey,mgr,editable){
   document.querySelectorAll('.zone-row').forEach(el=>{
@@ -1352,6 +1831,34 @@ function wireNameplatePanel(){
     redrawNameNumber();
   });
   nameInput.addEventListener('change',pushHistory);
+
+  const fontSel=document.getElementById('fontSelect');
+  if(fontSel){
+    fontSel.value=jerseyFont;
+    fontSel.addEventListener('change',()=>{setJerseyFont(fontSel.value);showToast('Lettering font applied');});
+  }
+
+  /* Solo: writes straight to the assigned number, which is the one field
+     ihtEffectiveNumber() renders from — no request, no approval, no chips. */
+  const soloNum=document.getElementById('soloNumberInput');
+  if(soloNum){
+    soloNum.addEventListener('input',()=>{
+      const t=ctxTeam();
+      t.number=t.number||{};
+      const v=sanitizeNumber(soloNum.value);
+      t.number.assigned=v;t.number.preferred=v;t.number.status=v?'approved':'none';
+      ihtSaveStore(TSTORE);
+      jerseyNumber=ihtEffectiveNumber(t);
+      redrawNameNumber();
+      updateContextBar();
+    });
+    soloNum.addEventListener('change',()=>{
+      const v=sanitizeNumber(soloNum.value);
+      if(soloNum.value!==v)soloNum.value=v;
+      pushHistory();
+    });
+    return;
+  }
 
   /* Number is a REQUEST, not a direct edit — nothing changes on the jersey
      until the team admin (Numbers & Roster panel) assigns it. */
@@ -1451,66 +1958,34 @@ function wirePoliciesPanel(){
    paint-target strip is gone — selectCategory points paintTarget at whatever
    part is open, so there is nothing here to pick a target with any more. */
 function wireDecalsPanel(){
-  document.getElementById('paintColorRow').addEventListener('click',e=>{
-    openColorPicker(document.getElementById('paintColorSwatch'),'paint',null);
-  });
-  const sizeSlider=document.getElementById('brushSizeSlider');
-  sizeSlider.value=paintBrushSize;
-  document.getElementById('brushSizeVal').textContent=paintBrushSize;
-  sizeSlider.addEventListener('input',()=>{paintBrushSize=+sizeSlider.value;document.getElementById('brushSizeVal').textContent=paintBrushSize;});
-
-  const opSlider=document.getElementById('brushOpSlider');
-  opSlider.value=paintBrushOpacity;
-  document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';
-  opSlider.addEventListener('input',()=>{paintBrushOpacity=+opSlider.value;document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';});
-
-  /* Visible to BOTH roles, and PER PART. The team layers and the player's own
-     accents on one part share that part's setting — they have to, since both
-     draw into the same canvas region and one packing convention has to win per
-     surface — but different parts are now free to disagree. */
+  /* Brush colour/size/opacity/hardness are in the floating tool-options bar
+     now (see renderToolOptions) — next to the tool that uses them, not buried
+     in this panel. What's left here is content and stack management. */
   const mirrorBtn=document.getElementById('mirrorPaintBtn');
   if(mirrorBtn){
-    /* Scoped to the part on screen: the button edits THIS target's flag only,
-       so a mirrored helmet can sit next to unmirrored pants. */
+    /* Scoped to the part on screen: this edits THIS target's flag only, so a
+       mirrored helmet can sit next to unmirrored pants. Same handler as the
+       rail's 🪞 so the two can never disagree. */
     const tgt=paintTarget;
-    const syncMirrorBtn=()=>{
-      const on=mirrorForTarget(tgt);
-      mirrorBtn.classList.toggle('primary',on);
-      mirrorBtn.textContent=on?'🪞 Mirror this part: ON':'🪞 Mirror this part: OFF';
-    };
-    syncMirrorBtn();
-    mirrorBtn.addEventListener('click',()=>{
-      paintMirrorByTarget[tgt]=!mirrorForTarget(tgt);
-      syncMirrorBtn();
-      applyPaintMirrorUniform();
-      // this target's strokes/decals move to the other canvas and re-pack
-      redrawPaintLayer();redrawLogoLayer();
-      pushHistory();
-      showToast(mirrorForTarget(tgt)
-        ?'Mirror ON — both sides of this part match'
-        :'Mirror OFF — this part\'s sides are decorated separately');
-    });
+    mirrorBtn.classList.toggle('primary',mirrorForTarget(tgt));
+    mirrorBtn.textContent='🪞 Mirror: '+(mirrorForTarget(tgt)?'ON':'OFF');
+    mirrorBtn.addEventListener('click',()=>toggleMirrorForTarget(tgt));
   }
 
-  const modeBtn=document.getElementById('paintModeBtn');
-  const syncModeBtn=()=>{
-    modeBtn.classList.toggle('primary',paintModeOn);
-    modeBtn.textContent=paintModeOn?'🖌 Paint Mode: ON':'🖌 Enable Paint Mode';
-    renderer.domElement.style.cursor=paintModeOn?'crosshair':'';
-  };
-  syncModeBtn();
-  modeBtn.addEventListener('click',()=>{
-    paintModeOn=!paintModeOn;
-    if(paintModeOn)decalMoveModeOn=false;
-    syncModeBtn();
+  const partOnly=document.getElementById('layersThisPartOnly');
+  if(partOnly)partOnly.addEventListener('change',()=>{
+    layersThisPartOnly=partOnly.checked;
+    renderPlacedDecalsList();renderPaintLayersList();
   });
 
   document.getElementById('undoStrokeBtn').addEventListener('click',()=>{
-    if(paintStrokes.length){paintStrokes.pop();selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();pushHistory();showToast('Stroke undone');}
+    if(paintStrokes.length){paintStrokes.pop();selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();buildSidebar();pushHistory();showToast('Stroke undone');}
     else showToast('No strokes to undo');
   });
   document.getElementById('clearPaintBtn').addEventListener('click',()=>{
-    paintStrokes=[];selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();pushHistory();showToast('Paint cleared');
+    if(!paintStrokes.length){showToast('No paint to clear');return;}
+    if(!confirm('Delete all '+paintStrokes.length+' paint strokes on the whole kit? Decals are not affected.'))return;
+    paintStrokes=[];selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();buildSidebar();pushHistory();showToast('Paint cleared');
   });
 
   document.querySelectorAll('#quickShapeGrid .lc-shape-btn').forEach(b=>{
@@ -1586,7 +2061,12 @@ function syncFieldsFromState(){
 function applyLive(){
   if(cpState.mgrKey==='paint'){
     paintBrushColor=currentHex();
+    // the brush swatch lives in the floating tool-options bar now; poke it
+    // directly rather than re-rendering the bar mid-drag (that would rebuild
+    // the very slider/canvas the pointer is captured on)
+    const to=document.getElementById('toColorSwatch');if(to)to.style.background=paintBrushColor;
     const sw=document.getElementById('paintColorSwatch');if(sw)sw.style.background=paintBrushColor;
+    if(brushRing&&brushRing.visible&&activeTool!=='erase')brushRing.material.color.set(paintBrushColor);
     return;
   }
   if(cpState.mgrKey==='neck'){
@@ -1607,6 +2087,14 @@ function applyLive(){
   const mgr=mgrByKey(cpState.mgrKey);
   if(mgr&&mgr.zones[cpState.idx])mgr.zones[cpState.idx].setColor(currentHex());
   refreshSwatches();
+}
+/* Drives the open picker to a hex from outside it (the eyedropper) through the
+   exact same path a slider drag takes, so the live preview, the fields and the
+   undo entry all behave identically. */
+function setPickerHex(hex){
+  const rgb=hexToRgb(hex),hsv=rgbToHsv(rgb.r,rgb.g,rgb.b);
+  cpState.h=hsv.h;cpState.s=hsv.s;cpState.v=hsv.v;
+  drawSVBox();syncFieldsFromState();applyLive();commitColorHistory();
 }
 function openColorPicker(anchorEl,mgrKey,idx){
   cpState.mgrKey=mgrKey;cpState.idx=idx;cpState.anchorEl=anchorEl;
@@ -1629,9 +2117,12 @@ function openColorPicker(anchorEl,mgrKey,idx){
 }
 function closeColorPicker(){cpEl.classList.remove('open');}
 document.addEventListener('pointerdown',e=>{
-  if(cpEl.classList.contains('open')&&!cpEl.contains(e.target)&&!e.target.closest('.zone-row')){
-    closeColorPicker();
-  }
+  if(!cpEl.classList.contains('open'))return;
+  if(cpEl.contains(e.target)||e.target.closest('.zone-row'))return;
+  /* Eyedropping INTO the open picker means clicking the model — closing on
+     that click would shut the panel the pick was aimed at. */
+  if(isPickTool()&&e.target===renderer.domElement)return;
+  closeColorPicker();
 });
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeColorPicker();});
 
@@ -1936,7 +2427,7 @@ document.getElementById('lcSaveBtn').addEventListener('click',()=>{
    instances (position/scale/rotation), composited on their own texture
    layer (see logoMap in the Material Manager) — separate from freehand
    paint so a placed logo stays editable instead of being baked in. */
-let logoLibrary=[],placedDecals=[],selectedDecalIdx=-1,decalMoveModeOn=false;
+let logoLibrary=[],placedDecals=[],selectedDecalIdx=-1;
 function loadLogoLibrary(){
   try{logoLibrary=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){logoLibrary=[];}
   logoLibrary.forEach(l=>{l.img=new Image();l.img.onload=()=>redrawLogoLayer();l.img.src=l.dataURL;});
@@ -1989,8 +2480,13 @@ function placeDecal(logoId){
   redrawLogoLayer();
   renderPlacedDecalsList();
   renderPlacedDecalControls();
+  buildSidebar();
   pushHistory();
-  showToast('Logo placed — drag on the model or use the sliders');
+  /* Arm the move tool on placement. Placing a logo and then hunting for a
+     "Move on Model" button two panels down was the single clunkiest step in
+     the old decal flow — the thing you want next is always to position it. */
+  setActiveTool('decal');
+  showToast('Logo placed — drag it on the model, or use the sliders');
 }
 /* one-click Forza-style shape stamp: skips the Logo Creator round-trip
    entirely — rasterizes a single shape straight to the library (reusing the
@@ -2035,10 +2531,11 @@ function deleteDecal(idx){
   placedDecals.splice(idx,1);
   if(selectedDecalIdx===idx)selectedDecalIdx=-1;
   else if(selectedDecalIdx>idx)selectedDecalIdx--;
-  decalMoveModeOn=false;
+  if(activeTool==='decal')setActiveTool('orbit'); // nothing left to drag
   redrawLogoLayer();
   renderPlacedDecalsList();
   renderPlacedDecalControls();
+  buildSidebar();
   pushHistory();
 }
 /* Swaps array-adjacent entries — since redrawLogoLayer draws placedDecals in
@@ -2063,14 +2560,21 @@ function toggleDecalVisible(idx){
 }
 function updateLayersTotalBadge(){
   const b=document.getElementById('layersTotalBadge');
-  if(b)b.textContent=(paintStrokes.length+placedDecals.length)+' total';
+  if(b)b.textContent=layerCountForTarget(paintTarget)+' on this part · '+
+    (paintStrokes.length+placedDecals.length)+' total';
 }
 function renderPlacedDecalsList(){
   updateLayersTotalBadge();
   const el=document.getElementById('placedDecalsList');
   if(!el)return;
   if(!placedDecals.length){el.innerHTML='<div class="rp-note">No logos placed on the model yet — click one above to stamp it on.</div>';return;}
+  /* Rows are addressed by their index in the REAL array, so the this-part
+     filter drops rows rather than building a compacted list — an index off by
+     the number of hidden rows would delete the wrong layer. */
+  let shown=0;
   el.innerHTML=placedDecals.map((d,i)=>{
+    if(layersThisPartOnly&&d.target!==paintTarget)return'';
+    shown++;
     const lib=logoLibrary.find(l=>l.id===d.logoId);
     const thumb=lib?lib.dataURL:'';
     const active=i===selectedDecalIdx,hidden=d.visible===false;
@@ -2083,6 +2587,7 @@ function renderPlacedDecalsList(){
       <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
     </div>`;
   }).join('');
+  if(!shown)el.innerHTML='<div class="rp-note">No logos on this part. Untick “Only show this part’s layers” to see the other '+placedDecals.length+'.</div>';
   el.querySelectorAll('.layer-row').forEach(row=>{
     row.addEventListener('click',e=>{
       if(e.target.closest('.layer-btn'))return;
@@ -2108,6 +2613,7 @@ function deleteStroke(idx){
   redrawPaintLayer();
   renderPaintLayersList();
   renderPaintLayerControls();
+  buildSidebar();
   pushHistory();
 }
 function reorderStroke(idx,dir){
@@ -2131,18 +2637,23 @@ function renderPaintLayersList(){
   updateLayersTotalBadge();
   const el=document.getElementById('paintLayersList');
   if(!el)return;
-  if(!paintStrokes.length){el.innerHTML='<div class="rp-note">No paint strokes yet — enable Paint Mode above and drag on the model.</div>';return;}
+  if(!paintStrokes.length){el.innerHTML='<div class="rp-note">No paint strokes yet — pick 🖌 on the tool rail (or press B) and drag on the model.</div>';return;}
+  let shown=0;
   el.innerHTML=paintStrokes.map((s,i)=>{
+    if(layersThisPartOnly&&s.target!==paintTarget)return'';
+    shown++;
     const active=i===selectedStrokeIdx,hidden=s.visible===false;
+    const erase=s.mode==='erase';
     return`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
-      <div class="layer-thumb" style="background:${s.color};"></div>
-      <div class="layer-label">Stroke — ${s.target} · ${s.points.length}pt</div>
+      <div class="layer-thumb" style="background:${erase?'repeating-conic-gradient(#2a2d3a 0% 25%,#1b1d27 0% 50%) 50%/10px 10px':s.color};"></div>
+      <div class="layer-label">${erase?'🧽 Erase':'Stroke'} — ${s.target} · ${s.points.length}pt</div>
       <div class="layer-btn" data-vis-idx="${i}" title="${hidden?'Show':'Hide'}">${hidden?'🚫':'👁'}</div>
       <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===paintStrokes.length-1?' disabled':''}>↑</div>
       <div class="layer-btn" data-down-idx="${i}" title="Move down"${i===0?' disabled':''}>↓</div>
       <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
     </div>`;
   }).join('');
+  if(!shown)el.innerHTML='<div class="rp-note">No strokes on this part. Untick “Only show this part’s layers” to see the other '+paintStrokes.length+'.</div>';
   el.querySelectorAll('.layer-row').forEach(row=>{
     row.addEventListener('click',e=>{
       if(e.target.closest('.layer-btn'))return;
@@ -2192,8 +2703,8 @@ function renderPlacedDecalControls(){
       <input type="range" id="decalScaleSlider" min="0.03" max="0.6" step="0.01"></div>
     <div class="mat-slider-row"><div class="mat-slider-label"><span>Rotation</span><b id="decalRotVal"></b></div>
       <input type="range" id="decalRotSlider" min="-180" max="180" step="1"></div>
-    <div class="btn-row" style="margin-bottom:8px;"><div class="btn" id="decalMoveBtn">✥ Move on Model</div></div>
-    <div class="btn-row"><div class="btn" id="decalDeleteBtn">🗑 Delete Logo</div></div>`;
+    <div class="btn-row"><div class="btn" id="decalDeleteBtn">🗑 Delete Logo</div></div>
+    <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Pick ✥ on the tool rail (or press M) to drag this logo around on the model.</div>`;
   const scaleSlider=document.getElementById('decalScaleSlider');
   scaleSlider.value=d.scale;document.getElementById('decalScaleVal').textContent=Math.round(d.scale*100)+'%';
   scaleSlider.addEventListener('input',()=>{d.scale=+scaleSlider.value;document.getElementById('decalScaleVal').textContent=Math.round(d.scale*100)+'%';redrawLogoLayer();});
@@ -2202,18 +2713,6 @@ function renderPlacedDecalControls(){
   rotSlider.value=(d.rotation||0)*180/Math.PI;document.getElementById('decalRotVal').textContent=Math.round(rotSlider.value)+'°';
   rotSlider.addEventListener('input',()=>{d.rotation=(+rotSlider.value)*Math.PI/180;document.getElementById('decalRotVal').textContent=Math.round(rotSlider.value)+'°';redrawLogoLayer();});
 
-  const moveBtn=document.getElementById('decalMoveBtn');
-  const syncMoveBtn=()=>{
-    moveBtn.classList.toggle('primary',decalMoveModeOn);
-    moveBtn.textContent=decalMoveModeOn?'✥ Move Mode: ON':'✥ Move on Model';
-    renderer.domElement.style.cursor=decalMoveModeOn?'move':'';
-  };
-  syncMoveBtn();
-  moveBtn.addEventListener('click',()=>{
-    decalMoveModeOn=!decalMoveModeOn;
-    if(decalMoveModeOn){paintModeOn=false;renderer.domElement.style.cursor='move';}
-    syncMoveBtn();
-  });
   document.getElementById('decalDeleteBtn').addEventListener('click',()=>{
     deleteDecal(selectedDecalIdx);
   });
@@ -2349,6 +2848,176 @@ function applyPreset(id){
   refreshSwatches();pushHistory();showToast(p.name+' loaded');
 }
 
+/* ============================== TOOL RAIL UI ==============================
+   The rail is the fix for "where is the paint tool". It is always in the same
+   place (top-left of the viewport), it always shows which verb is armed, and
+   the armed verb's own settings sit next to it in the options bar rather than
+   ten sections down a scrolling property panel. */
+function toolAvailable(t){
+  if(t.decorateOnly&&currentActivity!=='decorate')return false;
+  if(t.id==='decal'&&!placedDecals.length)return false; // nothing to move yet
+  return true;
+}
+function buildToolRail(){
+  const rail=document.getElementById('toolRail');
+  if(!rail)return;
+  rail.innerHTML='';
+  TOOLS.forEach(t=>{
+    const b=document.createElement('button');
+    b.className='rail-btn';
+    b.dataset.tool=t.id;
+    b.title=t.label+' ('+t.key+')';
+    b.innerHTML=t.icon+'<span class="rail-key">'+t.key+'</span>';
+    b.addEventListener('click',()=>setActiveTool(t.id));
+    rail.appendChild(b);
+  });
+  const sep=document.createElement('div');sep.className='rail-sep';sep.id='railMirrorSep';
+  rail.appendChild(sep);
+  const mir=document.createElement('button');
+  mir.className='rail-btn';mir.id='railMirror';mir.innerHTML='🪞';
+  mir.addEventListener('click',()=>toggleMirrorForTarget(paintTarget));
+  rail.appendChild(mir);
+  syncToolRail();
+}
+function syncToolRail(){
+  const rail=document.getElementById('toolRail');
+  if(!rail)return;
+  /* Fall back to orbit the moment the armed tool stops being offered — leaving
+     a hidden tool armed is how a click that should have selected a part got
+     eaten instead. Safe to assign here: setActiveTool bails BEFORE assigning
+     when a tool is unavailable, so this can never bounce between the two. */
+  if(!toolAvailable(toolDef(activeTool)))activeTool='orbit';
+  TOOLS.forEach(t=>{
+    const b=rail.querySelector('[data-tool="'+t.id+'"]');
+    if(!b)return;
+    b.classList.toggle('hidden-tool',!toolAvailable(t));
+    b.classList.toggle('active',t.id===activeTool);
+  });
+  /* Mirror is a property of the SURFACE, so it only makes sense while a
+     paintable surface is open — i.e. in Decorate. */
+  const showMirror=currentActivity==='decorate';
+  const mir=document.getElementById('railMirror'),sep=document.getElementById('railMirrorSep');
+  if(mir&&sep){
+    mir.classList.toggle('hidden-tool',!showMirror);
+    sep.style.display=showMirror?'':'none';
+    if(showMirror){
+      const on=mirrorForTarget(paintTarget);
+      mir.classList.toggle('active',on);
+      mir.title='Mirror this part: '+(on?'ON — both sides match':'OFF — sides are separate');
+      mir.style.opacity=on?'1':'.5';
+    }
+  }
+  renderToolOptions();
+  syncModeBanner();
+  renderer.domElement.style.cursor=spaceOrbit?'grab':(toolDef(activeTool).cursor||'');
+  if(!isPaintTool())hideBrushRing();
+}
+/* Arming a tool the current activity doesn't offer is a no-op rather than a
+   silent illegal state — e.g. B while designing colours. */
+function setActiveTool(id,quiet){
+  const t=toolDef(id);
+  if(!toolAvailable(t)){
+    if(!quiet&&t.decorateOnly)showToast(t.label+' lives in Decorate — switch activity first');
+    else if(!quiet&&t.id==='decal')showToast('Place a logo first, then ✥ can move it');
+    return;
+  }
+  activeTool=t.id;
+  syncToolRail();
+  if(!quiet&&t.banner)showToast(t.icon+' '+t.label+' — '+t.banner);
+}
+function renderToolOptions(){
+  const bar=document.getElementById('toolOptions');
+  if(!bar)return;
+  const t=toolDef(activeTool);
+  if(!t.paint){bar.classList.remove('open');bar.innerHTML='';return;}
+  const isErase=t.id==='erase';
+  bar.innerHTML=
+    (isErase?'':`<div class="to-group"><span>Colour</span>
+       <div class="to-swatch" id="toColorSwatch" style="background:${paintBrushColor}" title="Brush colour"></div></div>
+     <div class="to-sep"></div>`)+
+    `<div class="to-group"><span>Size</span><input type="range" id="toSize" min="6" max="140" step="2" value="${paintBrushSize}"><b id="toSizeVal">${paintBrushSize}</b></div>
+     <div class="to-sep"></div>
+     <div class="to-group"><span>${isErase?'Strength':'Opacity'}</span><input type="range" id="toOpacity" min="0.05" max="1" step="0.05" value="${paintBrushOpacity}"><b id="toOpacityVal">${Math.round(paintBrushOpacity*100)}%</b></div>
+     <div class="to-sep"></div>
+     <div class="to-group"><span>Hardness</span><input type="range" id="toHardness" min="0.05" max="1" step="0.05" value="${paintBrushHardness}"><b id="toHardnessVal">${Math.round(paintBrushHardness*100)}%</b></div>`;
+  bar.classList.add('open');
+  const sw=document.getElementById('toColorSwatch');
+  if(sw)sw.addEventListener('click',()=>openColorPicker(sw,'paint',null));
+  const size=document.getElementById('toSize');
+  size.addEventListener('input',()=>{
+    paintBrushSize=+size.value;
+    document.getElementById('toSizeVal').textContent=paintBrushSize;
+  });
+  const op=document.getElementById('toOpacity');
+  op.addEventListener('input',()=>{
+    paintBrushOpacity=+op.value;
+    document.getElementById('toOpacityVal').textContent=Math.round(paintBrushOpacity*100)+'%';
+  });
+  const hd=document.getElementById('toHardness');
+  hd.addEventListener('input',()=>{
+    paintBrushHardness=+hd.value;
+    document.getElementById('toHardnessVal').textContent=Math.round(paintBrushHardness*100)+'%';
+  });
+}
+/* The old paint mode announced itself with nothing but a crosshair cursor, and
+   the permanent viewport hint kept claiming "Drag to rotate" while dragging
+   painted. Both now say what is actually true right now. */
+function syncModeBanner(){
+  const el=document.getElementById('modeBanner');
+  const hint=document.getElementById('viewportHint');
+  const t=toolDef(activeTool);
+  if(el){
+    if(t.banner&&!spaceOrbit){
+      el.className='mode-banner open'+(t.id==='erase'?' erase':'');
+      el.innerHTML=`${t.icon} <b>${t.label.toUpperCase()}</b> <span>${t.banner} · hold Space or middle-drag to orbit · Esc to exit</span>`;
+    }else el.className='mode-banner';
+  }
+  if(hint){
+    hint.textContent=(t.id==='orbit'||spaceOrbit)
+      ?'Click any part of the player to edit it · Drag to rotate · Scroll to zoom · Double-click to reset the view'
+      :'Scroll turns the model while a tool is armed · hold Space to orbit freely';
+  }
+}
+function toggleMirrorForTarget(tgt){
+  paintMirrorByTarget[tgt]=!mirrorForTarget(tgt);
+  applyPaintMirrorUniform();
+  // this target's strokes/decals move to the other canvas and re-pack
+  redrawPaintLayer();redrawLogoLayer();
+  pushHistory();
+  syncMirrorBtnFromTarget();
+  syncToolRail();
+  showToast(mirrorForTarget(tgt)
+    ?'🪞 Mirror ON — both sides of this part match'
+    :'🪞 Mirror OFF — this part\'s sides are decorated separately');
+}
+/* Keyboard: the rail's letters, [ ] for size, Space for a held orbit, Esc out.
+   Guarded so typing a team name into a text field never arms the eraser. */
+function typingInField(){
+  const a=document.activeElement;
+  return a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.tagName==='SELECT'||a.isContentEditable);
+}
+addEventListener('keydown',e=>{
+  if(typingInField()||e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.code==='Space'&&!spaceOrbit){
+    e.preventDefault();spaceOrbit=true;syncToolRail();return;
+  }
+  if(e.key==='Escape'){setActiveTool('orbit');return;}
+  if(e.key==='['||e.key===']'){
+    const step=e.key==='['?-6:6;
+    paintBrushSize=Math.max(6,Math.min(140,paintBrushSize+step));
+    renderToolOptions();
+    showToast('Brush '+paintBrushSize);
+    return;
+  }
+  const t=TOOLS.find(x=>x.key.toLowerCase()===e.key.toLowerCase());
+  if(t)setActiveTool(t.id);
+});
+addEventListener('keyup',e=>{
+  if(e.code==='Space'&&spaceOrbit){spaceOrbit=false;syncToolRail();}
+});
+// releasing Space outside the window would otherwise leave orbit stuck on
+addEventListener('blur',()=>{if(spaceOrbit){spaceOrbit=false;syncToolRail();}});
+
 /* ============================== MISC UI ============================== */
 let toastT=null;
 function showToast(msg){
@@ -2372,7 +3041,7 @@ document.getElementById('toggleReflection').addEventListener('click',e=>{
   try{isolationOn=localStorage.getItem('ihc.isolate')!=='0';}catch(e){}
   const sync=()=>{
     b.classList.toggle('action',isolationOn);
-    b.textContent=isolationOn?'👤 Isolate part: ON':'👤 Isolate part: OFF';
+    b.textContent=isolationOn?'🔦 Focus part: ON':'🔦 Focus part: OFF';
   };
   sync();
   b.addEventListener('click',()=>{
@@ -2380,7 +3049,36 @@ document.getElementById('toggleReflection').addEventListener('click',e=>{
     try{localStorage.setItem('ihc.isolate',isolationOn?'1':'0');}catch(e){}
     sync();
     applyPartIsolation();
-    showToast(isolationOn?'Showing only the part you are editing':'Showing the whole player');
+    showToast(isolationOn?'Focus on — the rest of the skate/helmet stays visible, the rest of the kit ghosts out (all still clickable)':'Showing the whole player at full opacity');
+  });
+})();
+
+/* Solo mode toggle. Everything it hides still exists and still round-trips —
+   this only decides whether the team-rules layer is in your way. */
+(function(){
+  const b=document.getElementById('soloBtn');
+  if(!b)return;
+  const sync=()=>{
+    b.classList.toggle('action',soloMode);
+    b.textContent=soloMode?'🎨 Solo mode: ON':'🎨 Solo mode: OFF';
+    const rt=document.getElementById('roleToggle');
+    if(rt)rt.style.display=soloMode?'none':'';
+  };
+  sync();
+  b.addEventListener('click',()=>{
+    soloMode=!soloMode;
+    try{localStorage.setItem('ihc.solo',soloMode?'1':'0');}catch(e){}
+    sync();
+    /* Solo acts as the admin. Coming out of solo has to land on a real role,
+       and switchContext is the one path that reloads the right layer stacks
+       for it — the design you were editing IS the team design, so 'admin'
+       keeps editing the same data rather than silently swapping stacks. */
+    if(!activitiesAvailable().some(a=>a.id===currentActivity))currentActivity='design';
+    switchContext(ctxTeamId,ctxJerseyId,'admin');
+    buildEditorModeTabs();
+    showToast(soloMode
+      ?'🎨 Solo mode — nothing is locked, no roles, no approvals'
+      :'🛡️ Team rules on — roles, number approvals and league policies are back');
   });
 })();
 
@@ -2408,6 +3106,8 @@ function updateContextBar(){
   favBtn.classList.toggle('action',isFav);
   document.querySelectorAll('.tb-role').forEach(el=>
     el.classList.toggle('active',el.dataset.role===actingRole));
+  const rt=document.getElementById('roleToggle');
+  if(rt)rt.style.display=soloMode?'none':'';
   const nb=t.number||{};
   document.getElementById('tbName').textContent=(PKIT.name||'—')+(nb.assigned?' #'+nb.assigned:'');
   document.getElementById('tbTeam').textContent=t.name;
@@ -2442,7 +3142,7 @@ function wireContextBar(){
 
 /* ============================== BOOT ============================== */
 handleResize();
-buildEditorModeTabs();buildSidebar();
+buildEditorModeTabs();buildSidebar();buildToolRail();
 loadCharacter(()=>{
   buildMaterialManagers();
   // first-run: remember the asset's true stick colors so contexts the player
@@ -2472,6 +3172,7 @@ loadCharacter(()=>{
        appears, instead of rendering mirrored until something else happens to
        call this. */
     applyPaintMirrorUniform();
+    applySplitGhostUniform();   // same reason: no shaderRef until first render
     renderer.render(scene,camera);
   }
   tick();

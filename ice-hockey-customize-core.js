@@ -117,7 +117,18 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
     shader.uniforms.splitZone1={value:(split?split.colors[1]:zoneColors[1])};
     shader.uniforms.splitZone2={value:(split?split.colors[2]:zoneColors[2])};
     shader.uniforms.uSplitY={value:split?split.y:-999.0};
-    let extraUniforms='\nuniform vec3 splitZone0;\nuniform vec3 splitZone1;\nuniform vec3 splitZone2;\nuniform float uSplitY;\nvarying float vIhY;',extraCode='';
+    /* SPLIT-HALF GHOSTING. The two halves of a split mesh share one material,
+       so the editor cannot fade one of them with material.opacity — and the
+       clipping plane it used to isolate them with deleted the other half
+       outright, which is exactly the "editing socks hides the pants" problem
+       the skate assembly has. vIhY already tells the fragment which garment it
+       belongs to, so the fade is a per-fragment alpha instead:
+         uGhostMode  0 = off, +1 = fade the ABOVE half, -1 = fade the BELOW half
+       Defaults are a no-op, so the menu preview and the game — which never set
+       these — render exactly as before. */
+    shader.uniforms.uGhostMode={value:0.0};
+    shader.uniforms.uGhostAlpha={value:1.0};
+    let extraUniforms='\nuniform vec3 splitZone0;\nuniform vec3 splitZone1;\nuniform vec3 splitZone2;\nuniform float uSplitY;\nuniform float uGhostMode;\nuniform float uGhostAlpha;\nvarying float vIhY;',extraCode='';
     if(decals){
       shader.uniforms.logoMap={value:decals.logoMap};
       shader.uniforms.paintMap={value:decals.paintMap};
@@ -181,6 +192,8 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
           vec3 recolored = zc0*zmask.r + zc1*zmask.g + zc2*zmask.b;
           float rw = clamp(zmask.r+zmask.g+zmask.b, 0.0, 1.0);
           diffuseColor.rgb = mix( diffuseColor.rgb, recolored, rw );${extraCode}
+          if( uGhostMode >  0.5 && vIhY >= uSplitY ) diffuseColor.a *= uGhostAlpha;
+          if( uGhostMode < -0.5 && vIhY <  uSplitY ) diffuseColor.a *= uGhostAlpha;
         }`);
     material.userData.shaderRef=shader;
   };
@@ -245,6 +258,31 @@ const IHC_PIECES=[
   {id:'neck',  label:'Skin',        icon:'🧑',mesh:'Cube',     zones:1,zoneLabels:['Skin'],personal:true},
 ];
 function ihcPiece(id){return IHC_PIECES.find(p=>p.id===id);}
+/* ASSEMBLIES: pieces that are separately EDITABLE but are physically one item
+   of gear. A skate is a boot plus its laces plus its blade steel — you cannot
+   judge a lace colour against a boot that has been ghosted out from under it,
+   and the same goes for blade steel against the holder it bolts to, or a cage
+   against the helmet it hangs off. Focus therefore has three tiers, not two:
+   the edited piece is solid, its assembly siblings stay clearly readable, and
+   only genuinely unrelated gear drops to the faint ghost.
+   This is NOT the same grouping as IHC_TARGET_MESHES: paint targets are about
+   which canvas a stroke lands on (laces are in no target at all, because they
+   have no paint surface), whereas an assembly is about what has to stay on
+   screen to make the edit judgeable. Laces belong to a skate either way. */
+const IHC_ASSEMBLIES=[
+  {id:'skate',  label:'Skates',    pieces:['skates','laces','blades']},
+  {id:'head',   label:'Head gear', pieces:['helmet','cage']},
+  {id:'legwear',label:'Legwear',   pieces:['pants','socks']},
+];
+/* The sibling piece ids for a piece, INCLUDING itself; [id] when it stands
+   alone (jersey, gloves, skin). */
+function ihcAssemblyPieces(pid){
+  const a=IHC_ASSEMBLIES.find(x=>x.pieces.indexOf(pid)>=0);
+  return a?a.pieces.slice():[pid];
+}
+function ihcAssemblyOf(pid){
+  return IHC_ASSEMBLIES.find(x=>x.pieces.indexOf(pid)>=0)||null;
+}
 /* PAINT TARGETS: the surfaces paint/decals are tagged with. Coarser than
    pieces — helmet+cage are one paintable shell, skates+blades one boot — and
    they are what mirror is set per, because a stroke stores its target id.
@@ -577,15 +615,62 @@ function ihcDrawNameNumber(ctx,o){
    than a small fraction of the atlas is treated as a seam crossing and the
    point is stamped in isolation instead of connected. */
 const SEAM_JUMP_UV=0.08;
-function stampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
+/* `opts` is optional and every field defaults to the original behaviour, so a
+   stroke saved before erase/hardness existed replays byte-identically:
+     mode     'paint' (default) | 'erase' — erase composites destination-out,
+              which rubs paint off the canvas rather than painting background
+              colour over it, so it works over any colour underneath.
+     hardness 1 (default) = the hard round brush this always had. Below 1 the
+              dab is a radial gradient falling to transparent at the rim, and
+              a segment becomes a run of overlapping dabs instead of one
+              stroked line — a gradient cannot be carried along a lineTo. */
+function stampSegment(ctx,x,y,px,py,size,color,opacity,seamJump,opts){
+  opts=opts||{};
+  const hardness=opts.hardness===undefined?1:Math.max(0.05,Math.min(1,opts.hardness));
+  ctx.save();
   ctx.globalAlpha=opacity;
-  ctx.fillStyle=color;ctx.strokeStyle=color;
-  ctx.lineWidth=size;ctx.lineCap='round';ctx.lineJoin='round';
-  if(px!=null&&!seamJump){
-    ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();
-  }else{
-    ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();
+  if(opts.mode==='erase')ctx.globalCompositeOperation='destination-out';
+  if(hardness>=0.999){
+    ctx.fillStyle=color;ctx.strokeStyle=color;
+    ctx.lineWidth=size;ctx.lineCap='round';ctx.lineJoin='round';
+    if(px!=null&&!seamJump){
+      ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();
+    }else{
+      ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();return;
   }
+  const r=size/2;
+  /* Overlapping soft dabs stack their alpha, so a slow drag would darken far
+     past the requested opacity. Dabs are drawn at a fraction of it and spaced
+     a fixed share of the radius apart, which keeps a fast and a slow drag
+     looking the same. */
+  ctx.globalAlpha=opacity*0.34;
+  const dab=(cx,cy)=>{
+    const g=ctx.createRadialGradient(cx,cy,r*hardness,cx,cy,r);
+    // destination-out only reads ALPHA, so the colour of an erase dab is
+    // irrelevant — the ramp is what does the work either way
+    g.addColorStop(0,color);
+    g.addColorStop(1,ihcFadeToTransparent(color));
+    ctx.fillStyle=g;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
+  };
+  if(px==null||seamJump){dab(x,y);ctx.restore();return;}
+  const dx=x-px,dy=y-py,dist=Math.hypot(dx,dy);
+  const step=Math.max(1,r*0.22);
+  const n=Math.max(1,Math.ceil(dist/step));
+  for(let i=1;i<=n;i++)dab(px+dx*i/n,py+dy*i/n);
+  ctx.restore();
+}
+/* '#rrggbb' -> 'rgba(r,g,b,0)'. Gradient stops must be the SAME colour with
+   alpha 0 at the rim: stopping at 'transparent' is black-transparent in some
+   engines and greys the edge of every soft dab. */
+function ihcFadeToTransparent(hex){
+  const h=(hex||'#ffffff').replace('#','');
+  const n=h.length===3?h.split('').map(c=>c+c).join(''):h;
+  const v=parseInt(n,16);
+  if(isNaN(v))return'rgba(255,255,255,0)';
+  return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+',0)';
 }
 /* Where a UV point actually lands on the paint canvas. Mirror ON (default):
    raw UV, unchanged — both sides share the same canvas region, which is
@@ -619,12 +704,49 @@ function ihcReplayStrokes(ctxs,strokes,mirrorFor){
       const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV)||
         (!mirrorOn&&prev&&prev.side!==p.side);
       stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-        s.size,s.color,s.opacity,seamJump);
+        s.size,s.color,s.opacity,seamJump,{mode:s.mode,hardness:s.hardness});
       prevXY=xy;prev=p;
     });
   });
   if(C.raw)C.raw.globalAlpha=1;
   if(C.split)C.split.globalAlpha=1;
+}
+/* Replays SEVERAL ownership stacks, bottom-first, keeping each one's erase
+   strokes inside its own stack.
+
+   Replaying them one after another into a single context is only correct while
+   every stroke is additive. An erase stroke composites destination-out against
+   whatever is already on the canvas, so a personal-accent erase would rub out
+   the team stroke it happens to sit over — the player would be destroying team
+   design they may not even be allowed to recolour, and it re-happens on every
+   reload because the erase stroke replays identically forever.
+
+   Each stack is therefore rendered into its own scratch canvas and the results
+   are flattened with drawImage, which is opaque to the erase inside it.
+   `stacks` is an array of stroke lists, bottom first. Single-stack callers
+   should keep using ihcReplayStrokes — this only earns its two extra canvases
+   when there is genuinely a second owner to protect. */
+function ihcReplayStackedStrokes(ctxs,stacks,mirrorFor){
+  const C=ihcCtxPair(ctxs);
+  const live=(stacks||[]).filter(s=>s&&s.length);
+  if(live.length<2){
+    if(live.length)ihcReplayStrokes(ctxs,live[0],mirrorFor);
+    return;
+  }
+  const size=(C.raw&&C.raw.canvas?C.raw.canvas.width:0)||DECAL_SIZE;
+  const scratch=k=>{
+    const c=document.createElement('canvas');c.width=c.height=size;
+    return{canvas:c,ctx:c.getContext('2d')};
+  };
+  const sr=scratch(),ss=scratch();
+  live.forEach(list=>{
+    sr.ctx.clearRect(0,0,size,size);ss.ctx.clearRect(0,0,size,size);
+    ihcReplayStrokes({raw:sr.ctx,split:ss.ctx},list,mirrorFor);
+    if(C.raw){C.raw.globalAlpha=1;C.raw.globalCompositeOperation='source-over';
+      C.raw.drawImage(sr.canvas,0,0);}
+    if(C.split){C.split.globalAlpha=1;C.split.globalCompositeOperation='source-over';
+      C.split.drawImage(ss.canvas,0,0);}
+  });
 }
 /* Same idea for placed logo/shape decals; logoLib entries need a loaded .img. */
 function ihcReplayDecals(ctxs,decals,logoLib,mirrorFor){

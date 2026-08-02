@@ -102,8 +102,10 @@ function drawPaint(){
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
   paintCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
   const pc={raw:paintCtx,split:paintCtxS};
-  ihcReplayStrokes(pc,jersey.design.paintStrokes,mirrorFor); // team design
-  ihcReplayStrokes(pc,kctx.accStrokes,mirrorFor);            // personal accents on top
+  /* Stacked, not sequential: replaying both into one context lets a personal
+     ERASE stroke rub out the team stroke underneath it, which would make the
+     menu preview disagree with the editor. Bottom first. */
+  ihcReplayStackedStrokes(pc,[jersey.design.paintStrokes,kctx.accStrokes],mirrorFor);
   syncTex(paintCtx,paintCanvas,paintTex);
   syncTex(paintCtxS,paintCanvasS,paintTexS);
 }

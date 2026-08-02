@@ -53,6 +53,8 @@ button{font-family:inherit;}
 .editor-mode-tab{flex:1;text-align:center;padding:10px 6px;border-radius:8px;cursor:pointer;
   font-size:14px;font-weight:700;color:var(--text-dim);transition:all .15s var(--ease);}
 .editor-mode-tab .em-icon{display:block;font-size:18px;margin-bottom:2px;}
+.editor-mode-tab .em-hint{display:block;font-size:10.5px;font-weight:500;opacity:.7;margin-top:1px;
+  letter-spacing:.01em;}
 .editor-mode-tab.active{background:linear-gradient(135deg,var(--accent),#5a3fd6);color:#fff;
   box-shadow:0 4px 14px -4px var(--accent-glow);}
 .sb-heading{font-size:12.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--text-faint);
@@ -100,6 +102,43 @@ button{font-family:inherit;}
   align-items:center;justify-content:center;transition:all .15s var(--ease);}
 .tool-btn:hover{color:#fff;border-color:var(--line-lit);}
 .tool-btn.active{color:#fff;background:rgba(124,92,255,.28);border-color:var(--accent);}
+
+/* ===== TOOL RAIL (persistent verbs, Forza-style) =====
+   Mode used to be a button buried ~10 sections down the right panel, which is
+   why "where is the paint tool" was a fair question. It is a permanent rail
+   now: the active verb is always on screen, always in the same place. */
+.tool-rail{position:absolute;left:16px;top:16px;z-index:12;display:flex;flex-direction:column;gap:6px;
+  background:rgba(14,16,23,.78);backdrop-filter:blur(8px);border:1px solid var(--line);
+  border-radius:12px;padding:6px;}
+.rail-btn{width:42px;height:42px;border-radius:9px;background:transparent;border:1px solid transparent;
+  color:var(--text-dim);cursor:pointer;font-size:19px;display:flex;align-items:center;justify-content:center;
+  transition:all .13s var(--ease);position:relative;}
+.rail-btn:hover{color:#fff;background:var(--bg3);}
+.rail-btn.active{color:#fff;background:linear-gradient(135deg,var(--accent),#5a3fd6);
+  box-shadow:0 4px 14px -4px var(--accent-glow);}
+.rail-btn .rail-key{position:absolute;right:3px;bottom:1px;font-size:9px;font-weight:800;opacity:.5;letter-spacing:0;}
+.rail-btn.hidden-tool{display:none;}
+.rail-sep{height:1px;background:var(--line);margin:2px 4px;}
+
+/* ===== TOOL OPTIONS BAR (the active tool's own settings) ===== */
+.tool-options{position:absolute;left:70px;top:16px;z-index:11;display:none;align-items:center;gap:14px;
+  background:rgba(14,16,23,.82);backdrop-filter:blur(8px);border:1px solid var(--line);
+  border-radius:11px;padding:9px 14px;max-width:calc(100% - 100px);flex-wrap:wrap;}
+.tool-options.open{display:flex;}
+.to-group{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-dim);white-space:nowrap;}
+.to-group b{color:var(--text);font-weight:700;min-width:34px;display:inline-block;text-align:right;}
+.to-group input[type=range]{width:96px;}
+.to-swatch{width:26px;height:26px;border-radius:7px;border:2px solid rgba(255,255,255,.18);cursor:pointer;flex:none;}
+.to-sep{width:1px;height:22px;background:var(--line);}
+
+/* ===== MODE BANNER (you are never guessing which mode you are in) ===== */
+.mode-banner{position:absolute;left:50%;top:16px;transform:translateX(-50%);z-index:11;display:none;
+  align-items:center;gap:10px;background:rgba(124,92,255,.22);border:1px solid var(--accent);
+  backdrop-filter:blur(8px);border-radius:999px;padding:7px 16px;font-size:12.5px;font-weight:600;
+  color:#fff;white-space:nowrap;pointer-events:none;}
+.mode-banner.open{display:flex;}
+.mode-banner.erase{background:rgba(255,180,84,.2);border-color:var(--warn);}
+.mode-banner span{color:rgba(255,255,255,.72);font-weight:500;}
 
 /* ===== RIGHT PANEL ===== */
 #rightpanel{background:var(--bg1);border-left:1px solid var(--line);overflow-y:auto;padding:18px 18px 24px;}
@@ -281,7 +320,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
       <div class="tb-role active" data-role="player">🧑 Player</div>
       <div class="tb-role" data-role="admin">🛡️ Team Admin</div>
     </div>
-    <div class="tb-pill" id="isoBtn" role="button" tabindex="0" title="Show only the part you are editing, or the whole player">👤 Isolate part: ON</div>
+    <div class="tb-pill action" id="soloBtn" role="button" tabindex="0" title="Solo mode: nothing is locked and the team-rules layer is out of the way. Turn it off to get the Player/Team Admin roles, number approvals and league policies back.">🎨 Solo mode: ON</div>
+    <div class="tb-pill" id="isoBtn" role="button" tabindex="0" title="Focus makes the part you are editing solid, keeps the rest of the same piece of gear (boot + laces + blade, helmet + cage, pants + socks) semi-transparent so you can still judge it in context, and ghosts everything else — every part stays clickable">🔦 Focus part: ON</div>
     <div class="tb-pill" id="fsBtn" data-fullscreen-toggle role="button" tabindex="0" aria-pressed="false" title="Enter fullscreen (F11)"><span data-fs-icon>⛶</span> <span data-fs-label>FULLSCREEN</span></div>
     <div class="tb-pill action" id="saveExitBtn" title="Save is already continuous — this just confirms and takes you back">✓ Save &amp; Exit</div>
   </div>
@@ -294,13 +334,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
       <div class="sb-heading" style="margin-top:14px;">Coming soon</div>
       <div class="sb-item" style="opacity:.45;cursor:default;"><div class="sb-icon">🥅</div>
         <div class="sb-label">Goalie Gear</div><div class="sb-chip">SOON</div></div>
-      <div class="sb-item" style="opacity:.45;cursor:default;"><div class="sb-icon">📐</div>
-        <div class="sb-label">Logo / Sponsor Decals</div><div class="sb-chip">SOON</div></div>
     </div>
 
     <div id="viewport">
       <div id="loadingOverlay"><div class="spinner"></div><span>LOADING GEAR…</span></div>
-      <div class="viewport-hint">Click a part to edit it · Drag to rotate · Scroll to zoom · Double-click to reset</div>
+
+      <div class="tool-rail" id="toolRail"></div>
+      <div class="tool-options" id="toolOptions"></div>
+      <div class="mode-banner" id="modeBanner"></div>
+
+      <div class="viewport-hint" id="viewportHint">Click any part of the player to edit it · Drag to rotate · Scroll to zoom · Double-click to reset the view</div>
       <div class="viewport-toolbar">
         <div class="tool-btn" id="toggleReflection" title="Reflection floor">▽</div>
       </div>
@@ -309,15 +352,19 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
     <div id="rightpanel"></div>
   </div>
 
+  <!-- Real shortcuts only. This bar used to advertise A/B/X/Y/LB/RB/LT/RT — the
+       editor has never had a single line of gamepad code, so every one of those
+       hints was fiction. -->
   <div id="bottombar">
-    <div class="hint"><b>A</b> Select</div>
-    <div class="hint"><b>B</b> Back</div>
-    <div class="hint"><b>X</b> Randomize</div>
-    <div class="hint"><b>Y</b> Preview</div>
-    <div class="hint"><b>LB</b> Prev category</div>
-    <div class="hint"><b>RB</b> Next category</div>
-    <div class="hint"><b>LT</b> Zoom</div>
-    <div class="hint"><b>RT</b> Rotate</div>
+    <div class="hint"><b>Click</b> Select part</div>
+    <div class="hint"><b>V</b> Orbit</div>
+    <div class="hint"><b>B</b> Brush</div>
+    <div class="hint"><b>E</b> Eraser</div>
+    <div class="hint"><b>M</b> Move decal</div>
+    <div class="hint"><b>I</b> Pick color</div>
+    <div class="hint"><b>[ ]</b> Brush size</div>
+    <div class="hint"><b>Space</b> Hold to orbit</div>
+    <div class="hint"><b>Esc</b> Back to orbit</div>
     <div class="hint"><b>Ctrl+Z</b> Undo</div>
     <div class="hint"><b>Ctrl+Y</b> Redo</div>
   </div>
