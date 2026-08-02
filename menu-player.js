@@ -77,11 +77,19 @@ function makeCanvas(){
 const nnCanvas=makeCanvas(),nnCtx=nnCanvas.getContext('2d'),nnTex=makeDecalTex();
 const logoCanvas=makeCanvas(),logoCtx=logoCanvas.getContext('2d'),logoTex=makeDecalTex();
 const paintCanvas=makeCanvas(),paintCtx=paintCanvas.getContext('2d'),paintTex=makeDecalTex();
+/* second pair for the UNMIRRORED convention — mirrored and unmirrored paint
+   overwrite each other on a shared canvas (see the editor's note), and mirror
+   is per part now, so a kit can need both at once. */
+const logoCanvasS=makeCanvas(),logoCtxS=logoCanvasS.getContext('2d'),logoTexS=makeDecalTex();
+const paintCanvasS=makeCanvas(),paintCtxS=paintCanvasS.getContext('2d'),paintTexS=makeDecalTex();
 function syncTex(ctx,canvas,tex){
   tex.image.data.set(ctx.getImageData(0,0,canvas.width,canvas.height).data);
   tex.needsUpdate=true;
 }
-const mirrorOn=jersey.design.paintMirrorOn!==false;
+/* resolved through the shared helper so the preview, the editor and the game
+   can never disagree about which side a stroke lands on */
+const mirrorMap=ihcMirrorMap(jersey.design);
+const mirrorFor=t=>!!mirrorMap[t];
 
 function drawPlate(){
   ihcDrawNameNumber(nnCtx,{
@@ -92,17 +100,23 @@ function drawPlate(){
 }
 function drawPaint(){
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  ihcReplayStrokes(paintCtx,jersey.design.paintStrokes,mirrorOn); // team design
-  ihcReplayStrokes(paintCtx,kctx.accStrokes,mirrorOn);            // personal accents on top
+  paintCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  const pc={raw:paintCtx,split:paintCtxS};
+  ihcReplayStrokes(pc,jersey.design.paintStrokes,mirrorFor); // team design
+  ihcReplayStrokes(pc,kctx.accStrokes,mirrorFor);            // personal accents on top
   syncTex(paintCtx,paintCanvas,paintTex);
+  syncTex(paintCtxS,paintCanvasS,paintTexS);
 }
 /* logo images decode async — redraw the layer as each finishes */
 let logoLib=[];
 function drawLogos(){
   logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  ihcReplayDecals(logoCtx,jersey.design.decals,logoLib,mirrorOn);
-  ihcReplayDecals(logoCtx,kctx.accDecals,logoLib,mirrorOn);
+  logoCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  const lc={raw:logoCtx,split:logoCtxS};
+  ihcReplayDecals(lc,jersey.design.decals,logoLib,mirrorFor);
+  ihcReplayDecals(lc,kctx.accDecals,logoLib,mirrorFor);
   syncTex(logoCtx,logoCanvas,logoTex);
+  syncTex(logoCtxS,logoCanvasS,logoTexS);
 }
 try{logoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){logoLib=[];}
 logoLib.forEach(l=>{l.img=new Image();l.img.onload=drawLogos;l.img.src=l.dataURL;});
@@ -159,7 +173,8 @@ function poseArmsDown(){
 function applyLoadout(){
   // exact same per-piece pipeline the Locker Room builds the preview with —
   // shared in core precisely so the menu and the editor can't drift apart
-  const pieces=ihcBuildPieceKit(visual,{nameNumberMap:nnTex,logoMap:logoTex,paintMap:paintTex});
+  const pieces=ihcBuildPieceKit(visual,{nameNumberMap:nnTex,logoMap:logoTex,paintMap:paintTex,
+    logoMapSplit:logoTexS,paintMapSplit:paintTexS});
   const pieceColors=lo.pieces||ihtPiecesFromBody(lo.body);
   Object.keys(pieceColors).forEach(id=>{
     const p=pieces[id];
@@ -183,17 +198,25 @@ function applyLoadout(){
 
   drawPlate();drawPaint();drawLogos();
 
-  // the uMirrorPaint uniform only exists once the program compiles — poll
-  // the shaderRef the recolor pipeline stashes and set it as soon as it's up
-  if(!mirrorOn){
-    const mats=[...new Set(Object.keys(pieces).map(id=>pieces[id].material).filter(Boolean))];
+  /* the uMirrorPaint uniform only exists once the program compiles — poll the
+     shaderRef the recolor pipeline stashes and set it as soon as it's up.
+     Per PIECE now, from that piece's own paint target, so a kit that mirrors
+     the helmet but not the pants previews exactly as the editor drew it.
+     Runs unconditionally: with per-part mirror there is no single "all off"
+     case to shortcut on any more. */
+  {
+    const ids=Object.keys(pieces).filter(id=>pieces[id]&&pieces[id].material);
     const setMirror=()=>{
       let n=0;
-      mats.forEach(m=>{
-        const ref=m.userData.shaderRef;
-        if(ref&&ref.uniforms.uMirrorPaint){ref.uniforms.uMirrorPaint.value=0;n++;}
+      ids.forEach(id=>{
+        const ref=pieces[id].material.userData.shaderRef;
+        if(ref&&ref.uniforms.uMirrorPaint){
+          const t=ihcTargetForPieceId(id);
+          ref.uniforms.uMirrorPaint.value=(t&&mirrorFor(t))?1:0;
+          n++;
+        }
       });
-      return n===mats.length;
+      return n===ids.length;
     };
     if(!setMirror()){
       let tries=0;

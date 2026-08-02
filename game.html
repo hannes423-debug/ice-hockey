@@ -11339,6 +11339,9 @@ let ihBodyColors=null,ihNeckColors=null,ihStickShaftBlade=null,ihGripTapeMat=nul
 let ihPlayerPieces=null;
 let ihNameCanvas,ihNameCtx,ihNameTexture;
 let ihPaintCanvas,ihPaintCtx,ihPaintTexture,ihLogoCanvas,ihLogoCtx,ihLogoTexture;
+/* second pair holding the UNMIRRORED (half-packed) convention — see the note
+   on the shader above for why it cannot share the mirrored canvas */
+let ihPaintCanvasS,ihPaintCtxS,ihPaintTextureS,ihLogoCanvasS,ihLogoCtxS,ihLogoTextureS;
 
 function ihGetImageDataFromTexture(tex){
   const img=tex.image;
@@ -11492,14 +11495,20 @@ function ihInstallRecolorShader(material,maskTexture,zoneColors,decals,split){
       if(decals.paintMap){
         shader.uniforms.logoMap={value:decals.logoMap};
         shader.uniforms.paintMap={value:decals.paintMap};
+        /* Mirror is PER PART now, so mirrored and unmirrored paint have to
+           coexist — and they cannot share one canvas: the unmirrored packing
+           lands on top of other pieces' raw islands (25 of 72 ordered piece
+           pairs overlap at texel level). Each convention gets its own canvas
+           and every piece samples the one its own uMirrorPaint selects. */
+        shader.uniforms.logoMapSplit={value:decals.logoMapSplit||decals.logoMap};
+        shader.uniforms.paintMapSplit={value:decals.paintMapSplit||decals.paintMap};
         shader.uniforms.uMirrorPaint={value:decals.mirror===false?0.0:1.0};
-        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
+        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nuniform sampler2D logoMapSplit;\nuniform sampler2D paintMapSplit;\nuniform float uMirrorPaint;\nvarying float vIhSide;';
         extraCode+=`
-          vec2 pUv = vUv;
-          if(uMirrorPaint<0.5){ pUv.x = pUv.x*0.5+(vIhSide>=0.0?0.5:0.0); }
-          vec4 lg = texture2D( logoMap, pUv );
+          vec2 sUv = vec2( vUv.x*0.5 + (vIhSide>=0.0?0.5:0.0), vUv.y );
+          vec4 lg = mix( texture2D(logoMapSplit,sUv), texture2D(logoMap,vUv), uMirrorPaint );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, lg.rgb, lg.a );
-          vec4 pt = texture2D( paintMap, pUv );
+          vec4 pt = mix( texture2D(paintMapSplit,sUv), texture2D(paintMap,vUv), uMirrorPaint );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, pt.rgb, pt.a );`;
       }
     }
@@ -11549,7 +11558,8 @@ function ihBuildPieceKit(visual,decals){
     const belowDef=defs.find(d=>d.splitSide==='below');
     const below=belowDef?mk():null;
     if(below)out[belowDef.id]=below;
-    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap,mirror:decals.mirror}):null;
+    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap,
+      logoMapSplit:decals.logoMapSplit,paintMapSplit:decals.paintMapSplit,mirror:decals.mirror}):null;
     ihInstallRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
       below?{y:IH_SPLIT_Y,colors:below.colors}:null);
   });
@@ -11797,9 +11807,18 @@ function ihSetupLockerRoomMaterials(){
   ihLogoCanvas.width=ihLogoCanvas.height=IH_DECAL_SIZE;
   ihLogoCtx=ihLogoCanvas.getContext('2d');
   ihLogoTexture=ihMakeDecalTexture();
+  ihPaintCanvasS=document.createElement('canvas');
+  ihPaintCanvasS.width=ihPaintCanvasS.height=IH_DECAL_SIZE;
+  ihPaintCtxS=ihPaintCanvasS.getContext('2d');
+  ihPaintTextureS=ihMakeDecalTexture();
+  ihLogoCanvasS=document.createElement('canvas');
+  ihLogoCanvasS.width=ihLogoCanvasS.height=IH_DECAL_SIZE;
+  ihLogoCtxS=ihLogoCanvasS.getContext('2d');
+  ihLogoTextureS=ihMakeDecalTexture();
 
   ihPlayerPieces=ihBuildPieceKit(player.visual,
-    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture});
+    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture,
+     logoMapSplit:ihLogoTextureS,paintMapSplit:ihPaintTextureS});
   if(!ihPlayerPieces)return false;
   ihBodyColors=ihPlayerPieces.jersey.colors;      // the name/number plate reads these
   ihNeckColors=ihPlayerPieces.neck.colors;
@@ -11827,6 +11846,30 @@ function ihMakeDecalTexture(){
    3D-adjacent points land far apart in texture space, and connecting them
    would paint a streak across unrelated parts of the model. */
 const IH_SEAM_JUMP_UV=0.08;
+/* Hand-synced with core's IHC_TARGET_MESHES. Mirror is stored per PAINT TARGET
+   (the surface a stroke is tagged with), and pieces map onto targets by mesh. */
+const IH_TARGET_MESHES={
+  jersey:['Cube','Cube001'],pants:['Cube002'],gloves:['Cube003'],
+  helmet:['Cube004','Cube005'],skates:['Cube006','Cube007'],
+};
+const IH_TARGET_IDS=Object.keys(IH_TARGET_MESHES);
+function ihTargetForPieceId(pid){
+  const d=IH_PIECES.find(p=>p.id===pid);
+  if(!d)return null;
+  return IH_TARGET_IDS.find(t=>IH_TARGET_MESHES[t].indexOf(d.mesh)>=0)||null;
+}
+/* Same resolution core's ihcMirrorMap does: prefer the per-target map, fall
+   back to the old design-wide boolean, default mirrored when neither exists. */
+function ihMirrorMap(paint){
+  const out={},legacy=!paint||paint.mirror!==false;
+  IH_TARGET_IDS.forEach(t=>{out[t]=legacy;});
+  if(paint&&paint.mirrorByTarget){
+    IH_TARGET_IDS.forEach(t=>{
+      if(typeof paint.mirrorByTarget[t]==='boolean')out[t]=paint.mirrorByTarget[t];
+    });
+  }
+  return out;
+}
 function ihPaintCanvasXY(uv,side,mirrorOn){
   if(mirrorOn)return{x:uv.x*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
   return{x:(uv.x*0.5+(side>=0?0.5:0))*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
@@ -11838,9 +11881,14 @@ function ihStampSegment(ctx,x,y,px,py,size,color,opacity,seamJump){
   if(px!=null&&!seamJump){ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x,y);ctx.stroke();}
   else{ctx.beginPath();ctx.arc(x,y,size/2,0,Math.PI*2);ctx.fill();}
 }
-function ihReplayStrokes(ctx,strokes,mirrorOn){
+/* ctxs={raw,split}; mirrorFor=fn(targetId)->bool. A stroke goes to the canvas
+   its own target's mirror setting selects, packed to match. */
+function ihReplayStrokes(ctxs,strokes,mirrorFor){
   (strokes||[]).forEach(s=>{
     if(s.visible===false||!s.points)return;
+    const mirrorOn=mirrorFor(s.target);
+    const ctx=mirrorOn?ctxs.raw:ctxs.split;
+    if(!ctx)return;
     let prevXY=null,prev=null;
     s.points.forEach(p=>{
       const xy=ihPaintCanvasXY(p,p.side,mirrorOn);
@@ -11851,13 +11899,17 @@ function ihReplayStrokes(ctx,strokes,mirrorOn){
       prevXY=xy;prev=p;
     });
   });
-  ctx.globalAlpha=1;
+  if(ctxs.raw)ctxs.raw.globalAlpha=1;
+  if(ctxs.split)ctxs.split.globalAlpha=1;
 }
-function ihReplayDecals(ctx,decals,logoLib,mirrorOn){
+function ihReplayDecals(ctxs,decals,logoLib,mirrorFor){
   (decals||[]).forEach(d=>{
     if(d.visible===false)return;
     const lib=(logoLib||[]).find(l=>l.id===d.logoId);
     if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
+    const mirrorOn=mirrorFor(d.target);
+    const ctx=mirrorOn?ctxs.raw:ctxs.split;
+    if(!ctx)return;
     const xy=ihPaintCanvasXY({x:d.u,y:d.v},d.side,mirrorOn);
     const size=IH_DECAL_SIZE*d.scale;
     ctx.save();
@@ -11877,14 +11929,18 @@ let ihLogoLib=null,ihLastPaint=null;
 function ihApplyPaintLayers(paint){
   if(!ihPaintCtx||!paint)return;
   ihLastPaint=paint;
-  const mirror=paint.mirror!==false;
-  // the mirror convention has to match what the strokes were packed with —
-  // same single global uniform the editor uses (see its paintCanvasXY note)
-  ihSetMirrorUniform(mirror);
+  // the packing has to match what each stroke was drawn with — resolved per
+  // paint target, exactly as the editor and the menu preview resolve it
+  const mirrorMap=ihMirrorMap(paint);
+  const mirrorFor=t=>!!mirrorMap[t];
+  ihSetMirrorUniformWhenReady(mirrorFor);
   ihPaintCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  ihReplayStrokes(ihPaintCtx,paint.strokes,mirror);     // team design
-  ihReplayStrokes(ihPaintCtx,paint.accStrokes,mirror);  // personal accents on top
+  ihPaintCtxS.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  const pc={raw:ihPaintCtx,split:ihPaintCtxS};
+  ihReplayStrokes(pc,paint.strokes,mirrorFor);     // team design
+  ihReplayStrokes(pc,paint.accStrokes,mirrorFor);  // personal accents on top
   ihSyncCanvasToTexture(ihPaintCtx,ihPaintTexture);
+  ihSyncCanvasToTexture(ihPaintCtxS,ihPaintTextureS);
   if(ihLogoLib===null){
     try{ihLogoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){ihLogoLib=[];}
     ihLogoLib.forEach(l=>{l.img=new Image();l.img.onload=()=>ihRedrawLogoLayer();l.img.src=l.dataURL;});
@@ -11893,22 +11949,43 @@ function ihApplyPaintLayers(paint){
 }
 function ihRedrawLogoLayer(){
   if(!ihLogoCtx||!ihLastPaint)return;
-  const mirror=ihLastPaint.mirror!==false;
+  const mirrorMap=ihMirrorMap(ihLastPaint);
+  const mirrorFor=t=>!!mirrorMap[t];
   ihLogoCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  ihReplayDecals(ihLogoCtx,ihLastPaint.decals,ihLogoLib,mirror);
-  ihReplayDecals(ihLogoCtx,ihLastPaint.accDecals,ihLogoLib,mirror);
+  ihLogoCtxS.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  const lc={raw:ihLogoCtx,split:ihLogoCtxS};
+  ihReplayDecals(lc,ihLastPaint.decals,ihLogoLib,mirrorFor);
+  ihReplayDecals(lc,ihLastPaint.accDecals,ihLogoLib,mirrorFor);
   ihSyncCanvasToTexture(ihLogoCtx,ihLogoTexture);
+  ihSyncCanvasToTexture(ihLogoCtxS,ihLogoTextureS);
 }
-function ihSetMirrorUniform(mirrorOn){
-  if(!ihPlayerPieces)return;
-  const seen=new Set();
-  Object.keys(ihPlayerPieces).forEach(id=>{
-    const mat=ihPlayerPieces[id].material;
-    if(!mat||seen.has(mat.uuid))return;
-    seen.add(mat.uuid);
-    const ref=mat.userData.ihShaderRef;
-    if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=mirrorOn?1:0;
+/* Per PIECE, from that piece's own paint target. No material de-duping here:
+   pieces that share a mesh (pants/socks, helmet/cage) also share a target and
+   therefore agree, but two pieces on the SAME material with different targets
+   must each get their own value written rather than the first one winning. */
+function ihSetMirrorUniform(mirrorFor){
+  if(!ihPlayerPieces)return true;
+  const ids=Object.keys(ihPlayerPieces).filter(id=>ihPlayerPieces[id].material);
+  let n=0;
+  ids.forEach(id=>{
+    const ref=ihPlayerPieces[id].material.userData.ihShaderRef;
+    if(!ref||!ref.uniforms.uMirrorPaint)return;
+    const t=ihTargetForPieceId(id);
+    ref.uniforms.uMirrorPaint.value=(t&&mirrorFor(t))?1:0;
+    n++;
   });
+  return n===ids.length;
+}
+/* A material's shaderRef only exists once it has COMPILED, which happens on its
+   first render — and the loadout is applied before that. Until the uniform is
+   written the shader falls back to its own default (mirrored), so an unmirrored
+   part would render mirrored on arrival. Retry until every piece has taken it. */
+function ihSetMirrorUniformWhenReady(mirrorFor){
+  if(ihSetMirrorUniform(mirrorFor))return;
+  let tries=0;
+  const iv=setInterval(()=>{
+    if(ihSetMirrorUniform(mirrorFor)||++tries>120)clearInterval(iv);
+  },50);
 }
 /* The stick is its own GLB with its own texture, so it keeps the simple
    whole-texture clustering the body used to use (no UV-island split needed —

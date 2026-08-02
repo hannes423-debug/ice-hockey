@@ -307,6 +307,12 @@ function loadCharacter(cb){
 let nameNumberCanvas,nameNumberCtx,nameNumberTexture;
 let logoCanvas,logoCtx,logoTexture;
 let paintCanvas,paintCtx,paintTexture;
+/* The unmirrored convention packs the atlas into left/right halves, which lands
+   on top of where OTHER pieces' raw islands live — 25 of 72 ordered piece pairs
+   overlap at texel level. So it gets its own canvas rather than sharing. A
+   stroke is only ever on one of the two, chosen by its target's mirror flag. */
+let logoCanvasS,logoCtxS,logoTextureS;
+let paintCanvasS,paintCtxS,paintTextureS;
 let jerseyName='',jerseyNumber='';
 /* CanvasTexture custom samplers (nameNumberMap/paintMap) silently failed to
    ever reach the GPU in this material's onBeforeCompile-patched shader —
@@ -341,6 +347,16 @@ function setupDecalCanvases(){
   paintCanvas.width=paintCanvas.height=DECAL_SIZE;
   paintCtx=paintCanvas.getContext('2d');
   paintTexture=makeDecalDataTexture();
+
+  logoCanvasS=document.createElement('canvas');
+  logoCanvasS.width=logoCanvasS.height=DECAL_SIZE;
+  logoCtxS=logoCanvasS.getContext('2d');
+  logoTextureS=makeDecalDataTexture();
+
+  paintCanvasS=document.createElement('canvas');
+  paintCanvasS.width=paintCanvasS.height=DECAL_SIZE;
+  paintCtxS=paintCanvasS.getContext('2d');
+  paintTextureS=makeDecalDataTexture();
 }
 let jerseyFont='Arial';
 function setJerseyFont(font){
@@ -417,7 +433,11 @@ function saveToStore(){
     j.design.font=jerseyFont;
     j.design.paintStrokes=paintStrokes;
     j.design.decals=placedDecals;
-    j.design.paintMirrorOn=paintMirrorOn;
+    /* keep the legacy design-wide flag in step for older readers: true only
+       when EVERY target is mirrored, so a partially-mirrored kit degrades to
+       "not mirrored" rather than silently claiming it is. */
+    j.design.paintMirrorByTarget=Object.assign({},paintMirrorByTarget);
+    j.design.paintMirrorOn=IHC_TARGET_IDS.every(t=>paintMirrorByTarget[t]);
   }else{
     PKIT.name=jerseyName;
     PKIT.skin='#'+neckZone.color.getHexString();
@@ -440,7 +460,7 @@ function loadContext(){
   jerseyName=PKIT.name||'';
   jerseyFont=j.design.font||'Arial';
   jerseyNumber=ihtEffectiveNumber(t);
-  paintMirrorOn=j.design.paintMirrorOn!==false;
+  paintMirrorByTarget=ihcMirrorMap(j.design);
   applyPaintMirrorUniform();
   if(actingRole==='admin'){
     paintStrokes=j.design.paintStrokes||[];
@@ -494,25 +514,37 @@ let paintModeOn=false,lastPaintUV=null;
    into presets and undo/redo instead of living only in the live canvas. */
 let paintStrokes=[],currentStroke=null,selectedStrokeIdx=-1;
 let paintBrushColor='#ffffff',paintBrushSize=44,paintBrushOpacity=1;
-/* Global, not per-stroke: the shader's uMirrorPaint uniform is a single
-   value, so ALL strokes on the canvas have to agree on the same packing
-   convention (see paintCanvasXY) at any given moment — a per-stroke flag
-   would mean two strokes disagreeing about what a given canvas half means,
-   which the shader has no way to resolve per-pixel. Flipping this toggle
-   re-packs every existing stroke under the new convention (see its wiring
-   in wireDecalsPanel), which is the one honest trade-off of keeping this
-   simple: old strokes don't remember their own original mirror setting. */
-let paintMirrorOn=true;
+/* Mirror is PER PAINT TARGET. Each piece already has its own material and so
+   its own uMirrorPaint uniform; what used to force this design-wide was the
+   single shared paint canvas, since the two packing conventions overwrite each
+   other's regions. With a second canvas per convention each target can differ.
+   Keyed by target id (jersey/pants/gloves/helmet/skates) because that is what a
+   stroke stores, and pieces map onto targets through ihcTargetForMesh. */
+let paintMirrorByTarget=ihcMirrorMap({paintMirrorOn:false});
+function mirrorForTarget(t){
+  const v=paintMirrorByTarget[t];
+  return typeof v==='boolean'?v:false;
+}
+/* Repaints the mirror button after a restore, if the open part even has one. */
+function syncMirrorBtnFromTarget(){
+  const mb=document.getElementById('mirrorPaintBtn');
+  if(!mb)return;
+  const on=mirrorForTarget(paintTarget);
+  mb.classList.toggle('primary',on);
+  mb.textContent=on?'🪞 Mirror this part: ON':'🪞 Mirror this part: OFF';
+}
 function applyPaintMirrorUniform(){
-  // every piece has its own material (and so its own copy of the uniform) now
   if(!PIECES)return;
-  const seen=new Set();
   Object.keys(PIECES).forEach(id=>{
     const mat=PIECES[id].material;
-    if(!mat||seen.has(mat.uuid))return;
-    seen.add(mat.uuid);
+    if(!mat)return;
     const ref=mat.userData.shaderRef;
-    if(ref&&ref.uniforms.uMirrorPaint)ref.uniforms.uMirrorPaint.value=paintMirrorOn?1:0;
+    if(!ref||!ref.uniforms.uMirrorPaint)return;
+    /* per PIECE, from that piece's own target — helmet and cage share the
+       'helmet' surface and therefore always agree, which is what keeps a stroke
+       that crosses from shell to cage looking like one stroke. */
+    const t=ihcTargetForPieceId(id);
+    ref.uniforms.uMirrorPaint.value=(t&&mirrorForTarget(t))?1:0;
   });
 }
 const raycaster=new THREE.Raycaster();
@@ -703,16 +735,22 @@ function selectPieceInEditor(pieceId){
 /* stampSegment/ihcPaintCanvasXY/SEAM_JUMP_UV + stroke/decal replay moved to
    core (the menu preview replays the exact same stored layers). */
 function paintStamp(uv,prevUV){
-  const xy=ihcPaintCanvasXY(uv,uv.side,paintMirrorOn);
-  const prevXY=prevUV?ihcPaintCanvasXY(prevUV,prevUV.side,paintMirrorOn):null;
+  // the stroke belongs to the target being painted, so its mirror decides both
+  // the packing AND which of the two canvases it lands on
+  const mirrorOn=mirrorForTarget(paintTarget);
+  const ctx=mirrorOn?paintCtx:paintCtxS;
+  const cvs=mirrorOn?paintCanvas:paintCanvasS;
+  const tex=mirrorOn?paintTexture:paintTextureS;
+  const xy=ihcPaintCanvasXY(uv,uv.side,mirrorOn);
+  const prevXY=prevUV?ihcPaintCanvasXY(prevUV,prevUV.side,mirrorOn):null;
   // a side change mid-drag (e.g. dragging across the crotch from one leg to
   // the other) is ALWAYS a seam crossing when unmirrored, even if the raw
   // UV looks continuous — the two sides land on opposite canvas halves.
   const seamJump=(prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV)||
-    (!paintMirrorOn&&prevUV&&prevUV.side!==uv.side);
-  stampSegment(paintCtx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
+    (!mirrorOn&&prevUV&&prevUV.side!==uv.side);
+  stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
     paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump);
-  syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
+  syncCanvasToDataTexture(ctx,cvs,tex);
 }
 /* Full reconstruction from the stored stroke lists — needed any time a STACK
    changes shape (delete/reorder/hide/undo), as opposed to live dragging which
@@ -723,11 +761,14 @@ function paintStackOrder(active,base){
   return actingRole==='admin'?[active,base]:[base,active];
 }
 function redrawPaintLayer(){
-  if(!paintCtx)return;
+  if(!paintCtx||!paintCtxS)return;
   paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  paintCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  const ctxs={raw:paintCtx,split:paintCtxS};
   paintStackOrder(paintStrokes,basePaintStrokes)
-    .forEach(list=>ihcReplayStrokes(paintCtx,list,paintMirrorOn));
+    .forEach(list=>ihcReplayStrokes(ctxs,list,mirrorForTarget));
   syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
+  syncCanvasToDataTexture(paintCtxS,paintCanvasS,paintTextureS);
 }
 
 let bodyZM=null,stickZM=null,neckZone=null,PIECES=null;
@@ -739,7 +780,8 @@ function buildMaterialManagers(){
      material and one atlas-wide mask, so "Socks · Primary" and "Jersey ·
      Primary" were the same slider — changing one changed the whole kit. */
   PIECES=ihcBuildPieceKit(player.visual,
-    {nameNumberMap:nameNumberTexture,logoMap:logoTexture,paintMap:paintTexture});
+    {nameNumberMap:nameNumberTexture,logoMap:logoTexture,paintMap:paintTexture,
+     logoMapSplit:logoTextureS,paintMapSplit:paintTextureS});
   bodyZM=PIECES.jersey; // the jersey is still what the name/number plate reads its colors from
 
   /* "Neck" (mesh "Cube") is the only exposed-skin-adjacent geometry this
@@ -1422,30 +1464,31 @@ function wireDecalsPanel(){
   document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';
   opSlider.addEventListener('input',()=>{paintBrushOpacity=+opSlider.value;document.getElementById('brushOpVal').textContent=Math.round(paintBrushOpacity*100)+'%';});
 
-  /* Visible to BOTH roles. The mirror convention is still design-wide — one
-     packing convention governs the team layers and any player accents together
-     (see paintMirrorOn) — but a player painting their own helmet has to be able
-     to stop it copying across, so the switch can no longer be admin-only.
-     Still design-wide rather than per-piece: pieces share ONE paint canvas, and
-     the two conventions write to different places on it, so a piece reading the
-     raw UV picks up strokes a piece packed into halves left there. Measured at
-     texel level: 25 of 72 ordered piece pairs bleed. Per-piece needs a second
-     canvas pair (raw + split) threaded through all three renderers. */
+  /* Visible to BOTH roles, and PER PART. The team layers and the player's own
+     accents on one part share that part's setting — they have to, since both
+     draw into the same canvas region and one packing convention has to win per
+     surface — but different parts are now free to disagree. */
   const mirrorBtn=document.getElementById('mirrorPaintBtn');
   if(mirrorBtn){
+    /* Scoped to the part on screen: the button edits THIS target's flag only,
+       so a mirrored helmet can sit next to unmirrored pants. */
+    const tgt=paintTarget;
     const syncMirrorBtn=()=>{
-      mirrorBtn.classList.toggle('primary',paintMirrorOn);
-      mirrorBtn.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';
+      const on=mirrorForTarget(tgt);
+      mirrorBtn.classList.toggle('primary',on);
+      mirrorBtn.textContent=on?'🪞 Mirror this part: ON':'🪞 Mirror this part: OFF';
     };
     syncMirrorBtn();
     mirrorBtn.addEventListener('click',()=>{
-      paintMirrorOn=!paintMirrorOn;
+      paintMirrorByTarget[tgt]=!mirrorForTarget(tgt);
       syncMirrorBtn();
       applyPaintMirrorUniform();
-      // re-pack every existing stroke AND decal under the new convention
+      // this target's strokes/decals move to the other canvas and re-pack
       redrawPaintLayer();redrawLogoLayer();
       pushHistory();
-      showToast(paintMirrorOn?'Mirror ON — both sides match':'Mirror OFF — sides decorated independently');
+      showToast(mirrorForTarget(tgt)
+        ?'Mirror ON — both sides of this part match'
+        :'Mirror OFF — this part\'s sides are decorated separately');
     });
   }
 
@@ -1902,12 +1945,15 @@ function saveLogoLibrary(){
   localStorage.setItem('ihc_logos_v1',JSON.stringify(logoLibrary.map(l=>({id:l.id,name:l.name,dataURL:l.dataURL}))));
 }
 function redrawLogoLayer(){
-  if(!logoCtx)return;
+  if(!logoCtx||!logoCtxS)return;
   logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  logoCtxS.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  const ctxs={raw:logoCtx,split:logoCtxS};
   // same ownership order as paint: team design decals under player accents
   paintStackOrder(placedDecals,baseDecals)
-    .forEach(list=>ihcReplayDecals(logoCtx,list,logoLibrary,paintMirrorOn));
+    .forEach(list=>ihcReplayDecals(ctxs,list,logoLibrary,mirrorForTarget));
   syncCanvasToDataTexture(logoCtx,logoCanvas,logoTexture);
+  syncCanvasToDataTexture(logoCtxS,logoCanvasS,logoTextureS);
 }
 function renderLogoLibraryGrid(){
   const grid=document.getElementById('logoLibraryGrid');
@@ -2189,7 +2235,7 @@ function captureState(){
     // captured alongside the strokes so undo/redo can't land the mirror
     // toggle and the stroke data out of sync with each other — see
     // paintCanvasXY's note on why they have to agree.
-    paintMirrorOn,
+    paintMirrorByTarget:Object.assign({},paintMirrorByTarget),
     jerseyFont,
   };
 }
@@ -2216,10 +2262,11 @@ function applyState(s){
   // ??true guards history/presets saved before the mirror toggle existed
   paintStrokes=JSON.parse(JSON.stringify(s.paintStrokes||[]));
   placedDecals=JSON.parse(JSON.stringify(s.placedDecals||[]));
-  paintMirrorOn=s.paintMirrorOn??true;
+  /* snapshots taken before per-target mirror carry the single boolean;
+     ihcMirrorMap folds either shape onto every target. */
+  paintMirrorByTarget=ihcMirrorMap(s);
   applyPaintMirrorUniform();
-  const mb=document.getElementById('mirrorPaintBtn');
-  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';}
+  syncMirrorBtnFromTarget();
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();
@@ -2275,7 +2322,7 @@ function promptSavePreset(){
     jname:jerseyName,jnumber:jerseyNumber,jfont:jerseyFont,
     paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
     placedDecals:JSON.parse(JSON.stringify(placedDecals)),
-    paintMirrorOn,
+    paintMirrorByTarget:Object.assign({},paintMirrorByTarget),
   });
   savePresets(presets);renderRightPanel();showToast('Preset saved');
 }
@@ -2292,10 +2339,9 @@ function applyPreset(id){
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
   paintStrokes=JSON.parse(JSON.stringify(p.paintStrokes||[]));
   placedDecals=JSON.parse(JSON.stringify(p.placedDecals||[]));
-  paintMirrorOn=p.paintMirrorOn??true;
+  paintMirrorByTarget=ihcMirrorMap(p);
   applyPaintMirrorUniform();
-  const mb=document.getElementById('mirrorPaintBtn');
-  if(mb){mb.classList.toggle('primary',paintMirrorOn);mb.textContent=paintMirrorOn?'🪞 Mirror Paint & Decals: ON':'🪞 Mirror Paint & Decals: OFF';}
+  syncMirrorBtnFromTarget();
   selectedStrokeIdx=-1;selectedDecalIdx=-1;
   redrawPaintLayer();redrawLogoLayer();
   renderPlacedDecalsList();renderPlacedDecalControls();
@@ -2418,6 +2464,14 @@ loadCharacter(()=>{
     paintProxyFrame++;   // invalidates the skinned raycast proxies once per frame
     updateCamera(dt);
     animateIdle(dt);
+    /* A material's shaderRef only exists once it has COMPILED, and a material
+       only compiles when its mesh is first rendered — so with part isolation on,
+       a piece that has never been shown has no uniform to write yet, and its
+       shader's own default is "mirrored". Re-asserting every frame is a few
+       property writes and means a piece is correct on the first frame it
+       appears, instead of rendering mirrored until something else happens to
+       call this. */
+    applyPaintMirrorUniform();
     renderer.render(scene,camera);
   }
   tick();
