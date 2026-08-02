@@ -4364,6 +4364,39 @@ const CONFIG={
      consumer follows automatically. */
   handedness:'L',
   stickRollCal:0,
+  /* ===== SKILL-STICK STICKHANDLING (see the handle layer in poseStick) =====
+     The clips are the REST POSE. Player input rotates the shaft about the TOP
+     hand, which is what a real skater does — the top hand is the fulcrum at the
+     hip and the bottom hand drives the shaft across, so the blade sweeps far
+     while the hands barely move. That mechanical advantage is the whole point
+     of a stick and it is why this is a rotation, not a translation of the grip.
+     handleAuthority  how much of the requested swing is actually taken (1 = the
+                      blade goes exactly where the reach envelope asks)
+     handleRate       blend in/out speed; the fade-out has to beat the shot
+                      windup so the Shooting clip is never fought
+     handleMaxAngle   hard cap on the swing off the clip's own shaft, so input
+                      can never wrench the arms into a pose the rig can't hold
+     handleChokeMin   the bottom hand may slide UP the shaft (choke up) when a
+                      swing would otherwise pull it out of the arm's reach —
+                      real, and better than letting the IK clamp the fist off
+                      the shaft. Fraction of the clip's own hand spacing. */
+  handleAuthority:1.0,handleRate:9,handleMaxAngle:1.60,handleChokeMin:0.40,
+  /* handleShoulder — how much of the swing the CLAVICLE takes before the arm
+     IK picks up the rest. This is what buys the extra lateral reach: rotating
+     the clavicle travels the whole arm root, so the bottom hand can follow the
+     shaft much further out before it runs out of arm and has to choke up. It
+     is also most of what makes a big reach read as the upper body committing
+     to the play instead of an arm being extended out of a static torso.
+     handleTopTravel — slides the top hand across the body with the swing.
+     DISABLED (0), and measured, not guessed. The translation is rigid (both
+     fists get the same offset, so the shaft is preserved), but only the BOTTOM
+     hand has a choke-up fallback when it runs out of arm — the top arm simply
+     clamps, and at the 0.20 m cap its fist tore off the shaft (fingers 21 ->
+     34.8 mm) and the forehand blade inverted (tracking -0.01 vs 0.37 without
+     it). Isolated: travel alone breaks it, the chest turn alone does not.
+     Raising it needs a choke fallback for the TOP hand first. The chest turn
+     below already buys more reach than this did, and keeps the grip. */
+  handleShoulder:0.70,handleTopTravel:0,handleTopTravelMax:0.20,
   /* GRIP AXIS MEASURED ON THE CLIP-DRIVEN HAND, not carried over. The old value
      was (0,0,1): correct for the old system, where the IK ROTATED hand_r until
      its +Z lay along a shaft the aim had already placed. The animator's hand is
@@ -4530,7 +4563,10 @@ const CONFIG={
      out by the same 0.54 or a puck sitting on your own blade would be outside
      pickup range entirely. Dial the pair back together if the carry feels too
      far out — never one without the other. */
-  iceHeight:0.045,iceBaseFwd:1.49,iceForehandRange:0.82,iceBackhandRange:0.44,
+  /* how far the blade may travel to each side. Widened 2026-08-02 (0.82/0.44)
+     now that the shoulder girdle carries part of the swing — the arms alone
+     could not honour a bigger envelope and the bottom hand just choked up. */
+  iceHeight:0.045,iceBaseFwd:1.49,iceForehandRange:1.12,iceBackhandRange:0.74,
   /* zoneMidHalf widened from 0.35: the grip's rightward offset (gripRight)
      means the stick's natural resting angle (dead-ahead aim, no mouse
      input) sits at lat~=-0.44 rad, not 0 — with the old threshold that
@@ -5532,7 +5568,14 @@ function createPlayer(gltf){
   ent.spine=v.getObjectByName('spine_03');
   ent.joints={};
   const WANTED=['spine_01','spine_02','spine_03','neck_01','head','thigh_r','thigh_l','calf_r','calf_l',
-   'foot_r','foot_l','hand_r','hand_l','upperarm_r','upperarm_l','lowerarm_r','lowerarm_l'];
+   'foot_r','foot_l','hand_r','hand_l','upperarm_r','upperarm_l','lowerarm_r','lowerarm_l',
+   /* the clavicles. The stickhandle layer turns the girdle via spine_03 (see
+      CONFIG.handleShoulder) rather than these, because rotating the two
+      clavicles independently is not a rigid motion and changes the distance
+      between the fists — see the note in applyStickHandle. Captured anyway:
+      they are wanted by the arm IK's shoulder lookups. Keys are lowercased by
+      the traverse below, hence shoulderl/shoulderr. */
+   'shoulderl','shoulderr'];
   v.traverse(o=>{const n=(o.name||'').toLowerCase();if(WANTED.indexOf(n)>=0)ent.joints[n]=o;});
   // cache each pose joint's bind-pose local quaternion so applyJointFlex/
   // goaliePose can reset to a known-good base every frame before flexing —
@@ -6010,6 +6053,142 @@ function latAngle(v,F){
    moves the blade — it just moves it as a grip instead of a free swing.
    So there is nothing to IK and nothing to correct here: read the two grip
    points, and the stick is defined. */
+/* Rotate the whole two-handed grip rigidly about the top hand, then bend both
+   arms so the fists end up there. Both hands take the SAME rotation, so the
+   grip stays exactly as valid as the bake made it — the fists never unwrap,
+   they just travel. Only the arms bend.
+   The bottom hand may run out of reach on a big swing; rather than let the IK
+   clamp and tear the fist off the shaft, it CHOKES UP — slides toward the top
+   hand along the shaft until it can reach, which is what a player does. */
+const _hqA=new THREE.Quaternion(),_hqB=new THREE.Quaternion();
+/* q_target * inverse(q_current) * q_clip — the IK's CHANGE, applied on top of
+   the animator's pose. Identity-safe: q_target == q_current gives back q_clip. */
+function _qDeltaApply(qTarget,qCurrent,qClip){
+  return qTarget.clone().multiply(qCurrent.clone().invert()).multiply(qClip);
+}
+const _pA=new THREE.Vector3(),_pB=new THREE.Vector3(),_pC=new THREE.Vector3(),_pD=new THREE.Vector3();
+function applyStickHandle(ent,q,fulcrum,lefty,shift,qChest){
+  const J=ent.joints;
+  const sides=lefty?['r','l']:['l','r'];      // [0]=top (fulcrum), [1]=bottom
+  const ctrs =lefty?[IH_GRIP_CTR_R,IH_GRIP_CTR_L]:[IH_GRIP_CTR_L,IH_GRIP_CTR_R];
+  // the rotated shaft direction, needed before the bottom hand is placed
+  const topB=J['hand_'+sides[0]],lowB=J['hand_'+sides[1]];
+  const g0=_pA.copy(ctrs[0]).applyMatrix4(topB.matrixWorld);
+  const g1=_pB.copy(ctrs[1]).applyMatrix4(lowB.matrixWorld);
+  /* SHOULDER GIRDLE FIRST. The clavicle takes a fraction of the swing, which
+     moves the whole arm ROOT — that is where the extra lateral reach comes
+     from, and it is why a wide reach reads as the upper body turning into the
+     play instead of an arm extended out of a frozen torso. Done before the arm
+     IK so the solver sees the shoulder where it actually ended up.
+     Rotating a bone's world quaternion leaves its ORIGIN alone (the parent
+     places that), so this swings the arm root without shifting the chest. */
+  /* SHOULDER GIRDLE — turn the CHEST, not the two clavicles separately.
+     The first attempt rotated each clavicle by the shaft's own swing about that
+     clavicle's joint. That is not a rigid motion of the girdle: it carries the
+     two shoulders in OPPOSITE directions along the swing, so the distance
+     between the fists changes. The fists hold ONE RIGID SHAFT, so no arm
+     solution satisfies both, and the solver tore the hands off the shaft
+     (fingers 21 -> 34 mm) and inverted the forehand blade. Measured: every
+     config with that block on failed the forehand, envelope width irrelevant.
+     Rotating spine_03 instead moves both arm roots as ONE BODY, so grip spacing
+     is preserved by construction. The reach comes from the arm ROOTS travelling
+     toward the play, so the bottom hand runs out of arm later and chokes up
+     less — and it reads as the upper body committing, not an arm poking out.
+     g0/g1 are deliberately left at their pre-turn values: the shaft is what the
+     clip says it is, the chest only changes how easily the arms REACH it. */
+  if(qChest&&CONFIG.handleShoulder>0.001){
+    const cb=J['spine_03'];
+    if(cb){
+      cb.getWorldQuaternion(_hqA);
+      _hqB.copy(qChest).multiply(_hqA);
+      const pq=new THREE.Quaternion();cb.parent.getWorldQuaternion(pq);
+      cb.quaternion.copy(pq.invert().multiply(_hqB));
+      cb.updateWorldMatrix(true,true);
+      topB.updateWorldMatrix(true,false);lowB.updateWorldMatrix(true,false);
+    }
+  }
+  const newDir=_pC.copy(g1).sub(fulcrum).applyQuaternion(q);
+  const spacing=newDir.length();
+  if(spacing>1e-6)newDir.multiplyScalar(1/spacing);
+  for(let i=0;i<2;i++){
+    const sd=sides[i];
+    const arm=sd==='r'?ent.armR2:ent.armL2;
+    const hb=J['hand_'+sd];
+    if(!arm||!hb)continue;
+    hb.updateWorldMatrix(true,false);
+    const gp=(i===0?g0:g1);
+    hb.getWorldPosition(_pD);
+    const off=gp.clone().sub(_pD).applyQuaternion(q);   // wrist -> fist, rotated
+    let target=gp.clone().sub(fulcrum).applyQuaternion(q).add(fulcrum);
+    if(shift)target.add(shift);          // the whole grip travels with the swing
+    let wrist=target.clone().sub(off);
+    const sh=new THREE.Vector3();arm.upper.getWorldPosition(sh);
+    const reach=(arm.Lu+arm.Lf)*0.985;
+    if(i===1&&wrist.distanceTo(sh)>reach){
+      /* choke up: walk the bottom fist toward the top one along the rotated
+         shaft until the wrist is inside the arm's reach. Bisection is plenty
+         and cannot fail — t=chokeMin is always closer to the shoulder. */
+      let lo=CONFIG.handleChokeMin,hi=1.0;
+      for(let it=0;it<12;it++){
+        const t=(lo+hi)*0.5;
+        const cand=fulcrum.clone().addScaledVector(newDir,spacing*t);
+        if(shift)cand.add(shift);
+        if(cand.clone().sub(off).distanceTo(sh)>reach)hi=t;else lo=t;
+      }
+      target=fulcrum.clone().addScaledVector(newDir,spacing*Math.max(lo,CONFIG.handleChokeMin));
+      if(shift)target.add(shift);
+      wrist=target.clone().sub(off);
+    }
+    // pole: keep the animator's own elbow orientation instead of inventing one
+    const el=new THREE.Vector3();arm.fore.getWorldPosition(el);
+    const pole=el.sub(sh);
+    if(pole.lengthSq()<1e-8)pole.set(0,-1,0);
+    pole.normalize();
+    arm.hand.getWorldQuaternion(_hqA);                 // clip's hand orientation
+    /* ADDITIVE IK, not absolute. Solving straight to the target would replace
+       the animator's arm pose wholesale — and the analytic solver does NOT
+       reproduce that pose even when the target is exactly where the clip
+       already put the hand (it matches the wrist position and the elbow plane,
+       not the authored roll). Measured: 6 arm bones rewritten every frame at
+       zero input, so switching the layer on would pop.
+       So solve TWICE — once for where the clip's own fist is, once for where
+       we want it — and apply only the DIFFERENCE on top of the clip pose:
+           q_final = q_target * inverse(q_current) * q_clip
+       At zero input the two solves agree, the delta is identity, and the clip
+       pose survives bit for bit. */
+    const qUc=arm.upper.quaternion.clone(),qFc=arm.fore.quaternion.clone();
+    let qU0,qF0;
+    /* ikBoneArm is STATEFUL — arm._ik carries the last well-conditioned elbow
+       perpendicular and the last aim quaternion per bone (see solveArm and
+       aimBone). The two solves below must therefore start from the SAME state,
+       or solving the identical target twice returns two different answers and
+       the "delta is identity at zero input" property quietly dies. Measured
+       before this save/restore: the blade still slid 8.6 cm at zero input. */
+    const st=arm._ik,stSave=st?{n:st.n?st.n.clone():null,
+      qu:st.qu?st.qu.clone():null,qf:st.qf?st.qf.clone():null}:null;
+    const restoreIk=()=>{if(stSave&&arm._ik){arm._ik.n=stSave.n?stSave.n.clone():null;
+      arm._ik.qu=stSave.qu?stSave.qu.clone():null;arm._ik.qf=stSave.qf?stSave.qf.clone():null;}};
+    try{
+      ikBoneArm(arm,gp.clone().sub(off),pole);          // where the clip already is
+      qU0=arm.upper.quaternion.clone();qF0=arm.fore.quaternion.clone();
+      arm.upper.quaternion.copy(qUc);arm.fore.quaternion.copy(qFc);
+      arm.upper.updateWorldMatrix(true,true);
+      restoreIk();                                      // same starting state
+      ikBoneArm(arm,wrist,pole);                        // where we want it
+    }catch(e){
+      arm.upper.quaternion.copy(qUc);arm.fore.quaternion.copy(qFc);
+      arm.upper.updateWorldMatrix(true,true);continue;
+    }
+    arm.upper.quaternion.copy(_qDeltaApply(arm.upper.quaternion,qU0,qUc));
+    arm.fore.quaternion .copy(_qDeltaApply(arm.fore.quaternion ,qF0,qFc));
+    arm.upper.updateWorldMatrix(true,true);
+    // and rotate the hand by the same q, so the fist stays wrapped on the shaft
+    _hqB.copy(q).multiply(_hqA);
+    const pq=new THREE.Quaternion();arm.hand.parent.getWorldQuaternion(pq);
+    arm.hand.quaternion.copy(pq.invert().multiply(_hqB));
+    arm.hand.updateWorldMatrix(true,true);
+  }
+}
 const _gR=new THREE.Vector3(),_gL=new THREE.Vector3(),_hqW=new THREE.Quaternion();
 const _sX=new THREE.Vector3(),_sY=new THREE.Vector3(),_sM=new THREE.Matrix4();
 function poseStick(ent,aim,dt){   // `aim` is unused — kept for the caller
@@ -6026,6 +6205,101 @@ function poseStick(ent,aim,dt){   // `aim` is unused — kept for the caller
   const low =_gL.copy(lowC).applyMatrix4(lowB.matrixWorld);   // bottom hand
   const dir=low.clone().sub(grip);
   if(dir.lengthSq()<1e-9)dir.copy(F).setY(-1).normalize(); else dir.normalize();
+  /* ================= SKILL-STICK STICKHANDLING =================
+     Everything above is the clip's own grip, untouched. This layer rotates that
+     shaft about the TOP hand toward where the player is pointing, then bends
+     both arms to follow so the fists stay wrapped around it.
+
+     WHY A ROTATION ABOUT THE TOP HAND, and not "put the blade on the aim":
+     the top hand is the fulcrum. Rotating about it sweeps the blade through a
+     wide arc while the hands themselves barely move — the stick's mechanical
+     advantage, and the reason stickhandling reads as wrist/forearm work rather
+     than the whole body lunging after the puck. Welding the blade to the aim
+     (what the pre-purge code did) is what made the arms telescope.
+
+     WHY IT IS A DELTA FROM NEUTRAL, not an absolute aim: with no input the aim
+     path returns the neutral point (pos + F*iceBaseFwd), which is NOT where the
+     animator put the blade. Driving to it absolutely would yank the blade off
+     the clip pose the moment the layer switched on. Taking the rotation from
+     "neutral aim" to "requested aim" means zero input is exactly identity, so
+     hands off the stick = the pure baked clip, bit for bit.
+
+     This is the one place procedural bone writes are deliberately back after
+     the 2026-08-01 purge, and it is a gameplay control rather than a cosmetic
+     correction: it is zero unless the player is actually steering the blade,
+     and mixerUpdateClean restores the clip pose before every mixer update, so
+     nothing here can accumulate. */
+  let handleQ=null;
+  {
+    const wantOff=(ent.oneShot>0)                    // the Shooting clip owns the arms
+      ||(typeof shootHeld!=='undefined'&&shootHeld)  // windup
+      ||(ent.shotType&&ent.shotType!=='none')
+      ||((ent.shotReleaseT||0)>0)                    // release + follow-through
+      ||((ent.diveT||0)>0)||ent.kneelActive;
+    ent.handleBlend=clamp((ent.handleBlend||0)+((wantOff?0:1)-(ent.handleBlend||0))
+                          *Math.min(1,(dt||0)*CONFIG.handleRate),0,1);
+    const hb=ent.handleBlend*CONFIG.handleAuthority;
+    if(hb>0.002&&aim){
+      const neutral=ent.pos.clone().addScaledVector(F,CONFIG.iceBaseFwd);
+      neutral.y=CONFIG.iceHeight;
+      const dN=neutral.sub(grip),dW=aim.clone().sub(grip);
+      if(dN.lengthSq()>1e-6&&dW.lengthSq()>1e-6){
+        dN.normalize();dW.normalize();
+        /* setFromUnitVectors builds its axis from a cross product, so it is
+           ill-conditioned near the antipode — never reached here (both vectors
+           point down-and-forward off the same hip) but guarded, because this
+           rig has been bitten by exactly that before. */
+        if(dN.dot(dW)>-0.999){
+          let q=new THREE.Quaternion().setFromUnitVectors(dN,dW);
+          const ang=2*Math.acos(Math.min(1,Math.abs(q.w)));
+          if(ang>CONFIG.handleMaxAngle){
+            const ax=new THREE.Vector3(q.x,q.y,q.z);
+            if(ax.lengthSq()>1e-9)q.setFromAxisAngle(ax.normalize(),
+              (q.w<0?-1:1)*CONFIG.handleMaxAngle);
+          }
+          handleQ=new THREE.Quaternion().slerp(q,hb);   // identity -> q by blend
+        }
+      }
+    }
+  }
+  if(handleQ){
+    /* how far the top hand slides across with the swing. Strictly proportional
+       to the requested lateral offset, so it is zero at zero input and the clip
+       pose is still reproduced exactly. */
+    const Rv=right(ent.heading);
+    const swingLat=aim.clone().sub(ent.pos).dot(Rv);
+    const trav=Rv.clone().multiplyScalar(
+      clamp(swingLat*CONFIG.handleTopTravel*ent.handleBlend,
+            -CONFIG.handleTopTravelMax,CONFIG.handleTopTravelMax));
+    /* the chest turn: a PURE YAW toward the play, built as the rotation from
+       the player's own forward to the horizontal bearing of the aim. Deriving
+       it with setFromUnitVectors between two horizontal unit vectors makes the
+       turn direction correct by construction rather than by a guessed sign, and
+       keeps the axis vertical so the girdle stays rigid. Both vectors sit well
+       inside a right angle of each other, so the antipode case that has bitten
+       this rig before cannot arise. Scaled by the blend, so it is exactly zero
+       at zero input and the clip's own chest pose survives untouched. */
+    let qChest=null;
+    {
+      const toA=aim.clone().sub(ent.pos);toA.y=0;
+      const Fh=F.clone();Fh.y=0;
+      if(toA.lengthSq()>1e-6&&Fh.lengthSq()>1e-6){
+        toA.normalize();Fh.normalize();
+        if(Fh.dot(toA)>-0.999)
+          qChest=new THREE.Quaternion().slerp(
+            new THREE.Quaternion().setFromUnitVectors(Fh,toA),
+            CONFIG.handleShoulder*ent.handleBlend);
+      }
+    }
+    applyStickHandle(ent,handleQ,grip,lefty,trav,qChest);
+    // the arms moved: re-read the grip straight back off the posed hands, so
+    // the shaft is still whatever the FISTS say it is and nothing can drift
+    topB.updateWorldMatrix(true,false); lowB.updateWorldMatrix(true,false);
+    grip.copy(topC).applyMatrix4(topB.matrixWorld);
+    low.copy(lowC).applyMatrix4(lowB.matrixWorld);
+    dir.copy(low).sub(grip);
+    if(dir.lengthSq()<1e-9)dir.copy(F).setY(-1).normalize(); else dir.normalize();
+  }
   const butt=grip.clone().addScaledVector(dir,-CONFIG.snapAlong);
   const tip=butt.clone().addScaledVector(dir,CONFIG.stickLen);
   /* HANDEDNESS FLIPS EXACTLY ONE THING: the sign of the stance angle. Every
