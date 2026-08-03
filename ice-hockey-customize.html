@@ -143,6 +143,20 @@ button{font-family:inherit;}
 .to-group input[type=range]{width:96px;}
 .to-swatch{width:26px;height:26px;border-radius:7px;border:2px solid rgba(255,255,255,.18);cursor:pointer;flex:none;}
 .to-sep{width:1px;height:22px;background:var(--line);}
+/* ✦'s shape/logo pickers. ONE scrolling row, never a wrapping grid: this bar
+   sits over the top of the viewport, and 24 shapes wrapped at 6 across would
+   drop a 4-row slab across the model — the same mistake that buried the right
+   panel's palette (see .shape-palette). max-width caps it so a big logo
+   library can't push the bar the full width of the screen either. */
+.to-stamps{display:flex;gap:4px;overflow-x:auto;max-width:290px;padding-bottom:2px;}
+.to-stamps::-webkit-scrollbar{height:5px;}
+.to-stamps::-webkit-scrollbar-thumb{background:var(--line-lit);border-radius:3px;}
+.to-stamp{width:26px;height:26px;flex:none;border-radius:6px;background:var(--bg2);
+  border:1px solid var(--line);display:flex;align-items:center;justify-content:center;
+  font-size:15px;line-height:1;color:var(--text-dim);cursor:pointer;transition:all .12s var(--ease);}
+.to-stamp:hover{border-color:var(--line-lit);color:#fff;}
+.to-stamp.on{border-color:var(--accent);color:#fff;box-shadow:0 0 0 1px var(--accent);}
+.to-stamp.img{background-color:#14151c;}
 
 /* ===== MODE BANNER (you are never guessing which mode you are in) ===== */
 /* Shares the bottom-centre status slot with .viewport-hint — never both. */
@@ -266,6 +280,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
 .lc-shape-btn{aspect-ratio:1;background:var(--bg2);border:1px solid var(--line);border-radius:8px;
   display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;color:var(--text-dim);}
 .lc-shape-btn:hover{border-color:var(--line-lit);color:#fff;}
+/* The RIGHT PANEL's copy of the shape palette is its own class on purpose.
+   It reuses .lc-shape-btn's look but not .lc-shape-grid's 3 columns: at 3
+   across, 24 shapes rendered 104px square and 871px TALL inside a 659px
+   panel, which pushed Logos 600px and the whole Layers stack 813px below the
+   fold — the decal system was there and simply could not be reached. Six
+   narrow columns put the same 24 in ~4 rows, and the max-height means adding
+   more shapes later can never re-swallow the panel. */
+.shape-palette{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;
+  max-height:232px;overflow-y:auto;margin-bottom:4px;}
+.shape-palette .lc-shape-btn{font-size:17px;border-radius:6px;}
 .lc-canvas-wrap{display:flex;align-items:center;justify-content:center;background:
   repeating-conic-gradient(#1a1d29 0% 25%,#14161f 0% 50%) 50%/24px 24px;padding:16px;overflow:auto;}
 #logoCanvasEl{background:transparent;box-shadow:0 0 0 1px var(--line);cursor:grab;max-width:100%;max-height:100%;}
@@ -375,6 +399,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
     <div class="hint"><b>V</b> Orbit</div>
     <div class="hint"><b>B</b> Brush</div>
     <div class="hint"><b>E</b> Eraser</div>
+    <div class="hint"><b>L</b> Line</div>
     <div class="hint"><b>M</b> Move decal</div>
     <div class="hint"><b>I</b> Pick color</div>
     <div class="hint"><b>[ ]</b> Brush size</div>

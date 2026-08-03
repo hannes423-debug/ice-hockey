@@ -380,11 +380,59 @@ function ihcClusterBuckets(buckets,maxClusters){
    plus the UV rasterization, and cached for the whole session — the result
    depends only on the shared atlas + shared geometry, never on an entity. */
 let _ihcKitCache=null;
+/* ---------------- THE BAKED-IN "PLAYER" / "10" ----------------
+   The shipped atlas has a nameplate and a number PAINTED INTO IT, on the back
+   of the jersey. The editor's own name/number plate is a separate always-on-top
+   canvas that only draws once you set a name, so until then the asset's
+   placeholder showed through — and even after, the baked art sat underneath
+   any plate that didn't cover it exactly. Every player picks their own name and
+   number (and the game renders only an admin-ASSIGNED number), so the baked
+   pair is never the right answer; it is erased from the atlas at load.
+
+   Rect measured off the shipped 2048² atlas by binning non-background rows in
+   the jersey-back block — the art separates into four runs with clear gaps:
+       y 1286..1422  shoulder yoke      KEEP
+       y 1448..1518  "PLAYER" plate     ERASE
+       y 1563..1717  "10" number        ERASE
+       y 1813..1949  waist stripe       KEEP
+   so the erase rect is padded to y 1438..1730 and still clears the yoke by 16px
+   and the stripe by 83px. Horizontally the art spans x 249..545; padded to
+   240..556. Verified that ONLY the jersey mesh (Cube001, 64 triangles) has UVs
+   over that rect, so nothing else loses its texture, and that the pixels ringing
+   it are a single uniform colour (2,12,61) — which is why a flat fill is
+   seamless here and no inpainting is needed. */
+const IHC_BAKED_PLATE_RECT={x:240,y:1438,w:316,h:292};
+function ihcStripBakedPlate(tex){
+  const img=tex&&tex.image;
+  if(!img||!img.width)return;
+  tex.userData=tex.userData||{};
+  if(tex.userData._plateStripped)return; // every piece shares this one texture
+  const w=img.width,h=img.height,s=w/2048; // rect is in shipped-atlas pixels
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');
+  x.drawImage(img,0,0);
+  const R=IHC_BAKED_PLATE_RECT;
+  const rx=Math.round(R.x*s),ry=Math.round(R.y*s);
+  const rw=Math.round(R.w*s),rh=Math.round(R.h*s);
+  /* Sample the fill from just OUTSIDE the rect rather than hard-coding the
+     navy: if the asset's base colour is ever re-authored this still lands on
+     whatever now surrounds the plate. */
+  const p=x.getImageData(Math.max(0,rx-4),Math.max(0,ry-4),1,1).data;
+  x.fillStyle='rgb('+p[0]+','+p[1]+','+p[2]+')';
+  x.fillRect(rx,ry,rw,rh);
+  tex.image=c;
+  tex.needsUpdate=true;
+  tex.userData._plateStripped=true;
+}
 function ihcBuildKitMask(visual){
   if(_ihcKitCache)return _ihcKitCache;
   const meshNames=[...new Set(IHC_PIECES.map(p=>p.mesh))];
   const first=meshNames.map(n=>visual.getObjectByName(n)).find(m=>m&&m.material&&m.material.map);
   if(!first)return null;
+  /* Before the palette is clustered, not after: the baked letters are ~5000
+     white and ~3000 maroon texels, enough to pull a zone cluster of their own
+     and skew the jersey's whole three-colour classification. */
+  ihcStripBakedPlate(first.material.map);
   const imgData=getImageDataFromTexture(first.material.map);
   const w=imgData.width,h=imgData.height,src=imgData.data;
   /* owner[p] = 1-based index into meshNames, or 0 for "no piece" */

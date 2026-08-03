@@ -172,7 +172,7 @@ renderer.domElement.addEventListener('pointerdown',e=>{
     pickColorAt(e.clientX,e.clientY);
     return;
   }
-  if(isPaintTool()){
+  if(isFreehandTool()){
     dragMode='paint';
     // one drag = one layer: points accumulate on currentStroke (drawn live,
     // fast, exactly like before) and only land in the persisted layer stack
@@ -185,6 +185,23 @@ renderer.domElement.addEventListener('pointerdown',e=>{
       mode:activeTool==='erase'?'erase':'paint',visible:true,points:[]};
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv){currentStroke.points.push(strokePoint(uv));paintStamp(uv,null);lastPaintUV=uv;}
+    return;
+  }
+  if(isLineTool()){
+    dragMode='line';
+    lineStart={x:e.clientX,y:e.clientY};
+    lineEnd={x:e.clientX,y:e.clientY};
+    updateLinePreview(e.shiftKey);
+    return;
+  }
+  /* A stamp is one click, resolved here — but it then behaves exactly like a
+     decal drag, so dragging straight off the stamp slides the decal you just
+     dropped into place instead of making you re-press with ✥. */
+  if(isStampTool()){
+    const uv=raycastUV(e.clientX,e.clientY);
+    if(!uv){showToast('Click on the '+paintTargetLabel()+' itself to drop a decal');dragMode=null;return;}
+    dragMode='decal';
+    stampDecalAt(uv);
     return;
   }
   if(isDecalTool()&&isDecalLayer(selectedLayer())){
@@ -201,11 +218,14 @@ renderer.domElement.addEventListener('pointerdown',e=>{
 renderer.domElement.addEventListener('pointermove',e=>{
   // the brush ring follows the pointer whenever a paint tool is armed, drag
   // or no drag — seeing the footprint BEFORE committing is the whole point
-  if(isPaintTool())updateBrushRing(e.clientX,e.clientY);
+  if(isBrushLike())updateBrushRing(e.clientX,e.clientY);
   else hideBrushRing();
   if(dragMode==='paint'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv){if(currentStroke)currentStroke.points.push(strokePoint(uv));paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
+  }else if(dragMode==='line'){
+    lineEnd={x:e.clientX,y:e.clientY};
+    updateLinePreview(e.shiftKey);
   }else if(dragMode==='decal'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -216,7 +236,11 @@ renderer.domElement.addEventListener('pointermove',e=>{
     camState.yaw=camGoal.yaw;camState.pitch=camGoal.pitch; // direct while dragging, no lag
   }
 });
-addEventListener('pointerup',()=>{
+addEventListener('pointerup',e=>{
+  if(dragMode==='line'){
+    commitLine(e&&e.shiftKey);
+    hideLinePreview();
+  }
   if(dragMode==='paint'&&currentStroke&&currentStroke.points.length){
     layers.push(currentStroke);
     selectedLayerIdx=layers.length-1;
@@ -239,7 +263,7 @@ addEventListener('pointerup',()=>{
 });
 renderer.domElement.addEventListener('wheel',e=>{
   e.preventDefault();
-  if(isPaintTool()||isDecalTool()){
+  if(isBrushLike()||isDecalTool()||isStampTool()){
     // dragging paints/moves a decal while either mode is on, so the wheel
     // takes over rotation instead of zoom — otherwise there'd be no way to
     // turn the model to reach the other side without leaving that mode.
@@ -531,6 +555,17 @@ const TOOLS=[
    banner:'Drag on the model to paint',paint:true,decorateOnly:true},
   {id:'erase',icon:'🧽',key:'E',label:'Eraser',      cursor:'crosshair',
    banner:'Drag to rub paint off this part',paint:true,decorateOnly:true},
+  {id:'line', icon:'╱', key:'L',label:'Line',        cursor:'crosshair',
+   banner:'Drag from one end to the other · hold Shift to snap the angle',
+   paint:true,decorateOnly:true},
+  /* The decal system's ENTRY POINT. Placing a decal used to be reachable only
+     from the "Stamp a shape" grid in the right panel, so on a fresh load the
+     rail showed no decal button at all (✥ hides itself until something is
+     already selected) and the whole feature read as missing. Stamp is armable
+     from cold, and drops where you CLICK rather than at viewport centre. */
+  {id:'stamp',icon:'✦', key:'S',label:'Stamp decal', cursor:'copy',
+   banner:'Click the model to drop the chosen shape or logo · pick one in the bar above',
+   decorateOnly:true,stamp:true},
   {id:'decal',icon:'✥', key:'M',label:'Move decal',  cursor:'move',
    banner:'Drag to move the selected decal · arrow keys nudge it',decorateOnly:true},
   {id:'pick', icon:'💧',key:'I',label:'Pick colour', cursor:'crosshair',
@@ -549,10 +584,23 @@ let spaceOrbit=false;
    on the model. The rail correctly hid the button; hiding a button is not the
    same as disarming the tool. */
 function toolLive(id){return !spaceOrbit&&activeTool===id&&toolAvailable(toolDef(id));}
-function isPaintTool(){return (toolLive('paint')||toolLive('erase'));}
+/* Freehand: a drag IS the stroke. The line tool also paints, and wants the
+   same brush ring and the same wheel-turns-the-model behaviour, but its drag
+   only picks the two ENDS — so anything that means "this drag lays paint down
+   as it moves" must ask isFreehandTool, not isBrushLike. Conflating them is
+   how the line tool would paint a freehand smear on the way to its endpoint. */
+function isFreehandTool(){return (toolLive('paint')||toolLive('erase'));}
+function isLineTool(){return toolLive('line');}
+function isBrushLike(){return isFreehandTool()||isLineTool();}
 function isDecalTool(){return toolLive('decal');}
+function isStampTool(){return toolLive('stamp');}
 function isPickTool(){return toolLive('pick');}
 let lastPaintUV=null;
+/* What ✦ will drop next. Kept as a DESCRIPTION ({kind,id}) rather than a built
+   layer so it survives switching parts, and so the shape picker and the logo
+   picker can feed the same one slot. Defaults to the first shape, so the tool
+   is usable the instant it is armed without picking anything first. */
+let stampPick={kind:'shape',id:IHC_SHAPES[0].id};
 /* ============================== THE LAYER STACK ==============================
    ONE ordered list of every decoration on the kit — brush strokes and placed
    decals together, bottom first, exactly like GIMP's or Forza's layer panel.
@@ -978,6 +1026,92 @@ function updateBrushRing(clientX,clientY){
   ring.lookAt(_ringLook);
   ring.material.color.set(activeTool==='erase'?0xffb454:paintBrushColor);
   ring.visible=true;
+}
+
+/* ------------------------------ LINE TOOL ------------------------------
+   Drag from one end to the other; the paint lands on release.
+
+   The line is laid down by RE-RAYCASTING along the screen-space segment, not
+   by interpolating between two UVs. Interpolating UV would only be right on a
+   flat, unwrapped-linearly patch: across a shoulder or around a sleeve the two
+   endpoints' UVs are not connected by a straight line in texture space, and
+   the "line" would bow away from the surface it was drawn on — or, across a
+   UV seam, shoot across the atlas. Sampling the screen segment asks the model
+   where each step actually is, so the result follows the surface and reuses
+   the same seam/side/dual-half handling every freehand stroke gets.
+
+   The preview is a world-space segment between the two hit POINTS, drawn on
+   top of everything: cheap, and it shows where the ends landed on the mesh
+   rather than where the cursor is in the air. */
+let lineStart=null,lineEnd=null,linePreview=null;
+const LINE_STEP_PX=4;      // one sample per 4 screen px
+const LINE_MAX_SAMPLES=260;
+/* Shift snaps to 45° increments, measured in SCREEN space — the same thing
+   every 2D editor does, and the only frame the user is actually aiming in. */
+function lineEndPoint(shift){
+  if(!lineStart||!lineEnd)return lineEnd;
+  if(!shift)return lineEnd;
+  const dx=lineEnd.x-lineStart.x,dy=lineEnd.y-lineStart.y;
+  const len=Math.hypot(dx,dy);
+  if(len<1)return lineEnd;
+  const step=Math.PI/4;
+  const a=Math.round(Math.atan2(dy,dx)/step)*step;
+  return{x:lineStart.x+Math.cos(a)*len,y:lineStart.y+Math.sin(a)*len};
+}
+function ensureLinePreview(){
+  if(linePreview)return linePreview;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));
+  linePreview=new THREE.Line(g,new THREE.LineBasicMaterial({
+    color:0xffffff,transparent:true,opacity:0.95,depthTest:false}));
+  linePreview.renderOrder=999; // it is a cursor, not geometry
+  linePreview.frustumCulled=false;
+  linePreview.visible=false;
+  scene.add(linePreview);
+  return linePreview;
+}
+function hideLinePreview(){
+  if(linePreview)linePreview.visible=false;
+  lineStart=lineEnd=null;
+}
+function updateLinePreview(shift){
+  const pv=ensureLinePreview();
+  const end=lineEndPoint(shift);
+  const meshes=getPaintTargetMeshes().map(skinnedPaintProxy);
+  const a=raycastUVOnMeshes(meshes,lineStart.x,lineStart.y)?_uvHit.point.clone():null;
+  const b=raycastUVOnMeshes(meshes,end.x,end.y)?_uvHit.point.clone():null;
+  if(!a||!b){pv.visible=false;return;}
+  const p=pv.geometry.attributes.position;
+  p.setXYZ(0,a.x,a.y,a.z);p.setXYZ(1,b.x,b.y,b.z);
+  p.needsUpdate=true;
+  pv.geometry.computeBoundingSphere();
+  pv.material.color.set(paintBrushColor);
+  pv.visible=true;
+}
+function commitLine(shift){
+  if(!lineStart||!lineEnd)return;
+  const end=lineEndPoint(shift);
+  const dist=Math.hypot(end.x-lineStart.x,end.y-lineStart.y);
+  const meshes=()=>getPaintTargetMeshes().map(skinnedPaintProxy);
+  const n=Math.max(1,Math.min(LINE_MAX_SAMPLES,Math.ceil(dist/LINE_STEP_PX)));
+  const stroke={id:newLayerId('S'),kind:'stroke',target:paintTarget,name:'Line',
+    color:paintBrushColor,size:paintBrushSize,opacity:paintBrushOpacity,
+    hardness:paintBrushHardness,mode:'paint',visible:true,points:[]};
+  for(let i=0;i<=n;i++){
+    const t=i/n;
+    const uv=raycastUVOnMeshes(meshes(),
+      lineStart.x+(end.x-lineStart.x)*t, lineStart.y+(end.y-lineStart.y)*t);
+    if(uv)stroke.points.push(strokePoint(uv));
+  }
+  /* A click with no drag is a single dab, which is a legitimate thing to want
+     from the line tool; a drag that hit nothing at all is not a layer. */
+  if(!stroke.points.length){showToast('That line missed the '+paintTarget);return;}
+  layers.push(stroke);
+  selectedLayerIdx=layers.length-1;
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
+  buildSidebar();
+  pushHistory();
 }
 
 /* Full reconstruction from the stored stroke lists — needed any time a STACK
@@ -1458,19 +1592,19 @@ function presetStripHTML(){
    what is already stacked on the model. */
 function paintToolsHTML(label){
   const nHere=layerCountForTarget(paintTarget);
-  let html=`<div class="rp-section"><div class="btn-row">
-      <div class="btn" id="undoStrokeBtn">↶ Undo layer</div>
-      <div class="btn" id="clearPaintBtn">🗑 Clear this part</div>
-    </div>
-    <div style="font-size:13px;color:var(--text-faint);margin-top:8px;" id="paintNote">Decoration lands on the side of the ${label} you actually put it on — the two sides are decorated separately, and nothing is mirrored.</div>
-  </div>`;
-  html+=`<div class="rp-section"><div class="rp-section-title">Stamp a shape</div>
-      <div class="lc-shape-grid" id="shapeGrid"></div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps onto the middle of the ${label} in the current brush colour, then arms ✥ so you can drag it into place. Every shape stays a vector — stretch, rotate and recolour it any time from the layer below.</div>
+  /* ORDER IS DISCOVERABILITY. Add-tools first, then the stack they feed, and
+     the housekeeping row LAST — it used to lead, which cost ~110px at the top
+     of a panel whose most important section (Layers) was already falling off
+     the bottom. Undo also has Ctrl+Z, so the button is a convenience, not the
+     way in. Measure with getBoundingClientRect after any edit here: at 1600x900
+     the panel viewport is only ~659px and this content is ~1000px. */
+  let html=`<div class="rp-section"><div class="rp-section-title">Stamp a shape</div>
+      <div class="shape-palette" id="shapeGrid"></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Lands in the middle of the ${label} in the brush colour, then arms ✥ to drag it.</div>
     </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
       <div class="palette-grid" id="logoLibraryGrid"></div>
-      <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
+      <div class="btn-row" style="margin-top:8px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
     </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Layers
       <span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${nHere} on this part · ${layers.length} total</span></div>
@@ -1479,6 +1613,12 @@ function paintToolsHTML(label){
       <div id="layerControls"></div>
       <div style="font-size:13px;color:var(--text-faint);margin-top:10px;">One stack, top of the list = on top on the model. Strokes and decals share it, so a decal can sit over paint or under it, and any layer can be flipped to 🧽 Remove to punch a hole through everything below it.</div>
     </div>`;
+  html+=`<div class="rp-section"><div class="btn-row">
+      <div class="btn" id="undoStrokeBtn">↶ Undo layer</div>
+      <div class="btn" id="clearPaintBtn">🗑 Clear this part</div>
+    </div>
+    <div style="font-size:13px;color:var(--text-faint);margin-top:8px;" id="paintNote">Decoration lands on the side of the ${label} you put it on — the two sides are decorated separately, and nothing is mirrored.</div>
+  </div>`;
   return html;
 }
 /* The layer lists used to always show the whole kit while the tools above them
@@ -1495,7 +1635,7 @@ function renderRightPanel(){
      single unbroken scroll — the reason "where is the paint tool" needed
      asking at all. */
   if(currentActivity==='decorate'){
-    html+=`<p class="rp-sub">Paint and decals on the ${cat.label.toLowerCase()}. Pick a tool on the rail at the top left of the viewport — 🖌 brush, 🧽 eraser, ✥ move a logo, 💧 lift a colour.</p>`;
+    html+=`<p class="rp-sub">Tools are on the rail, top left of the viewport — 🖌 brush, 🧽 eraser, ╱ line, ✥ move a decal, 💧 lift a colour.</p>`;
     html+=paintToolsHTML(cat.label.toLowerCase());
     rp.innerHTML=html;
     wireDecalsPanel();
@@ -2408,6 +2548,8 @@ function renderLogoLibraryGrid(){
        wordmark stamped into a square box lands pre-squashed, and "fix the
        stretch I never asked for" is a bad first move. */
     d.addEventListener('click',()=>{
+      // also load ✦, so picking here then clicking the model stamps THIS logo
+      stampPick={kind:'logo',id:l.id};
       const ar=(l.img&&l.img.complete&&l.img.naturalWidth)
         ?l.img.naturalHeight/l.img.naturalWidth:1;
       placeDecal({kind:'logo',logoId:l.id,name:l.name,
@@ -2423,6 +2565,7 @@ function renderShapeGrid(){
     `<div class="lc-shape-btn" data-qshape="${s.id}" title="${s.label}">${s.icon}</div>`).join('');
   grid.querySelectorAll('[data-qshape]').forEach(b=>{
     b.addEventListener('click',()=>{
+      stampPick={kind:'shape',id:b.dataset.qshape}; // keep ✦ in sync with the panel
       const def=ihcShape(b.dataset.qshape);
       const ar=def.ar||1;
       placeDecal({kind:'shape',shape:def.id,name:def.label,color:paintBrushColor,
@@ -2449,8 +2592,39 @@ function decalDropPoint(){
   }
   return{u:0.5,v:0.5,side:1,b:0,hit:false};
 }
-function placeDecal(spec){
-  const p=decalDropPoint();
+function paintTargetLabel(){
+  const d=ihcPiece(paintTarget);
+  return d?d.label:'part';
+}
+/* Turns whatever ✦ is currently loaded with into a real layer at an explicit
+   UV. Shares placeDecal's spec-building with the right-panel grids so the two
+   entry points can never drift into stamping different things. */
+function stampSpec(){
+  if(stampPick.kind==='logo'){
+    const l=logoLibrary.find(x=>x.id===stampPick.id);
+    if(!l)return null;
+    const ar=(l.img&&l.img.complete&&l.img.naturalWidth)
+      ?l.img.naturalHeight/l.img.naturalWidth:1;
+    return{kind:'logo',logoId:l.id,name:l.name,
+      sx:DECAL_DEFAULT_SIZE,sy:DECAL_DEFAULT_SIZE*ar};
+  }
+  const def=ihcShape(stampPick.id);
+  const ar=def.ar||1;
+  return{kind:'shape',shape:def.id,name:def.label,color:paintBrushColor,
+    sx:DECAL_DEFAULT_SIZE*ar,sy:DECAL_DEFAULT_SIZE,
+    outline:{on:false,color:'#000000',width:8}};
+}
+function stampDecalAt(uv){
+  const spec=stampSpec();
+  if(!spec){showToast('That logo is gone from the library — pick another');return;}
+  /* keepTool: a stamp click must NOT arm ✥ the way the panel grids do, or the
+     very next click would drag the decal you just placed instead of dropping
+     a second one. The pointerdown handler already put this drag in 'decal'
+     mode, so dragging on from the stamp still slides it. */
+  placeDecal(spec,{u:uv.x,v:uv.y,side:uv.side,b:uv.b?1:0,hit:true},true);
+}
+function placeDecal(spec,at,keepTool){
+  const p=at||decalDropPoint();
   if(!p.hit)showToast('Turn the model so the part faces you — the decal landed off-surface');
   layers.push(Object.assign({
     id:newLayerId('D'),target:paintTarget,visible:true,opacity:1,mode:'paint',
@@ -2464,8 +2638,10 @@ function placeDecal(spec){
   pushHistory();
   /* Arm the move tool on placement. Placing a decal and then hunting for a
      "Move on Model" button two panels down was the single clunkiest step in
-     the old flow — the thing you want next is always to position it. */
-  setActiveTool('decal',true);
+     the old flow — the thing you want next is always to position it. Stamping
+     by click is the exception: there the decal already landed where you aimed,
+     so staying on ✦ lets you drop several without a round trip to the rail. */
+  if(!keepTool)setActiveTool('decal',true);
   syncToolRail();
 }
 function moveSelectedDecal(uv){
@@ -2877,7 +3053,9 @@ function syncToolRail(){
   renderToolOptions();
   syncModeBanner();
   renderer.domElement.style.cursor=spaceOrbit?'grab':(toolDef(activeTool).cursor||'');
-  if(!isPaintTool())hideBrushRing();
+  if(!isBrushLike())hideBrushRing();
+  // switching tools mid-drag would otherwise strand the preview segment on screen
+  if(!isLineTool())hideLinePreview();
 }
 /* Arming a tool the current activity doesn't offer is a no-op rather than a
    silent illegal state — e.g. B while designing colours. */
@@ -2896,6 +3074,7 @@ function renderToolOptions(){
   const bar=document.getElementById('toolOptions');
   if(!bar)return;
   const t=toolDef(activeTool);
+  if(t.stamp){renderStampOptions(bar);return;}
   if(!t.paint){bar.classList.remove('open');bar.innerHTML='';return;}
   const isErase=t.id==='erase';
   bar.innerHTML=
@@ -2925,6 +3104,41 @@ function renderToolOptions(){
     paintBrushHardness=+hd.value;
     document.getElementById('toHardnessVal').textContent=Math.round(paintBrushHardness*100)+'%';
   });
+}
+/* ✦'s own settings: WHICH decal it will drop. The shapes and the saved logos
+   both live here rather than only in the right panel, so the decal system is
+   fully operable from the rail — arm ✦, pick, click the model. The right
+   panel's grids stay as they are (they are also the library manager) and both
+   write the same stampPick, so the two views cannot disagree.
+   Scrolls sideways in one row on purpose: the options bar owns a strip of the
+   viewport top, and a wrapping grid of 24 shapes here would eat the model. */
+function renderStampOptions(bar){
+  const isShape=stampPick.kind==='shape';
+  bar.innerHTML=
+    `<div class="to-group"><span>Colour</span>
+       <div class="to-swatch" id="toColorSwatch" style="background:${paintBrushColor}" title="Shape colour (logos keep their own)"></div></div>
+     <div class="to-sep"></div>
+     <div class="to-group"><span>Shape</span><div class="to-stamps" id="toShapeStrip">`+
+    IHC_SHAPES.map(s=>
+      `<div class="to-stamp${isShape&&stampPick.id===s.id?' on':''}" data-sshape="${s.id}" title="${s.label}">${s.icon}</div>`).join('')+
+    `</div></div>`+
+    (logoLibrary.length
+      ?`<div class="to-sep"></div>
+        <div class="to-group"><span>Logo</span><div class="to-stamps" id="toLogoStrip">`+
+       logoLibrary.map(l=>
+         `<div class="to-stamp img${!isShape&&stampPick.id===l.id?' on':''}" data-slogo="${l.id}" title="${l.name}"
+               style="background:#14151c url(${l.dataURL}) center/contain no-repeat"></div>`).join('')+
+        `</div></div>`
+      :'');
+  bar.classList.add('open');
+  const sw=document.getElementById('toColorSwatch');
+  if(sw)sw.addEventListener('click',()=>openColorPicker(sw,'paint',null));
+  bar.querySelectorAll('[data-sshape]').forEach(b=>b.addEventListener('click',()=>{
+    stampPick={kind:'shape',id:b.dataset.sshape};renderToolOptions();
+  }));
+  bar.querySelectorAll('[data-slogo]').forEach(b=>b.addEventListener('click',()=>{
+    stampPick={kind:'logo',id:b.dataset.slogo};renderToolOptions();
+  }));
 }
 /* The old paint mode announced itself with nothing but a crosshair cursor, and
    the permanent viewport hint kept claiming "Drag to rotate" while dragging
