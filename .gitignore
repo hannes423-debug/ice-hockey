@@ -1,0 +1,11 @@
+# Pre-change backups live alongside the real files. They must never be
+# committed, and while untracked they bury genuine changes in `git status` —
+# which is exactly the noise that let a stale deploy go unnoticed three times.
+*.bak_pre_*
+*.bak
+
+# Probe/harness scratch. Vendored CDN copies of three.js get dropped next to
+# the page when testing headlessly; they are not part of the site.
+__probe*.html
+three.min.js
+GLTFLoader.js
