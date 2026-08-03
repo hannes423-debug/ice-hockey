@@ -424,14 +424,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
       <div class="lc-tools">
         <div class="lc-tools-title">Add</div>
         <div class="btn" id="lcAddText">🔤 Text</div>
-        <div class="lc-shape-grid">
-          <div class="lc-shape-btn" data-shape="circle" title="Circle">●</div>
-          <div class="lc-shape-btn" data-shape="square" title="Square">■</div>
-          <div class="lc-shape-btn" data-shape="triangle" title="Triangle">▲</div>
-          <div class="lc-shape-btn" data-shape="star" title="Star">★</div>
-          <div class="lc-shape-btn" data-shape="hexagon" title="Hexagon">⬡</div>
-          <div class="lc-shape-btn" data-shape="shield" title="Shield">🛡</div>
-        </div>
+        <!-- filled from core's IHC_SHAPES so the compositor offers exactly the
+             same set the on-model stamper does -->
+        <div class="lc-shape-grid" id="lcShapeGrid"></div>
         <label class="btn" style="text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="lcImportFile" accept="image/*" style="display:none;"></label>
       </div>
       <div class="lc-canvas-wrap">

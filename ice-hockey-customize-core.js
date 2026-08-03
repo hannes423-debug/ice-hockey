@@ -130,9 +130,15 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
     shader.uniforms.uGhostAlpha={value:1.0};
     let extraUniforms='\nuniform vec3 splitZone0;\nuniform vec3 splitZone1;\nuniform vec3 splitZone2;\nuniform float uSplitY;\nuniform float uGhostMode;\nuniform float uGhostAlpha;\nvarying float vIhY;',extraCode='';
     if(decals){
-      shader.uniforms.logoMap={value:decals.logoMap};
+      /* ONE decoration sampler. There used to be two — logoMap under paintMap
+         — which hard-wired "a placed logo can never sit above a brush stroke"
+         into the SHADER, where no layer-panel reorder could ever reach it. It
+         also meant the eraser (which only ever touched the paint canvas) could
+         not rub out a logo. Strokes and decals are now one ordered stack
+         flattened into this single canvas by ihcReplayLayers, so their z-order
+         is data, not a compile-time fact. */
       shader.uniforms.paintMap={value:decals.paintMap};
-      extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;';
+      extraUniforms+='\nuniform sampler2D paintMap;';
       /* The name/number PLATE only exists on the jersey's own UV region, so
          only the jersey's material samples it — every other piece would just
          be paying for a sampler that can never contribute a pixel (and could
@@ -145,28 +151,35 @@ function installRecolorShader(material,maskTexture,zoneColors,decals,split){
       /* THERE IS NO MIRRORING. A stroke lands where it was painted and
          nowhere else.
 
-         This still needs the half-pack remap, because the rig's left and right
-         share one UV island — that shared island is what used to make
-         mirroring happen "for free", and it also means a raw-UV lookup CANNOT
-         express "this side only". So the paint canvas is one atlas packed into
-         left/right HALVES by u, and each fragment samples the half matching
-         its own real side (vIhSide, the per-fragment counterpart to the
-         raycast hit test the painter uses). ihcPaintCanvasXY() writes with the
-         identical formula — the two must stay in exact agreement.
+         This still needs the half-pack remap, because MOST of the rig's meshes
+         share one UV island between left and right — that shared island is
+         what used to make mirroring happen "for free", and it also means a
+         raw-UV lookup CANNOT express "this side only". So the paint canvas is
+         one atlas packed into left/right HALVES by u, and each fragment
+         samples the half matching its own real side (vIhSide, the per-fragment
+         counterpart to the raycast hit test the painter uses).
+         ihcPaintCanvasXY() writes with the identical formula — the two must
+         stay in exact agreement.
+
+         The half-pack is why paint used to be SLICED DEAD FLAT down the
+         anatomical midline (see IHC_UV_UNIQUE_MESHES): the jersey's two sides
+         do NOT share a UV island, so a stroke near the chest centre was
+         written into one half only, while the geometry across x=0 sampled the
+         other — empty — half. Meshes that don't need the pack now write into
+         BOTH halves, which is a painter-side fix; this shader is unchanged by
+         it, because either half it picks now holds the same pixels.
 
          There used to be a second, raw-UV canvas for mirrored strokes and a
          uMirrorPaint uniform to pick between them. Both are gone: only the
          jersey ever received the split maps (every other piece was handed a
-         stripped {logoMap,paintMap} and silently fell back to the raw canvas
-         for its split sampler), so turning mirror off on a helmet sampled an
-         empty texture and wiped every stroke on it. One canvas, one formula,
-         and that whole class of mismatch cannot happen. */
+         stripped map set and silently fell back to the raw canvas for its
+         split sampler), so turning mirror off on a helmet sampled an empty
+         texture and wiped every stroke on it. One canvas, one formula, and
+         that whole class of mismatch cannot happen. */
       extraCode=(decals.nameNumberMap?`
           vec4 nn = texture2D( nameNumberMap, vUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, nn.rgb, nn.a );`:'')+`
           vec2 sUv = vec2( vUv.x*0.5 + (vIhSide>=0.0?0.5:0.0), vUv.y );
-          vec4 lg = texture2D( logoMap, sUv );
-          diffuseColor.rgb = mix( diffuseColor.rgb, lg.rgb, lg.a );
           vec4 pt = texture2D( paintMap, sUv );
           diffuseColor.rgb = mix( diffuseColor.rgb, pt.rgb, pt.a );`;
       extraUniforms+='\nvarying float vIhSide;';
@@ -459,7 +472,7 @@ function ihcBuildPieceKit(visual,decals){
     const below=belowDef?mkZones(belowDef):null;
     if(below)out[belowDef.id]=below;
     const pieceDecals=decals?(primary.nameplate?decals
-      :{logoMap:decals.logoMap,paintMap:decals.paintMap}):null;
+      :{paintMap:decals.paintMap}):null;
     installRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
       below?{y:IHC_SPLIT_Y,colors:below.colors}:null);
   });
@@ -522,7 +535,21 @@ function setupTintZone(material,label){
 }
 
 /* ============================== JERSEY DECALS ============================== */
+/* The name/number plate canvas, sampled with RAW vUv, so it is the same square
+   as the kit atlas itself. Also the unit every decoration size is quoted in:
+   "1 DECAL_SIZE" means "the full width of the atlas in UV". */
 const DECAL_SIZE=2048;
+/* The PAINT canvas is a different shape on purpose. It holds the same atlas
+   TWICE — once per body side (see ihcPaintCanvasXY) — so at 4096x2048 each
+   half is a full-resolution 2048² copy of the atlas and one UV unit measures
+   2048px along BOTH axes.
+   It used to be 2048² , i.e. each half only 1024 wide, which quietly made u
+   half-resolution and every brush dab and decal 2:1 STRETCHED horizontally on
+   the model (measured: a "round" size-110 dab wrote a 111x111px disc onto the
+   canvas, which is 0.108 of u against 0.054 of v). Sizes are quoted against
+   DECAL_SIZE, not against this width, so a size-40 brush is 40 atlas texels
+   across whichever axis you measure it on. */
+const PAINT_W=DECAL_SIZE*2,PAINT_H=DECAL_SIZE;
 const NAME_RECT={x:200,y:1400,w:400,h:150};
 const NUMBER_RECT={x:240,y:1530,w:340,h:230};
 /* Only web-safe/OS-level font families — no @font-face loading, so no
@@ -597,6 +624,154 @@ function ihcDrawNameNumber(ctx,o){
   }
 }
 
+/* ============================== SHAPE LIBRARY ==============================
+   The Forza-style vinyl set. Every path is drawn into a box that spans -r..r
+   on both axes and is centred on the origin, so one function can serve the
+   2D logo compositor, the layer-panel thumbnails and the on-model decal
+   replay without any of them knowing the others' scale.
+
+   These are VECTOR shapes, kept as {shape,color} on the layer rather than
+   rasterized to a PNG the way the old quick-stamp did. That is what lets a
+   placed shape stay recolourable, restretchable and crisp at any size forever
+   — a rasterized stamp is frozen at the resolution and colour it was baked at.
+   `ar` is the default width:height a freshly stamped one gets (a "rectangle"
+   and a "square" are the same path, they just start life differently). */
+const IHC_SHAPES=[
+  {id:'circle',   label:'Circle',       icon:'●'},
+  {id:'ring',     label:'Ring',         icon:'◎'},
+  {id:'semi',     label:'Half circle',  icon:'◗'},
+  {id:'crescent', label:'Half moon',    icon:'☾'},
+  {id:'square',   label:'Square',       icon:'■'},
+  {id:'rect',     label:'Rectangle',    icon:'▬',ar:2.0},
+  {id:'roundrect',label:'Rounded box',  icon:'▢',ar:1.6},
+  {id:'stripe',   label:'Stripe',       icon:'▭',ar:4.0},
+  {id:'triangle', label:'Triangle',     icon:'▲'},
+  {id:'righttri', label:'Right triangle',icon:'◺'},
+  {id:'diamond',  label:'Diamond',      icon:'◆'},
+  {id:'pentagon', label:'Pentagon',     icon:'⬟'},
+  {id:'hexagon',  label:'Hexagon',      icon:'⬡'},
+  {id:'octagon',  label:'Octagon',      icon:'⯃'},
+  {id:'star',     label:'Star (5)',     icon:'★'},
+  {id:'star6',    label:'Star (6)',     icon:'✶'},
+  {id:'burst',    label:'Burst',        icon:'✳'},
+  {id:'chevron',  label:'Chevron',      icon:'⌃',ar:1.6},
+  {id:'arrow',    label:'Arrow',        icon:'➤',ar:1.4},
+  {id:'cross',    label:'Cross',        icon:'✚'},
+  {id:'blade',    label:'Blade',        icon:'⟋',ar:2.6},
+  {id:'shield',   label:'Shield',       icon:'🛡'},
+  {id:'heart',    label:'Heart',        icon:'♥'},
+  {id:'bolt',     label:'Lightning',    icon:'⚡'},
+];
+function ihcShape(id){return IHC_SHAPES.find(s=>s.id===id)||IHC_SHAPES[0];}
+/* Regular n-gon with a vertex pointing up. */
+function ihcPolyPath(ctx,n,r,rot){
+  for(let i=0;i<n;i++){
+    const a=i*Math.PI*2/n-Math.PI/2+(rot||0);
+    const x=Math.cos(a)*r,y=Math.sin(a)*r;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+function ihcStarPath(ctx,spikes,r,innerRatio){
+  const inner=r*innerRatio;
+  for(let i=0;i<spikes*2;i++){
+    const a=i*Math.PI/spikes-Math.PI/2,rad=i%2===0?r:inner;
+    const x=Math.cos(a)*rad,y=Math.sin(a)*rad;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+/* Builds the path only — the caller owns fill/stroke/transform, which is what
+   lets an ERASE decal reuse the identical geometry under destination-out. */
+function ihcShapePath(ctx,shape,r){
+  ctx.beginPath();
+  switch(shape){
+    case 'circle': ctx.arc(0,0,r,0,Math.PI*2); break;
+    /* Subtractive inner sub-path: traced the OTHER way round so the nonzero
+       winding rule punches it out. Two separate arcs would just fill twice. */
+    case 'ring':
+      ctx.arc(0,0,r,0,Math.PI*2,false);
+      ctx.moveTo(r*0.58,0);ctx.arc(0,0,r*0.58,0,Math.PI*2,true);
+      break;
+    /* Offset/radius picked so the lune is fat on the spine (0.62r) and the
+       horns still close to a point — at 0.42/0.92 the two circles were so
+       nearly concentric that it read as a broken RING rather than a moon. */
+    case 'crescent':
+      ctx.arc(0,0,r,0,Math.PI*2,false);
+      ctx.moveTo(r*0.48+r*0.86,0);ctx.arc(r*0.48,0,r*0.86,0,Math.PI*2,true);
+      break;
+    case 'semi': ctx.arc(0,r*0.5,r,Math.PI,Math.PI*2);ctx.closePath(); break;
+    case 'square': ctx.rect(-r,-r,r*2,r*2); break;
+    case 'rect':   ctx.rect(-r,-r,r*2,r*2); break;
+    case 'stripe': ctx.rect(-r,-r,r*2,r*2); break;
+    case 'roundrect': {
+      const k=r*0.28;
+      ctx.moveTo(-r+k,-r);
+      ctx.arcTo( r,-r, r, r,k);ctx.arcTo( r, r,-r, r,k);
+      ctx.arcTo(-r, r,-r,-r,k);ctx.arcTo(-r,-r, r,-r,k);
+      ctx.closePath();
+      break;
+    }
+    case 'triangle':
+      ctx.moveTo(0,-r);ctx.lineTo(r*0.87,r*0.5);ctx.lineTo(-r*0.87,r*0.5);ctx.closePath();
+      break;
+    case 'righttri':
+      ctx.moveTo(-r,-r);ctx.lineTo(r,r);ctx.lineTo(-r,r);ctx.closePath();
+      break;
+    case 'diamond':
+      ctx.moveTo(0,-r);ctx.lineTo(r,0);ctx.lineTo(0,r);ctx.lineTo(-r,0);ctx.closePath();
+      break;
+    case 'pentagon': ihcPolyPath(ctx,5,r); break;
+    case 'hexagon':  ihcPolyPath(ctx,6,r); break;
+    case 'octagon':  ihcPolyPath(ctx,8,r,Math.PI/8); break;
+    case 'star':  ihcStarPath(ctx,5,r,0.45); break;
+    case 'star6': ihcStarPath(ctx,6,r,0.55); break;
+    case 'burst': ihcStarPath(ctx,12,r,0.68); break;
+    case 'chevron':
+      ctx.moveTo(-r,-r);ctx.lineTo(0,-r*0.1);ctx.lineTo(r,-r);
+      ctx.lineTo(r,r*0.1);ctx.lineTo(0,r);ctx.lineTo(-r,r*0.1);ctx.closePath();
+      break;
+    case 'arrow':
+      ctx.moveTo(r,0);ctx.lineTo(r*0.1,-r);ctx.lineTo(r*0.1,-r*0.38);
+      ctx.lineTo(-r,-r*0.38);ctx.lineTo(-r,r*0.38);ctx.lineTo(r*0.1,r*0.38);
+      ctx.lineTo(r*0.1,r);ctx.closePath();
+      break;
+    case 'cross': {
+      const t=r*0.34;
+      ctx.moveTo(-t,-r);ctx.lineTo(t,-r);ctx.lineTo(t,-t);ctx.lineTo(r,-t);
+      ctx.lineTo(r,t);ctx.lineTo(t,t);ctx.lineTo(t,r);ctx.lineTo(-t,r);
+      ctx.lineTo(-t,t);ctx.lineTo(-r,t);ctx.lineTo(-r,-t);ctx.lineTo(-t,-t);
+      ctx.closePath();
+      break;
+    }
+    /* A tapered sliver — the racing-stripe/claw-mark primitive that a plain
+       rectangle cannot make however you stretch it. */
+    case 'blade':
+      ctx.moveTo(-r,r*0.55);
+      ctx.quadraticCurveTo(0,-r*0.15,r,-r*0.55);
+      ctx.quadraticCurveTo(0,r*0.25,-r,r*0.55);
+      ctx.closePath();
+      break;
+    case 'shield':
+      ctx.moveTo(-r,-r*0.7);ctx.lineTo(r,-r*0.7);ctx.lineTo(r,r*0.15);
+      ctx.quadraticCurveTo(r,r*0.9,0,r);ctx.quadraticCurveTo(-r,r*0.9,-r,r*0.15);
+      ctx.closePath();
+      break;
+    case 'heart':
+      ctx.moveTo(0,r*0.9);
+      ctx.bezierCurveTo(-r*1.4,r*0.05,-r*0.62,-r*1.05,0,-r*0.36);
+      ctx.bezierCurveTo( r*0.62,-r*1.05, r*1.4,r*0.05,0,r*0.9);
+      ctx.closePath();
+      break;
+    case 'bolt':
+      ctx.moveTo(r*0.25,-r);ctx.lineTo(-r*0.62,r*0.14);ctx.lineTo(-r*0.05,r*0.14);
+      ctx.lineTo(-r*0.28,r);ctx.lineTo(r*0.62,-r*0.2);ctx.lineTo(r*0.02,-r*0.2);
+      ctx.closePath();
+      break;
+    default: ctx.arc(0,0,r,0,Math.PI*2);
+  }
+}
+
 /* ----- stroke / logo replay (shared by editor redraw + menu preview) -----
    A straight line between two consecutive drag samples is only valid when
    the UV mapping is CONTINUOUS between them — crossing a UV seam means two
@@ -663,87 +838,217 @@ function ihcFadeToTransparent(hex){
   return'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+',0)';
 }
 /* Where a UV point lands on the paint canvas. The canvas is one atlas packed
-   into left/right HALVES by u: a point's real side decides which half it lands
-   in, which is the only way to address one side of a rig whose left and right
+   into left/right HALVES by u: a point's `half` decides which one it lands in,
+   which is the only way to address one side of a rig whose left and right
    share a UV island. The shader's sUv remap (installRecolorShader) must stay
    in exact agreement. There is no second, mirrored convention. */
-function ihcPaintCanvasXY(uv,side){
-  return{x:(uv.x*0.5+(side>=0?0.5:0))*DECAL_SIZE,y:uv.y*DECAL_SIZE};
+function ihcPaintCanvasXY(uv,half){
+  return{x:(uv.x*0.5+(half>=0?0.5:0))*PAINT_W,y:uv.y*PAINT_H};
 }
-/* Replays stored stroke lists in order onto ctx (does NOT clear — callers
-   clear once, then replay team layers under personal layers).
-   Extra trailing arguments are tolerated: callers used to pass a {raw,split}
+/* ---------------------- THE MIDLINE-SPLIT FIX ----------------------
+   Meshes whose LEFT and RIGHT halves have their own separate UV islands. On
+   these the half-pack is not just unnecessary, it is actively destructive:
+   a fragment picks its canvas half from its own bind-pose position.x, so
+   anything painted near the body centreline was written into one half while
+   the geometry on the other side of x=0 read the other — empty — half, and
+   the paint came out SLICED DEAD FLAT down the middle of the chest. A single
+   round dab landed on the canvas as a full 111x111px disc and rendered on the
+   model as a half-disc.
+
+   Measured off the shipped player GLB by binning every triangle's UV cells by
+   the sign of its centroid x (256x256 grid over the atlas):
+       Cube001 jersey   L 9203 cells / R 9217 / shared   266  = 1.5%  UNIQUE
+       Cube005 cage     L  563 cells / R  530 / shared    32  = 3.0%  UNIQUE
+       Cube    neck     L 1283        / R 1283 / shared 1283  = 100%  mirrored
+       Cube002 legs     L 4804        / R 4804 / shared 4804  = 100%  mirrored
+       Cube003 gloves   L 2755        / R 2755 / shared 2755  = 100%  mirrored
+       Cube004 helmet   L 1643        / R 1643 / shared 1643  = 100%  mirrored
+       Cube006 boots    L 2205        / R 2205 / shared 2205  = 100%  mirrored
+       Cube007 blades   L  858        / R  858 / shared  858  = 100%  mirrored
+   (the few % "shared" on the two unique meshes is the seam row where the two
+   islands abut, which is exactly where you want a stroke to carry across.)
+
+   So paint on a UNIQUE mesh is written into BOTH halves. Whichever half a
+   fragment picks it finds the same pixels, the seam cannot appear, and it is
+   still not mirroring: the two sides occupy different u, so a stroke on the
+   left sleeve simply has nothing to say about the right one.
+
+   The 100%-mirrored meshes keep the pack — for them it is the only thing
+   making one-sided paint expressible at all. */
+const IHC_UV_UNIQUE_MESHES=['Cube001','Cube005'];
+function ihcMeshBothHalves(meshName){
+  return IHC_UV_UNIQUE_MESHES.indexOf(meshName)>=0;
+}
+/* Which canvas halves one point/decal writes into. `b` (both) is set by the
+   painter from the mesh it hit; anything saved before this existed has no `b`
+   at all and replays one-sided exactly as it always did. */
+function ihcHalves(o){
+  return o&&o.b?[-1,1]:[(o&&o.side)>=0?1:-1];
+}
+/* Extra trailing arguments are tolerated: callers used to pass a {raw,split}
    context pair and a mirror lookup, and a stale one must not silently paint
    into `undefined`. */
 function ihcCtx(ctx){return ctx&&ctx.split!==undefined?ctx.split:ctx;}
-function ihcReplayStrokes(ctxs,strokes){
-  const ctx=ihcCtx(ctxs);
-  if(!ctx)return;
-  (strokes||[]).forEach(s=>{
-    if(s.visible===false)return;
-    let prevXY=null,prev=null;
-    s.points.forEach(p=>{
-      const xy=ihcPaintCanvasXY(p,p.side);
-      /* A side change mid-drag is always a seam: the two sides land on
-         opposite halves of the canvas, so joining them would draw a line
-         straight across the atlas. */
-      const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV)||
-        (prev&&prev.side!==p.side);
-      stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-        s.size,s.color,s.opacity,seamJump,{mode:s.mode,hardness:s.hardness});
-      prevXY=xy;prev=p;
+
+/* ============================ THE LAYER STACK ============================
+   ONE ordered array holds every decoration on the kit — brush strokes and
+   placed decals together, bottom of the array first. This replaced two
+   parallel lists rendered into two textures in a fixed shader-level order,
+   which meant a decal could never be moved above a stroke and the eraser
+   (which only ever touched the paint texture) could not touch a decal at all.
+
+   A layer is one of:
+     {kind:'stroke', points:[{x,y,side,b}], color,size,opacity,hardness,mode}
+     {kind:'shape',  shape,color,outline,  u,v,side,b, sx,sy,rot,flipX,flipY}
+     {kind:'logo',   logoId,                u,v,side,b, sx,sy,rot,flipX,flipY}
+   plus, on all three: id, name, target, visible, opacity, mode.
+     mode 'paint' composites normally; 'erase' composites destination-out, so
+     ANY layer type can be used to rub out everything below it in its stack. */
+function ihcDrawStrokeLayer(ctx,L){
+  const alpha=L.opacity===undefined?1:L.opacity;
+  let prev=null;
+  (L.points||[]).forEach(p=>{
+    const halves=ihcHalves(p);
+    /* Two points connect only when they write the same halves. A plain side
+       change is a seam (the halves are opposite ends of the atlas); a change
+       in DUAL-ness is one too, because the run either does or doesn't have a
+       twin to join up with. Within one dual mesh nothing ever changes, which
+       is precisely why the chest seam is gone. */
+    const sameHalves=prev&&!!prev.b===!!p.b&&(p.b||(prev.side>=0)===(p.side>=0));
+    const seamJump=!!prev&&(Math.hypot(p.x-prev.x,p.y-prev.y)>SEAM_JUMP_UV||!sameHalves);
+    halves.forEach(h=>{
+      const xy=ihcPaintCanvasXY(p,h);
+      const pxy=(prev&&!seamJump)?ihcPaintCanvasXY(prev,h):null;
+      stampSegment(ctx,xy.x,xy.y,pxy?pxy.x:null,pxy?pxy.y:null,
+        L.size,L.color,alpha,seamJump,{mode:L.mode,hardness:L.hardness});
     });
+    prev=p;
   });
   ctx.globalAlpha=1;
 }
+/* Sizes are in UV: sx/sy are fractions of the FULL atlas width, so sx===sy is
+   a square on the model regardless of the half-pack (PAINT_W is two atlases
+   wide, hence the 0.5). Non-uniform sx/sy is the "stretch" handle. */
+function ihcDecalBox(L){
+  const sx=L.sx===undefined?(L.scale===undefined?0.15:L.scale):L.sx;
+  const sy=L.sy===undefined?(L.scale===undefined?0.15:L.scale):L.sy;
+  return{w:sx*0.5*PAINT_W,h:sy*PAINT_H};
+}
+function ihcDrawDecalLayer(ctx,L,logoLib){
+  const box=ihcDecalBox(L);
+  if(!(box.w>0)||!(box.h>0))return;
+  let img=null;
+  if(L.kind==='logo'){
+    const lib=(logoLib||[]).find(l=>l.id===L.logoId);
+    img=lib&&lib.img;
+    if(!img||!img.complete||!img.naturalWidth)return; // still decoding
+  }
+  ihcHalves(L).forEach(h=>{
+    const xy=ihcPaintCanvasXY({x:L.u,y:L.v},h);
+    ctx.save();
+    ctx.globalAlpha=L.opacity===undefined?1:L.opacity;
+    if(L.mode==='erase')ctx.globalCompositeOperation='destination-out';
+    ctx.translate(xy.x,xy.y);
+    ctx.rotate(L.rot||L.rotation||0);
+    ctx.scale(L.flipX?-1:1,L.flipY?-1:1);
+    if(img){
+      ctx.drawImage(img,-box.w/2,-box.h/2,box.w,box.h);
+    }else{
+      /* Vector shapes are built on a unit radius and squashed into the box by
+         the transform, so a stretched star stays a clean stretched star at
+         any canvas size instead of a resampled bitmap. */
+      ctx.scale(box.w/2,box.h/2);
+      ihcShapePath(ctx,L.shape,1);
+      ctx.fillStyle=L.color||'#ffffff';
+      ctx.fill();
+      const o=L.outline;
+      if(o&&o.on&&o.width>0){
+        /* Stroked in the SQUASHED space on purpose, so the outline stretches
+           with the shape exactly like a real stretched vinyl — width is a
+           percentage of the shape's own radius, not of the canvas. */
+        ctx.lineWidth=(o.width/100)*2;
+        ctx.strokeStyle=o.color||'#000000';
+        ctx.lineJoin='round';
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  });
+  ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';
+}
+/* Replays one ordered stack onto ctx (does NOT clear — callers clear once,
+   then replay team layers under personal ones). */
+function ihcReplayLayers(ctxs,layers,logoLib){
+  const ctx=ihcCtx(ctxs);
+  if(!ctx)return;
+  (layers||[]).forEach(L=>{
+    if(!L||L.visible===false)return;
+    if(L.kind==='stroke'||L.points)ihcDrawStrokeLayer(ctx,L);
+    else ihcDrawDecalLayer(ctx,L,logoLib);
+  });
+  ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';
+}
 /* Replays SEVERAL ownership stacks, bottom-first, keeping each one's erase
-   strokes inside its own stack.
+   layers inside its own stack.
 
    Replaying them one after another into a single context is only correct while
-   every stroke is additive. An erase stroke composites destination-out against
+   every layer is additive. An erase composites destination-out against
    whatever is already on the canvas, so a personal-accent erase would rub out
-   the team stroke it happens to sit over — the player would be destroying team
+   the team design it happens to sit over — the player would be destroying
    design they may not even be allowed to recolour, and it re-happens on every
-   reload because the erase stroke replays identically forever.
+   reload because the layer replays identically forever.
 
    Each stack is therefore rendered into its own scratch canvas and the results
    are flattened with drawImage, which is opaque to the erase inside it.
-   `stacks` is an array of stroke lists, bottom first. Single-stack callers
-   should keep using ihcReplayStrokes — this only earns its two extra canvases
-   when there is genuinely a second owner to protect. */
-function ihcReplayStackedStrokes(ctxs,stacks){
+   `stacks` is an array of layer lists, bottom first; the extra canvas is only
+   paid for when there is genuinely a second owner to protect. */
+function ihcReplayStackedLayers(ctxs,stacks,logoLib){
   const ctx=ihcCtx(ctxs);
   if(!ctx)return;
   const live=(stacks||[]).filter(s=>s&&s.length);
   if(live.length<2){
-    if(live.length)ihcReplayStrokes(ctx,live[0]);
+    if(live.length)ihcReplayLayers(ctx,live[0],logoLib);
     return;
   }
-  const size=(ctx.canvas?ctx.canvas.width:0)||DECAL_SIZE;
-  const c=document.createElement('canvas');c.width=c.height=size;
+  const w=(ctx.canvas?ctx.canvas.width:0)||PAINT_W;
+  const h=(ctx.canvas?ctx.canvas.height:0)||PAINT_H;
+  const c=document.createElement('canvas');c.width=w;c.height=h;
   const s=c.getContext('2d');
   live.forEach(list=>{
-    s.clearRect(0,0,size,size);
-    ihcReplayStrokes(s,list);
+    s.clearRect(0,0,w,h);
+    ihcReplayLayers(s,list,logoLib);
     ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
     ctx.drawImage(c,0,0);
   });
 }
-/* Same idea for placed logo/shape decals; logoLib entries need a loaded .img. */
-function ihcReplayDecals(ctxs,decals,logoLib){
-  const ctx=ihcCtx(ctxs);
-  if(!ctx)return;
-  (decals||[]).forEach(d=>{
-    if(d.visible===false)return;
-    const lib=(logoLib||[]).find(l=>l.id===d.logoId);
-    if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    const xy=ihcPaintCanvasXY({x:d.u,y:d.v},d.side);
-    const size=DECAL_SIZE*d.scale;
-    ctx.save();
-    ctx.translate(xy.x,xy.y);ctx.rotate(d.rotation||0);
-    ctx.drawImage(lib.img,-size/2,-size/2,size,size);
-    ctx.restore();
-  });
+/* ---- migration: the old two-list format -> one ordered stack ----
+   Order preserves exactly what the old shader did (all decals under all
+   strokes), so a design saved before the layer stack existed reloads looking
+   identical and only THEN becomes reorderable. Old decals carry a single
+   uniform `scale` and no `b`, both of which the readers above default. */
+function ihcMigrateLayers(strokes,decals){
+  const out=[];
+  (decals||[]).forEach((d,i)=>out.push(Object.assign({},d,{
+    kind:'logo',name:d.name||('Logo '+(i+1)),
+    sx:d.sx===undefined?(d.scale||0.15):d.sx,
+    sy:d.sy===undefined?(d.scale||0.15):d.sy,
+    rot:d.rot===undefined?(d.rotation||0):d.rot,
+    opacity:d.opacity===undefined?1:d.opacity,
+    mode:d.mode||'paint',
+  })));
+  (strokes||[]).forEach((s,i)=>out.push(Object.assign({},s,{
+    kind:'stroke',name:s.name||((s.mode==='erase'?'Erase ':'Stroke ')+(i+1)),
+  })));
+  return out;
+}
+/* A stored design speaks `layers` if it has the key at all — an empty stack is
+   a real, meaningful value (everything was deleted) and must not fall back to
+   re-migrating stale pre-layer lists. */
+function ihcDesignLayers(o,strokesKey,decalsKey){
+  if(o&&o.layers)return o.layers;
+  return ihcMigrateLayers(o&&o[strokesKey],o&&o[decalsKey]);
 }
 
 /* ============================== TEAM STORE ============================== */
@@ -796,8 +1101,7 @@ function ihtDesignPieces(design){
   return design.pieces;
 }
 function ihtDesign(body,font){
-  return{body,pieces:ihtPiecesFromBody(body),font:font||'Arial',
-    paintStrokes:[],decals:[]};
+  return{body,pieces:ihtPiecesFromBody(body),font:font||'Arial',layers:[]};
 }
 function ihtSeedStore(){
   /* Migration: whatever look the player had already built in the editor
@@ -898,8 +1202,12 @@ function ihtEffectiveLoadout(s,kit,teamId,jerseyId){
     v:1,
     body:j.design.body.slice(),
     pieces:JSON.parse(JSON.stringify(ihtDesignPieces(j.design))),
-    paint:{strokes:j.design.paintStrokes||[],decals:j.design.decals||[],
-           accStrokes:ctx.accStrokes||[],accDecals:ctx.accDecals||[]},
+    /* `teamLayers`/`accLayers` are the two OWNERSHIP stacks, each a single
+       ordered list of strokes and decals — see ihcReplayStackedLayers. The
+       old four-list shape is migrated on read, so a loadout written before
+       the layer stack existed still loads in the game and the menu. */
+    paint:{teamLayers:ihcDesignLayers(j.design,'paintStrokes','decals'),
+           accLayers:ihcDesignLayers(ctx,'accStrokes','accDecals')},
     neck:kit.skin||'#c68863',
     stick:(ctx.stick||kit.defaultStick||IHT_DEFAULT_STICK).slice(),
     name:kit.name||'',

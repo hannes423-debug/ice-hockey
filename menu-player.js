@@ -66,17 +66,19 @@ resize();
 
 /* ----- decal canvases (same DataTexture path as the editor — see the
    CanvasTexture-never-uploads note in the editor) ----- */
-function makeDecalTex(){
-  const t=new THREE.DataTexture(new Uint8Array(DECAL_SIZE*DECAL_SIZE*4),DECAL_SIZE,DECAL_SIZE,THREE.RGBAFormat);
+function makeDecalTex(w,h){
+  const t=new THREE.DataTexture(new Uint8Array(w*h*4),w,h,THREE.RGBAFormat);
   t.flipY=false;return t;
 }
-function makeCanvas(){
-  const c=document.createElement('canvas');c.width=c.height=DECAL_SIZE;
+function makeCanvas(w,h){
+  const c=document.createElement('canvas');c.width=w;c.height=h;
   return c;
 }
-const nnCanvas=makeCanvas(),nnCtx=nnCanvas.getContext('2d'),nnTex=makeDecalTex();
-const logoCanvas=makeCanvas(),logoCtx=logoCanvas.getContext('2d'),logoTex=makeDecalTex();
-const paintCanvas=makeCanvas(),paintCtx=paintCanvas.getContext('2d'),paintTex=makeDecalTex();
+const nnCanvas=makeCanvas(DECAL_SIZE,DECAL_SIZE),nnCtx=nnCanvas.getContext('2d'),nnTex=makeDecalTex(DECAL_SIZE,DECAL_SIZE);
+/* ONE decoration canvas — the editor's whole layer stack flattens into it, so
+   decals and strokes keep the z-order the layer panel gave them. It is
+   PAINT_W x PAINT_H (the atlas twice over, once per body side), not square. */
+const paintCanvas=makeCanvas(PAINT_W,PAINT_H),paintCtx=paintCanvas.getContext('2d'),paintTex=makeDecalTex(PAINT_W,PAINT_H);
 function syncTex(ctx,canvas,tex){
   tex.image.data.set(ctx.getImageData(0,0,canvas.width,canvas.height).data);
   tex.needsUpdate=true;
@@ -89,24 +91,22 @@ function drawPlate(){
   });
   syncTex(nnCtx,nnCanvas,nnTex);
 }
+/* logo bitmaps decode async — redraw as each finishes. Vector shape layers
+   carry their own geometry and are correct immediately. */
+let logoLib=[];
 function drawPaint(){
-  paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  paintCtx.clearRect(0,0,PAINT_W,PAINT_H);
   /* Stacked, not sequential: replaying both into one context lets a personal
-     ERASE stroke rub out the team stroke underneath it, which would make the
+     ERASE layer rub out the team design underneath it, which would make the
      menu preview disagree with the editor. Bottom first. */
-  ihcReplayStackedStrokes(paintCtx,[jersey.design.paintStrokes,kctx.accStrokes]);
+  ihcReplayStackedLayers(paintCtx,[
+    ihcDesignLayers(jersey.design,'paintStrokes','decals'),
+    ihcDesignLayers(kctx,'accStrokes','accDecals'),
+  ],logoLib);
   syncTex(paintCtx,paintCanvas,paintTex);
 }
-/* logo images decode async — redraw the layer as each finishes */
-let logoLib=[];
-function drawLogos(){
-  logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  ihcReplayDecals(logoCtx,jersey.design.decals,logoLib);
-  ihcReplayDecals(logoCtx,kctx.accDecals,logoLib);
-  syncTex(logoCtx,logoCanvas,logoTex);
-}
 try{logoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){logoLib=[];}
-logoLib.forEach(l=>{l.img=new Image();l.img.onload=drawLogos;l.img.src=l.dataURL;});
+logoLib.forEach(l=>{l.img=new Image();l.img.onload=drawPaint;l.img.src=l.dataURL;});
 
 /* ----- character ----- */
 const gltfLoader=new THREE.GLTFLoader();
@@ -160,7 +160,7 @@ function poseArmsDown(){
 function applyLoadout(){
   // exact same per-piece pipeline the Locker Room builds the preview with —
   // shared in core precisely so the menu and the editor can't drift apart
-  const pieces=ihcBuildPieceKit(visual,{nameNumberMap:nnTex,logoMap:logoTex,paintMap:paintTex});
+  const pieces=ihcBuildPieceKit(visual,{nameNumberMap:nnTex,paintMap:paintTex});
   const pieceColors=lo.pieces||ihtPiecesFromBody(lo.body);
   Object.keys(pieceColors).forEach(id=>{
     const p=pieces[id];
@@ -182,7 +182,7 @@ function applyLoadout(){
   setupTintZone(meshGripTape.material,'Grip Tape').setColor(lo.stick[2]);
   setupTintZone(meshBladeTape.material,'Blade Tape').setColor(lo.stick[3]);
 
-  drawPlate();drawPaint();drawLogos();
+  drawPlate();drawPaint();
 }
 
 function setupSway(v){

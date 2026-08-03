@@ -11321,6 +11321,12 @@ if(screen.orientation)screen.orientation.addEventListener('change',()=>{setTimeo
    rasterizer, the kit mask, the stroke/decal replay). Change one, change both. */
 const IH_LOADOUT_KEY='ihGameLoadout_v1';
 const IH_DECAL_SIZE=2048;
+/* The paint canvas holds the atlas TWICE, once per body side (see
+   ihPaintCanvasXY), so each half is a full-resolution square copy of it and
+   one UV unit is IH_DECAL_SIZE px on both axes. Hand-synced with the editor's
+   PAINT_W/PAINT_H — a mismatch renders a different jersey than the Locker
+   Room previewed. */
+const IH_PAINT_W=IH_DECAL_SIZE*2,IH_PAINT_H=IH_DECAL_SIZE;
 const IH_NAME_RECT={x:200,y:1400,w:400,h:150};
 const IH_NUMBER_RECT={x:240,y:1530,w:340,h:230};
 const IH_SPLIT_Y=0.62; // bind-pose local Y of the shorts hem (render-verified)
@@ -11338,9 +11344,10 @@ const IH_PIECES=[
 let ihBodyColors=null,ihNeckColors=null,ihStickShaftBlade=null,ihGripTapeMat=null,ihBladeTapeMat=null;
 let ihPlayerPieces=null;
 let ihNameCanvas,ihNameCtx,ihNameTexture;
-let ihPaintCanvas,ihPaintCtx,ihPaintTexture,ihLogoCanvas,ihLogoCtx,ihLogoTexture;
-/* second pair holding the UNMIRRORED (half-packed) convention — see the note
-   on the shader above for why it cannot share the mirrored canvas */
+/* ONE decoration canvas: the editor's whole layer stack — strokes AND placed
+   decals, in stack order — flattens into it. IH_PAINT_W x IH_PAINT_H, not
+   square, because it holds the atlas twice (once per body side). */
+let ihPaintCanvas,ihPaintCtx,ihPaintTexture;
 
 function ihGetImageDataFromTexture(tex){
   const img=tex.image;
@@ -11488,11 +11495,12 @@ function ihInstallRecolorShader(material,maskTexture,zoneColors,decals,split){
           vec4 nn = texture2D( nameNumberMap, vUv );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, nn.rgb, nn.a );`;
       }
-      /* paint + placed logos: the same shared atlas-space canvases the editor
-         composites, in the same order (logos under paint), sampled with the
-         same left/right-half remap. */
+      /* Decoration: the ONE shared atlas-space canvas the editor composites
+         its whole layer stack into, sampled with the same left/right-half
+         remap. There used to be two (logoMap under paintMap), which fixed
+         "decals below paint" in the shader where the editor's layer panel
+         could not reach it. */
       if(decals.paintMap){
-        shader.uniforms.logoMap={value:decals.logoMap};
         shader.uniforms.paintMap={value:decals.paintMap};
         /* THERE IS NO MIRRORING — a stroke renders on the side it was
            painted on and nowhere else. The half-pack remap stays, because the
@@ -11500,11 +11508,9 @@ function ihInstallRecolorShader(material,maskTexture,zoneColors,decals,split){
            express "this side only", so the canvas is packed into left/right
            halves by u and each fragment samples its own side. Must stay
            identical to ihPaintCanvasXY and to the editor's shader. */
-        extraUniforms+='\nuniform sampler2D logoMap;\nuniform sampler2D paintMap;\nvarying float vIhSide;';
+        extraUniforms+='\nuniform sampler2D paintMap;\nvarying float vIhSide;';
         extraCode+=`
           vec2 sUv = vec2( vUv.x*0.5 + (vIhSide>=0.0?0.5:0.0), vUv.y );
-          vec4 lg = texture2D( logoMap, sUv );
-          gl_FragColor.rgb = mix( gl_FragColor.rgb, lg.rgb, lg.a );
           vec4 pt = texture2D( paintMap, sUv );
           gl_FragColor.rgb = mix( gl_FragColor.rgb, pt.rgb, pt.a );`;
       }
@@ -11555,7 +11561,7 @@ function ihBuildPieceKit(visual,decals){
     const belowDef=defs.find(d=>d.splitSide==='below');
     const below=belowDef?mk():null;
     if(below)out[belowDef.id]=below;
-    const pieceDecals=decals?(primary.nameplate?decals:{logoMap:decals.logoMap,paintMap:decals.paintMap}):null;
+    const pieceDecals=decals?(primary.nameplate?decals:{paintMap:decals.paintMap}):null;
     ihInstallRecolorShader(mesh.material,kit.mask,above.colors,pieceDecals,
       below?{y:IH_SPLIT_Y,colors:below.colors}:null);
   });
@@ -11796,16 +11802,12 @@ function ihSetupLockerRoomMaterials(){
   ihNameCtx=ihNameCanvas.getContext('2d');
   ihNameTexture=ihMakeDecalTexture();
   ihPaintCanvas=document.createElement('canvas');
-  ihPaintCanvas.width=ihPaintCanvas.height=IH_DECAL_SIZE;
+  ihPaintCanvas.width=IH_PAINT_W;ihPaintCanvas.height=IH_PAINT_H;
   ihPaintCtx=ihPaintCanvas.getContext('2d');
-  ihPaintTexture=ihMakeDecalTexture();
-  ihLogoCanvas=document.createElement('canvas');
-  ihLogoCanvas.width=ihLogoCanvas.height=IH_DECAL_SIZE;
-  ihLogoCtx=ihLogoCanvas.getContext('2d');
-  ihLogoTexture=ihMakeDecalTexture();
+  ihPaintTexture=ihMakeDecalTexture(IH_PAINT_W,IH_PAINT_H);
 
   ihPlayerPieces=ihBuildPieceKit(player.visual,
-    {nameNumberMap:ihNameTexture,logoMap:ihLogoTexture,paintMap:ihPaintTexture});
+    {nameNumberMap:ihNameTexture,paintMap:ihPaintTexture});
   if(!ihPlayerPieces)return false;
   ihBodyColors=ihPlayerPieces.jersey.colors;      // the name/number plate reads these
   ihNeckColors=ihPlayerPieces.neck.colors;
@@ -11818,8 +11820,9 @@ function ihSetupLockerRoomMaterials(){
   ihBladeTapeMat=meshBladeTape.material;
   return true;
 }
-function ihMakeDecalTexture(){
-  const t=new THREE.DataTexture(new Uint8Array(IH_DECAL_SIZE*IH_DECAL_SIZE*4),IH_DECAL_SIZE,IH_DECAL_SIZE,THREE.RGBAFormat);
+function ihMakeDecalTexture(w,h){
+  w=w||IH_DECAL_SIZE;h=h||IH_DECAL_SIZE;
+  const t=new THREE.DataTexture(new Uint8Array(w*h*4),w,h,THREE.RGBAFormat);
   t.flipY=false;return t;
 }
 /* ---------- FREEHAND PAINT + PLACED LOGOS ----------
@@ -11849,9 +11852,15 @@ function ihTargetForPieceId(pid){
    side picks the half. Mirroring is gone, so this is the only convention —
    loadouts saved with the old `mirror`/`mirrorByTarget` flags still load, the
    flags are just ignored. Must match the shader's sUv remap exactly. */
-function ihPaintCanvasXY(uv,side){
-  return{x:(uv.x*0.5+(side>=0?0.5:0))*IH_DECAL_SIZE,y:uv.y*IH_DECAL_SIZE};
+function ihPaintCanvasXY(uv,half){
+  return{x:(uv.x*0.5+(half>=0?0.5:0))*IH_PAINT_W,y:uv.y*IH_PAINT_H};
 }
+/* Meshes whose two sides have SEPARATE UV islands write into both halves, so
+   the half a fragment picks cannot matter and paint is not sliced down the
+   body midline. Hand-synced with core's IHC_UV_UNIQUE_MESHES, which carries
+   the per-mesh UV-overlap measurements this list came from. */
+const IH_UV_UNIQUE_MESHES=['Cube001','Cube005'];
+function ihHalves(o){return o&&o.b?[-1,1]:[(o&&o.side)>=0?1:-1];}
 /* `opts` is optional and every field defaults to the old behaviour, so a
    stroke saved before the editor grew an eraser/soft brush replays exactly as
    it always did:
@@ -11898,90 +11907,245 @@ function ihStampSegment(ctx,x,y,px,py,size,color,opacity,seamJump,opts){
   for(let i=1;i<=n;i++)dab(px+dx*i/n,py+dy*i/n);
   ctx.restore();
 }
-function ihReplayStrokes(ctx,strokes){
-  if(!ctx)return;
-  (strokes||[]).forEach(s=>{
-    if(s.visible===false||!s.points)return;
-    let prevXY=null,prev=null;
-    s.points.forEach(p=>{
-      const xy=ihPaintCanvasXY(p,p.side);
-      // a side change is always a seam: the halves are opposite ends of the atlas
-      const seamJump=(prev&&Math.hypot(p.x-prev.x,p.y-prev.y)>IH_SEAM_JUMP_UV)||
-        (prev&&prev.side!==p.side);
-      ihStampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-        s.size,s.color,s.opacity,seamJump,{mode:s.mode,hardness:s.hardness});
-      prevXY=xy;prev=p;
+/* ---------- THE LAYER STACK ----------
+   Hand-synced port of core's ihcReplayLayers / ihcShapePath / ihcHalves. The
+   editor stores decoration as ONE ordered list of layers (bottom first) —
+   brush strokes and placed decals together — and each layer is a DESCRIPTION,
+   never pixels, so replaying it here reproduces exactly what the Locker Room
+   drew. There used to be two lists rendered into two textures whose order the
+   shader fixed; that is why a decal could never sit above paint. */
+function ihPolyPath(ctx,n,r,rot){
+  for(let i=0;i<n;i++){
+    const a=i*Math.PI*2/n-Math.PI/2+(rot||0);
+    const x=Math.cos(a)*r,y=Math.sin(a)*r;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+function ihStarPath(ctx,spikes,r,innerRatio){
+  const inner=r*innerRatio;
+  for(let i=0;i<spikes*2;i++){
+    const a=i*Math.PI/spikes-Math.PI/2,rad=i%2===0?r:inner;
+    const x=Math.cos(a)*rad,y=Math.sin(a)*rad;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+/* Must stay path-for-path identical to core's ihcShapePath. */
+function ihShapePath(ctx,shape,r){
+  ctx.beginPath();
+  switch(shape){
+    case 'circle': ctx.arc(0,0,r,0,Math.PI*2); break;
+    case 'ring':
+      ctx.arc(0,0,r,0,Math.PI*2,false);
+      ctx.moveTo(r*0.58,0);ctx.arc(0,0,r*0.58,0,Math.PI*2,true);
+      break;
+    case 'crescent':
+      ctx.arc(0,0,r,0,Math.PI*2,false);
+      ctx.moveTo(r*0.48+r*0.86,0);ctx.arc(r*0.48,0,r*0.86,0,Math.PI*2,true);
+      break;
+    case 'semi': ctx.arc(0,r*0.5,r,Math.PI,Math.PI*2);ctx.closePath(); break;
+    case 'square': case 'rect': case 'stripe': ctx.rect(-r,-r,r*2,r*2); break;
+    case 'roundrect': {
+      const k=r*0.28;
+      ctx.moveTo(-r+k,-r);
+      ctx.arcTo( r,-r, r, r,k);ctx.arcTo( r, r,-r, r,k);
+      ctx.arcTo(-r, r,-r,-r,k);ctx.arcTo(-r,-r, r,-r,k);
+      ctx.closePath();
+      break;
+    }
+    case 'triangle':
+      ctx.moveTo(0,-r);ctx.lineTo(r*0.87,r*0.5);ctx.lineTo(-r*0.87,r*0.5);ctx.closePath();
+      break;
+    case 'righttri':
+      ctx.moveTo(-r,-r);ctx.lineTo(r,r);ctx.lineTo(-r,r);ctx.closePath();
+      break;
+    case 'diamond':
+      ctx.moveTo(0,-r);ctx.lineTo(r,0);ctx.lineTo(0,r);ctx.lineTo(-r,0);ctx.closePath();
+      break;
+    case 'pentagon': ihPolyPath(ctx,5,r); break;
+    case 'hexagon':  ihPolyPath(ctx,6,r); break;
+    case 'octagon':  ihPolyPath(ctx,8,r,Math.PI/8); break;
+    case 'star':  ihStarPath(ctx,5,r,0.45); break;
+    case 'star6': ihStarPath(ctx,6,r,0.55); break;
+    case 'burst': ihStarPath(ctx,12,r,0.68); break;
+    case 'chevron':
+      ctx.moveTo(-r,-r);ctx.lineTo(0,-r*0.1);ctx.lineTo(r,-r);
+      ctx.lineTo(r,r*0.1);ctx.lineTo(0,r);ctx.lineTo(-r,r*0.1);ctx.closePath();
+      break;
+    case 'arrow':
+      ctx.moveTo(r,0);ctx.lineTo(r*0.1,-r);ctx.lineTo(r*0.1,-r*0.38);
+      ctx.lineTo(-r,-r*0.38);ctx.lineTo(-r,r*0.38);ctx.lineTo(r*0.1,r*0.38);
+      ctx.lineTo(r*0.1,r);ctx.closePath();
+      break;
+    case 'cross': {
+      const t=r*0.34;
+      ctx.moveTo(-t,-r);ctx.lineTo(t,-r);ctx.lineTo(t,-t);ctx.lineTo(r,-t);
+      ctx.lineTo(r,t);ctx.lineTo(t,t);ctx.lineTo(t,r);ctx.lineTo(-t,r);
+      ctx.lineTo(-t,t);ctx.lineTo(-r,t);ctx.lineTo(-r,-t);ctx.lineTo(-t,-t);
+      ctx.closePath();
+      break;
+    }
+    case 'blade':
+      ctx.moveTo(-r,r*0.55);
+      ctx.quadraticCurveTo(0,-r*0.15,r,-r*0.55);
+      ctx.quadraticCurveTo(0,r*0.25,-r,r*0.55);
+      ctx.closePath();
+      break;
+    case 'shield':
+      ctx.moveTo(-r,-r*0.7);ctx.lineTo(r,-r*0.7);ctx.lineTo(r,r*0.15);
+      ctx.quadraticCurveTo(r,r*0.9,0,r);ctx.quadraticCurveTo(-r,r*0.9,-r,r*0.15);
+      ctx.closePath();
+      break;
+    case 'heart':
+      ctx.moveTo(0,r*0.9);
+      ctx.bezierCurveTo(-r*1.4,r*0.05,-r*0.62,-r*1.05,0,-r*0.36);
+      ctx.bezierCurveTo( r*0.62,-r*1.05, r*1.4,r*0.05,0,r*0.9);
+      ctx.closePath();
+      break;
+    case 'bolt':
+      ctx.moveTo(r*0.25,-r);ctx.lineTo(-r*0.62,r*0.14);ctx.lineTo(-r*0.05,r*0.14);
+      ctx.lineTo(-r*0.28,r);ctx.lineTo(r*0.62,-r*0.2);ctx.lineTo(r*0.02,-r*0.2);
+      ctx.closePath();
+      break;
+    default: ctx.arc(0,0,r,0,Math.PI*2);
+  }
+}
+function ihDrawStrokeLayer(ctx,L){
+  const alpha=L.opacity===undefined?1:L.opacity;
+  let prev=null;
+  (L.points||[]).forEach(p=>{
+    // a seam is a big UV jump, a side change, or a change in dual-ness — see
+    // the editor's ihcDrawStrokeLayer for why all three break the line
+    const sameHalves=prev&&!!prev.b===!!p.b&&(p.b||(prev.side>=0)===(p.side>=0));
+    const seamJump=!!prev&&(Math.hypot(p.x-prev.x,p.y-prev.y)>IH_SEAM_JUMP_UV||!sameHalves);
+    ihHalves(p).forEach(h=>{
+      const xy=ihPaintCanvasXY(p,h);
+      const pxy=(prev&&!seamJump)?ihPaintCanvasXY(prev,h):null;
+      ihStampSegment(ctx,xy.x,xy.y,pxy?pxy.x:null,pxy?pxy.y:null,
+        L.size,L.color,alpha,seamJump,{mode:L.mode,hardness:L.hardness});
     });
+    prev=p;
   });
   ctx.globalAlpha=1;
 }
+/* sx/sy are fractions of the FULL atlas width, so sx===sy is square on the
+   model (PAINT_W is two atlases wide, hence the 0.5). */
+function ihDrawDecalLayer(ctx,L,logoLib){
+  const sx=L.sx===undefined?(L.scale===undefined?0.15:L.scale):L.sx;
+  const sy=L.sy===undefined?(L.scale===undefined?0.15:L.scale):L.sy;
+  const w=sx*0.5*IH_PAINT_W,h=sy*IH_PAINT_H;
+  if(!(w>0)||!(h>0))return;
+  let img=null;
+  if(L.kind==='logo'||L.logoId){
+    const lib=(logoLib||[]).find(l=>l.id===L.logoId);
+    img=lib&&lib.img;
+    if(!img||!img.complete||!img.naturalWidth)return; // still decoding
+  }
+  ihHalves(L).forEach(hf=>{
+    const xy=ihPaintCanvasXY({x:L.u,y:L.v},hf);
+    ctx.save();
+    ctx.globalAlpha=L.opacity===undefined?1:L.opacity;
+    if(L.mode==='erase')ctx.globalCompositeOperation='destination-out';
+    ctx.translate(xy.x,xy.y);
+    ctx.rotate(L.rot||L.rotation||0);
+    ctx.scale(L.flipX?-1:1,L.flipY?-1:1);
+    if(img){
+      ctx.drawImage(img,-w/2,-h/2,w,h);
+    }else{
+      ctx.scale(w/2,h/2);
+      ihShapePath(ctx,L.shape,1);
+      ctx.fillStyle=L.color||'#ffffff';
+      ctx.fill();
+      const o=L.outline;
+      if(o&&o.on&&o.width>0){
+        ctx.lineWidth=(o.width/100)*2;
+        ctx.strokeStyle=o.color||'#000000';
+        ctx.lineJoin='round';
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  });
+  ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';
+}
+function ihReplayLayers(ctx,layers,logoLib){
+  if(!ctx)return;
+  (layers||[]).forEach(L=>{
+    if(!L||L.visible===false)return;
+    if(L.kind==='stroke'||L.points)ihDrawStrokeLayer(ctx,L);
+    else ihDrawDecalLayer(ctx,L,logoLib);
+  });
+  ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';
+}
 /* Replays several OWNERSHIP stacks bottom-first, keeping each one's erase
-   strokes inside its own stack. Playing them back-to-back into one context is
-   only correct while every stroke is additive: an erase composites
+   layers inside its own stack. Playing them back-to-back into one context is
+   only correct while every layer is additive: an erase composites
    destination-out against whatever is already there, so a personal-accent
-   erase would rub out the team stroke beneath it — the game would then render
+   erase would rub out the team design beneath it — the game would then render
    a jersey the Locker Room never showed. Each stack gets its own scratch
    canvas and the results are flattened with drawImage, which the erase inside
    cannot reach through. */
-function ihReplayStackedStrokes(ctx,stacks){
+function ihReplayStackedLayers(ctx,stacks,logoLib){
   if(!ctx)return;
   const live=(stacks||[]).filter(s=>s&&s.length);
   if(live.length<2){
-    if(live.length)ihReplayStrokes(ctx,live[0]);
+    if(live.length)ihReplayLayers(ctx,live[0],logoLib);
     return;
   }
   const c=document.createElement('canvas');
-  c.width=c.height=IH_DECAL_SIZE;
+  c.width=IH_PAINT_W;c.height=IH_PAINT_H;
   const s=c.getContext('2d');
   live.forEach(list=>{
-    s.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-    ihReplayStrokes(s,list);
+    s.clearRect(0,0,IH_PAINT_W,IH_PAINT_H);
+    ihReplayLayers(s,list,logoLib);
     ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
     ctx.drawImage(c,0,0);
   });
 }
-function ihReplayDecals(ctx,decals,logoLib){
-  if(!ctx)return;
-  (decals||[]).forEach(d=>{
-    if(d.visible===false)return;
-    const lib=(logoLib||[]).find(l=>l.id===d.logoId);
-    if(!lib||!lib.img||!lib.img.complete||lib.img.naturalWidth===0)return;
-    const xy=ihPaintCanvasXY({x:d.u,y:d.v},d.side);
-    const size=IH_DECAL_SIZE*d.scale;
-    ctx.save();
-    ctx.translate(xy.x,xy.y);ctx.rotate(d.rotation||0);
-    ctx.drawImage(lib.img,-size/2,-size/2,size,size);
-    ctx.restore();
-  });
+/* A loadout written before the layer stack existed carries the old two-list
+   shape (strokes/decals per owner) — migrated on read, decals under strokes,
+   which is exactly what the old two-texture shader did. */
+function ihMigrateLayers(strokes,decals){
+  const out=[];
+  (decals||[]).forEach(d=>out.push(Object.assign({},d,{kind:'logo'})));
+  (strokes||[]).forEach(s=>out.push(Object.assign({},s,{kind:'stroke'})));
+  return out;
+}
+function ihOwnerLayers(paint,which){
+  if(!paint)return[];
+  if(paint[which+'Layers'])return paint[which+'Layers'];
+  return which==='team'?ihMigrateLayers(paint.strokes,paint.decals)
+                       :ihMigrateLayers(paint.accStrokes,paint.accDecals);
 }
 function ihSyncCanvasToTexture(ctx,texture){
-  texture.image.data.set(ctx.getImageData(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE).data);
+  texture.image.data.set(ctx.getImageData(0,0,ctx.canvas.width,ctx.canvas.height).data);
   texture.needsUpdate=true;
 }
 /* The logo bitmaps themselves live in the editor's own library key (they're
    data URLs, far too big for the loadout snapshot) — decode async and redraw
-   the logo layer as each one lands. */
+   as each one lands. Vector SHAPE layers carry their own geometry and need no
+   such wait, so a kit decorated only with shapes is correct on frame one. */
 let ihLogoLib=null,ihLastPaint=null;
 function ihApplyPaintLayers(paint){
   if(!ihPaintCtx||!paint)return;
   ihLastPaint=paint;
-  ihPaintCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  // stacked, not sequential — see ihReplayStackedStrokes: a personal ERASE
-  // stroke must not reach the team design underneath it
-  ihReplayStackedStrokes(ihPaintCtx,[paint.strokes,paint.accStrokes]);
-  ihSyncCanvasToTexture(ihPaintCtx,ihPaintTexture);
   if(ihLogoLib===null){
     try{ihLogoLib=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){ihLogoLib=[];}
-    ihLogoLib.forEach(l=>{l.img=new Image();l.img.onload=()=>ihRedrawLogoLayer();l.img.src=l.dataURL;});
+    ihLogoLib.forEach(l=>{l.img=new Image();l.img.onload=()=>ihRedrawPaint();l.img.src=l.dataURL;});
   }
-  ihRedrawLogoLayer();
+  ihRedrawPaint();
 }
-function ihRedrawLogoLayer(){
-  if(!ihLogoCtx||!ihLastPaint)return;
-  ihLogoCtx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
-  ihReplayDecals(ihLogoCtx,ihLastPaint.decals,ihLogoLib);
-  ihReplayDecals(ihLogoCtx,ihLastPaint.accDecals,ihLogoLib);
-  ihSyncCanvasToTexture(ihLogoCtx,ihLogoTexture);
+function ihRedrawPaint(){
+  if(!ihPaintCtx||!ihLastPaint)return;
+  ihPaintCtx.clearRect(0,0,IH_PAINT_W,IH_PAINT_H);
+  // stacked, not sequential — see ihReplayStackedLayers: a personal ERASE
+  // layer must not reach the team design underneath it
+  ihReplayStackedLayers(ihPaintCtx,
+    [ihOwnerLayers(ihLastPaint,'team'),ihOwnerLayers(ihLastPaint,'acc')],ihLogoLib);
+  ihSyncCanvasToTexture(ihPaintCtx,ihPaintTexture);
 }
 /* The stick is its own GLB with its own texture, so it keeps the simple
    whole-texture clustering the body used to use (no UV-island split needed —
@@ -12057,7 +12221,7 @@ function applyLockerRoomLoadout(){
   // debug/test hook, same convention as window.__poseFrozen etc — `let`
   // top-level globals aren't reachable from outside this script's scope.
   window.__ihLoadoutDebug={bodyColors:ihBodyColors,neckColors:ihNeckColors,stickShaftBlade:ihStickShaftBlade,gripTapeMat:ihGripTapeMat,bladeTapeMat:ihBladeTapeMat,
-    pieces:ihPlayerPieces,paintCanvas:()=>ihPaintCanvas,logoCanvas:()=>ihLogoCanvas};
+    pieces:ihPlayerPieces,paintCanvas:()=>ihPaintCanvas};
 }
 window.__ihBotDebugSnapshot=()=>{
   const info=e=>{

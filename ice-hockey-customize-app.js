@@ -175,18 +175,19 @@ renderer.domElement.addEventListener('pointerdown',e=>{
   if(isPaintTool()){
     dragMode='paint';
     // one drag = one layer: points accumulate on currentStroke (drawn live,
-    // fast, exactly like before) and only land in the persisted paintStrokes
-    // list on pointerup — see redrawPaintLayer() for why storing POINTS
-    // instead of raw pixels is what makes strokes individually deletable/
-    // reorderable/hideable and finally savable into presets+undo.
-    currentStroke={id:'PS'+Date.now(),target:paintTarget,color:paintBrushColor,
+    // fast, exactly like before) and only land in the persisted layer stack
+    // on pointerup — see redrawPaintLayer() for why storing POINTS instead
+    // of raw pixels is what makes a stroke individually deletable/
+    // reorderable/hideable and savable into presets+undo.
+    currentStroke={id:newLayerId('S'),kind:'stroke',target:paintTarget,
+      name:(activeTool==='erase'?'Erase':'Stroke'),color:paintBrushColor,
       size:paintBrushSize,opacity:paintBrushOpacity,hardness:paintBrushHardness,
       mode:activeTool==='erase'?'erase':'paint',visible:true,points:[]};
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,null);lastPaintUV=uv;}
+    if(uv){currentStroke.points.push(strokePoint(uv));paintStamp(uv,null);lastPaintUV=uv;}
     return;
   }
-  if(isDecalTool()&&selectedDecalIdx>=0){
+  if(isDecalTool()&&isDecalLayer(selectedLayer())){
     dragMode='decal';
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -204,7 +205,7 @@ renderer.domElement.addEventListener('pointermove',e=>{
   else hideBrushRing();
   if(dragMode==='paint'){
     const uv=raycastUV(e.clientX,e.clientY);
-    if(uv){if(currentStroke)currentStroke.points.push({x:uv.x,y:uv.y,side:uv.side});paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
+    if(uv){if(currentStroke)currentStroke.points.push(strokePoint(uv));paintStamp(uv,lastPaintUV);lastPaintUV=uv;}
   }else if(dragMode==='decal'){
     const uv=raycastUV(e.clientX,e.clientY);
     if(uv)moveSelectedDecal(uv);
@@ -217,11 +218,13 @@ renderer.domElement.addEventListener('pointermove',e=>{
 });
 addEventListener('pointerup',()=>{
   if(dragMode==='paint'&&currentStroke&&currentStroke.points.length){
-    paintStrokes.push(currentStroke);
-    renderPaintLayersList();
+    layers.push(currentStroke);
+    selectedLayerIdx=layers.length-1;
+    renderLayersList();renderLayerControls();
     buildSidebar(); // the Decorate rows carry a live layer count
     pushHistory();
   }
+  if(dragMode==='decal')pushHistory(); // a move is one undo step, not one per sample
   /* A click that never became a drag selects the part under it. Only from the
      orbit branch: in paint or decal-move mode the click already meant
      something, and stealing it would move the panel out from under the brush. */
@@ -322,9 +325,11 @@ function loadCharacter(cb){
    text stays visible until the user sets a custom name/number.
    DECAL_SIZE/NAME_RECT/NUMBER_RECT + the plate drawing live in core now. */
 let nameNumberCanvas,nameNumberCtx,nameNumberTexture;
-/* ONE canvas each. There used to be a second pair for the mirrored packing
-   convention, selected per paint target — see ihcPaintCanvasXY. */
-let logoCanvas,logoCtx,logoTexture;
+/* ONE decoration canvas. There used to be a second pair for the mirrored
+   packing convention (see ihcPaintCanvasXY) and, until the layer stack landed,
+   a separate logo canvas underneath this one — which is what hard-wired
+   "decals always below paint" and left the eraser unable to touch a decal.
+   Strokes and decals now flatten into this single canvas in stack order. */
 let paintCanvas,paintCtx,paintTexture;
 let jerseyName='',jerseyNumber='';
 /* CanvasTexture custom samplers (nameNumberMap/paintMap) silently failed to
@@ -335,8 +340,8 @@ let jerseyName='',jerseyNumber='';
    chase the exact three.js/ANGLE internals further, both decal layers use
    the proven-working DataTexture path instead: draw into a normal 2D canvas,
    then copy its pixels into the DataTexture's backing array. */
-function makeDecalDataTexture(){
-  const tex=new THREE.DataTexture(new Uint8Array(DECAL_SIZE*DECAL_SIZE*4),DECAL_SIZE,DECAL_SIZE,THREE.RGBAFormat);
+function makeDecalDataTexture(w,h){
+  const tex=new THREE.DataTexture(new Uint8Array(w*h*4),w,h,THREE.RGBAFormat);
   tex.flipY=false;
   return tex;
 }
@@ -349,17 +354,14 @@ function setupDecalCanvases(){
   nameNumberCanvas=document.createElement('canvas');
   nameNumberCanvas.width=nameNumberCanvas.height=DECAL_SIZE;
   nameNumberCtx=nameNumberCanvas.getContext('2d');
-  nameNumberTexture=makeDecalDataTexture();
+  nameNumberTexture=makeDecalDataTexture(DECAL_SIZE,DECAL_SIZE);
 
-  logoCanvas=document.createElement('canvas');
-  logoCanvas.width=logoCanvas.height=DECAL_SIZE;
-  logoCtx=logoCanvas.getContext('2d');
-  logoTexture=makeDecalDataTexture();
-
+  /* PAINT_W x PAINT_H, not square: the paint canvas holds the atlas TWICE,
+     once per body side, so each half is a full-resolution square copy. */
   paintCanvas=document.createElement('canvas');
-  paintCanvas.width=paintCanvas.height=DECAL_SIZE;
+  paintCanvas.width=PAINT_W;paintCanvas.height=PAINT_H;
   paintCtx=paintCanvas.getContext('2d');
-  paintTexture=makeDecalDataTexture();
+  paintTexture=makeDecalDataTexture(PAINT_W,PAINT_H);
 }
 let jerseyFont='Arial';
 function setJerseyFont(font){
@@ -401,7 +403,10 @@ try{soloMode=localStorage.getItem('ihc.solo')!=='0';}catch(e){}
 let actingRole=soloMode?'admin':'player';
 /* the OTHER party's layers for the current role: replayed underneath (team
    design) or on top (player accents) but never selectable/editable */
-let basePaintStrokes=[],baseDecals=[];
+/* The OTHER owner's layer stack — replayed underneath (team design, while a
+   player edits) or on top (player accents, while an admin edits) but never
+   selectable. One list now, not a stroke list plus a decal list. */
+let baseLayers=[];
 let suppressStore=false;
 function ctxTeam(){return ihtTeam(TSTORE,ctxTeamId);}
 function ctxJersey(){return ihtJersey(ctxTeam(),ctxJerseyId);}
@@ -442,14 +447,17 @@ function saveToStore(){
     j.design.pieces=capturePieceColors();
     j.design.body=j.design.pieces.jersey.slice(); // legacy mirror of the jersey triple
     j.design.font=jerseyFont;
-    j.design.paintStrokes=paintStrokes;
-    j.design.decals=placedDecals;
+    j.design.layers=layers;
+    /* the pre-layer-stack keys are dropped rather than left behind: a stale
+       second copy of the same decoration is exactly the kind of thing a later
+       reader picks up by accident */
+    delete j.design.paintStrokes;delete j.design.decals;
   }else{
     PKIT.name=jerseyName;
     PKIT.skin='#'+neckZone.color.getHexString();
     kctx.stick=stickZM.zones.map(z=>'#'+z.color.getHexString());
-    kctx.accStrokes=paintStrokes;
-    kctx.accDecals=placedDecals;
+    kctx.layers=layers;
+    delete kctx.accStrokes;delete kctx.accDecals;
   }
   ihtSaveStore(TSTORE);ihtSaveKit(PKIT);
   ihtWriteGameLoadout(TSTORE,PKIT);
@@ -466,19 +474,20 @@ function loadContext(){
   jerseyName=PKIT.name||'';
   jerseyFont=j.design.font||'Arial';
   jerseyNumber=ihtEffectiveNumber(t);
+  /* Both sides go through ihcDesignLayers, so a context stored before the
+     layer stack existed is migrated from its old stroke+decal lists on the
+     way in and saved back in the new shape on the first edit. */
+  const teamLayers=ihcDesignLayers(j.design,'paintStrokes','decals');
+  const kitLayers=ihcDesignLayers(kctx,'accStrokes','accDecals');
   if(actingRole==='admin'){
-    paintStrokes=j.design.paintStrokes||[];
-    placedDecals=j.design.decals||[];
-    basePaintStrokes=kctx.accStrokes||[];
-    baseDecals=kctx.accDecals||[];
+    layers=j.design.layers=teamLayers;
+    baseLayers=kitLayers;
   }else{
-    paintStrokes=kctx.accStrokes||(kctx.accStrokes=[]);
-    placedDecals=kctx.accDecals||(kctx.accDecals=[]);
-    basePaintStrokes=j.design.paintStrokes||[];
-    baseDecals=j.design.decals||[];
+    layers=kctx.layers=kitLayers;
+    baseLayers=teamLayers;
   }
-  selectedStrokeIdx=-1;selectedDecalIdx=-1;setActiveTool('orbit',true);
-  redrawPaintLayer();redrawLogoLayer();
+  selectedLayerIdx=-1;setActiveTool('orbit',true);
+  redrawPaintLayer();
   suppressStore=false;
   refreshSwatches(); // also redraws the plate + saves the store once
   history.length=0;historyIdx=-1;pushHistory();
@@ -523,7 +532,7 @@ const TOOLS=[
   {id:'erase',icon:'🧽',key:'E',label:'Eraser',      cursor:'crosshair',
    banner:'Drag to rub paint off this part',paint:true,decorateOnly:true},
   {id:'decal',icon:'✥', key:'M',label:'Move decal',  cursor:'move',
-   banner:'Drag to move the selected logo',decorateOnly:true},
+   banner:'Drag to move the selected decal · arrow keys nudge it',decorateOnly:true},
   {id:'pick', icon:'💧',key:'I',label:'Pick colour', cursor:'crosshair',
    banner:'Click any part to lift its colour'},
 ];
@@ -544,13 +553,25 @@ function isPaintTool(){return (toolLive('paint')||toolLive('erase'));}
 function isDecalTool(){return toolLive('decal');}
 function isPickTool(){return toolLive('pick');}
 let lastPaintUV=null;
-/* paintStrokes: one entry per completed drag ("layer"), each storing its own
-   UV point path + the brush settings it was drawn with — NOT raw pixels.
-   That's what makes strokes individually deletable/reorderable/hideable
-   (redrawPaintLayer replays only the visible ones, in order) and, as a
-   bonus, small enough to round-trip through JSON — so paint finally saves
-   into presets and undo/redo instead of living only in the live canvas. */
-let paintStrokes=[],currentStroke=null,selectedStrokeIdx=-1;
+/* ============================== THE LAYER STACK ==============================
+   ONE ordered list of every decoration on the kit — brush strokes and placed
+   decals together, bottom first, exactly like GIMP's or Forza's layer panel.
+
+   Everything is stored as DESCRIPTION, never as pixels: a stroke keeps its UV
+   point path plus the brush settings it was drawn with, a decal keeps its
+   shape/logo id plus a transform. That is what makes every layer individually
+   deletable, reorderable, hideable, recolourable and restretchable after the
+   fact (redrawPaintLayer replays the visible ones, in order) and, as a bonus,
+   small enough to round-trip through JSON — so decoration saves into presets,
+   undo/redo and the game loadout instead of living only in a canvas.
+
+   This replaced two parallel lists (paintStrokes + placedDecals) rendered into
+   two textures whose order the SHADER fixed. No amount of UI could have moved
+   a decal above a stroke, and the eraser could not touch a decal at all. */
+let layers=[],currentStroke=null,selectedLayerIdx=-1;
+function layerAt(i){return layers[i]||null;}
+function selectedLayer(){return layerAt(selectedLayerIdx);}
+function newLayerId(p){return p+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
 /* `hardness` 1 = the hard round brush this always had; below 1 the dab falls
    off to transparent at its rim. Strokes saved before it existed have no
    field at all and replay as hard, so old designs are pixel-identical. */
@@ -634,6 +655,11 @@ function skinnedPaintProxy(mesh){
     if(mesh.geometry.index)g.setIndex(mesh.geometry.index);
     // never added to the scene and never rendered — it exists only to be hit
     p=new THREE.Mesh(g,mesh.material);
+    /* Carries the source mesh's NAME: a raycast hit reports the proxy, and
+       callers legitimately ask the hit which mesh it belongs to (whether its
+       two sides share a UV island, which piece it is). An anonymous stand-in
+       would answer '' to all of them, silently. */
+    p.name=mesh.name;
     p.matrixAutoUpdate=false;p.frustumCulled=false;p.visible=false;
     mesh.userData._paintProxy=p;
     mesh.userData._paintProxyFrame=-1;
@@ -674,6 +700,12 @@ function raycastUVOnMeshes(meshes,clientX,clientY){
   // feature below. Local space (not world) so it agrees with the shader's
   // own local-space `position.x` regardless of camera orbit.
   uv.side=h.object.worldToLocal(h.point.clone()).x>=0?1:-1;
+  /* Does this mesh keep its two sides in SEPARATE UV islands? If so the stroke
+     is written into both canvas halves and the anatomical-midline slice cannot
+     happen — see IHC_UV_UNIQUE_MESHES in core for the per-mesh measurements.
+     The proxy shares its source mesh's name, so this reads correctly off the
+     raycast hit even though the thing actually hit is the skinned stand-in. */
+  uv.b=ihcMeshBothHalves(h.object.name)?1:0;
   _uvHit={point:h.point.clone(),normal:null,uvToWorld:0,object:h.object};
   if(h.face){
     _uvNM.getNormalMatrix(h.object.matrixWorld);
@@ -811,18 +843,32 @@ function paintStamp(uv,prevUV){
   }else{
     ctx=paintCtx;cvs=paintCanvas;tex=paintTexture;
   }
-  const xy=ihcPaintCanvasXY(uv,uv.side);
-  const prevXY=prevUV?ihcPaintCanvasXY(prevUV,prevUV.side):null;
+  /* The live drag must land on exactly the pixels the stored stroke will
+     replay onto, so it goes through the same ihcHalves() the replay does —
+     that is what makes a dual-half (jersey/cage) stroke continuous across the
+     chest DURING the drag and not just after the next redraw. */
+  const halves=ihcHalves(uv);
   // a side change mid-drag (e.g. dragging across the crotch from one leg to
   // the other) is ALWAYS a seam crossing, even if the raw UV looks continuous
-  // — the two sides land on opposite halves of the canvas.
-  const seamJump=(prevUV&&Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV)||
-    (prevUV&&prevUV.side!==uv.side);
-  stampSegment(ctx,xy.x,xy.y,prevXY?prevXY.x:null,prevXY?prevXY.y:null,
-    paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump,
-    {mode:currentStroke&&currentStroke.mode,hardness:paintBrushHardness});
+  // — the two sides land on opposite halves of the canvas. A change in
+  // dual-ness is a seam for the same reason.
+  const sameHalves=prevUV&&!!prevUV.b===!!uv.b&&(uv.b||(prevUV.side>=0)===(uv.side>=0));
+  const seamJump=!!prevUV&&(Math.hypot(uv.x-prevUV.x,uv.y-prevUV.y)>SEAM_JUMP_UV||!sameHalves);
+  halves.forEach(h=>{
+    const xy=ihcPaintCanvasXY(uv,h);
+    const pxy=(prevUV&&!seamJump)?ihcPaintCanvasXY(prevUV,h):null;
+    stampSegment(ctx,xy.x,xy.y,pxy?pxy.x:null,pxy?pxy.y:null,
+      paintBrushSize,paintBrushColor,paintBrushOpacity,seamJump,
+      {mode:currentStroke&&currentStroke.mode,hardness:paintBrushHardness});
+  });
   if(layered)compositePaintLayers();
   else syncCanvasToDataTexture(ctx,cvs,tex);
+}
+/* One recorded drag sample. `b` (both halves) rides along per point rather
+   than per stroke because a single drag can cross from a mesh whose sides
+   share a UV island onto one whose sides don't. */
+function strokePoint(uv){
+  return uv.b?{x:uv.x,y:uv.y,side:uv.side,b:1}:{x:uv.x,y:uv.y,side:uv.side};
 }
 /* ------------------------------ EYEDROPPER ------------------------------
    Deliberately does NOT sample the framebuffer: the pixel on screen is lit,
@@ -846,18 +892,15 @@ function pickColorAt(clientX,clientY){
   applyPickedColor(hex,def);
   return hex;
 }
-/* Paint sits above logos, which sit above the recoloured base — same order as
-   installRecolorShader's extraCode, so the topmost opaque-enough layer wins. */
+/* Decoration sits above the recoloured base — one flattened canvas now, so
+   whatever is topmost in the layer stack is already the pixel here. */
 function pickFromDecalCanvas(uv,target){
-  const xy=ihcPaintCanvasXY(uv,uv.side);
-  const px=Math.max(0,Math.min(DECAL_SIZE-1,Math.round(xy.x)));
-  const py=Math.max(0,Math.min(DECAL_SIZE-1,Math.round(xy.y)));
-  const layers=[paintCtx,logoCtx];
-  for(const ctx of layers){
-    if(!ctx)continue;
-    const d=ctx.getImageData(px,py,1,1).data;
-    if(d[3]>24)return rgbToHex(d[0],d[1],d[2]);
-  }
+  if(!paintCtx)return null;
+  const xy=ihcPaintCanvasXY(uv,ihcHalves(uv)[0]);
+  const px=Math.max(0,Math.min(PAINT_W-1,Math.round(xy.x)));
+  const py=Math.max(0,Math.min(PAINT_H-1,Math.round(xy.y)));
+  const d=paintCtx.getImageData(px,py,1,1).data;
+  if(d[3]>24)return rgbToHex(d[0],d[1],d[2]);
   return null;
 }
 /* The mask is the same DataTexture the fragment shader reads: R/G/B flag zone
@@ -920,10 +963,11 @@ function updateBrushRing(clientX,clientY){
   const ring=ensureBrushRing();
   const uv=raycastUV(clientX,clientY);
   if(!uv||!_uvHit||!_uvHit.normal||!_uvHit.uvToWorld){ring.visible=false;return;}
-  /* Brush size is canvas pixels on a DECAL_SIZE canvas, and ihcPaintCanvasXY
-     maps v across the full height while packing u into half the width — so v
-     is the honest axis to size from, and the real footprint is slightly
-     elliptical. The ring stays round and reads as the vertical extent. */
+  /* Brush size is quoted in ATLAS texels, and each half of the paint canvas is
+     a full-resolution square copy of the atlas, so the footprint is genuinely
+     round in UV and this ring is exact on both axes. (It was not, while the
+     canvas was 2048² and each half only 1024 wide — the real footprint was
+     2:1 and the ring showed the vertical extent only.) */
   const radiusUV=(paintBrushSize/2)/DECAL_SIZE;
   const r=radiusUV*_uvHit.uvToWorld;
   if(!(r>0)||!isFinite(r)){ring.visible=false;return;}
@@ -968,7 +1012,7 @@ let paintStackLayers=null;
 let paintStackLayersValid=false;
 function makeLayerSurface(){
   const c=document.createElement('canvas');
-  c.width=c.height=DECAL_SIZE;
+  c.width=PAINT_W;c.height=PAINT_H;
   return{canvas:c,ctx:c.getContext('2d')};
 }
 function ensurePaintStackLayers(){
@@ -978,7 +1022,7 @@ function ensurePaintStackLayers(){
   return paintStackLayers;
 }
 /* True when there is a second stack to keep separate. */
-function paintNeedsStackLayers(){return basePaintStrokes.length>0;}
+function paintNeedsStackLayers(){return baseLayers.length>0;}
 /* Is the stack the user is EDITING the upper one? Derived from paintStackOrder
    rather than re-testing the role, so there is one definition of the order. */
 const _stackProbeActive={},_stackProbeBase={};
@@ -990,7 +1034,7 @@ function activeStackIsAbove(){
    readback, so it stays as small as it can be. */
 function compositePaintLayers(){
   const L=ensurePaintStackLayers();
-  paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  paintCtx.clearRect(0,0,PAINT_W,PAINT_H);
   paintCtx.globalAlpha=1;paintCtx.globalCompositeOperation='source-over';
   paintCtx.drawImage(L.below.canvas,0,0);
   paintCtx.drawImage(L.above.canvas,0,0);
@@ -998,21 +1042,21 @@ function compositePaintLayers(){
 }
 function redrawPaintLayer(){
   if(!paintCtx)return;
-  paintCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
+  paintCtx.clearRect(0,0,PAINT_W,PAINT_H);
   if(!paintNeedsStackLayers()){
     /* One stack only — nothing an erase could reach across, so composite
        straight into the final canvas. */
     paintStackLayersValid=false;
-    ihcReplayStrokes(paintCtx,paintStrokes);
+    ihcReplayLayers(paintCtx,layers,logoLibrary);
     syncCanvasToDataTexture(paintCtx,paintCanvas,paintTexture);
     return;
   }
   const L=ensurePaintStackLayers();
-  const order=paintStackOrder(paintStrokes,basePaintStrokes);
-  L.below.ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  L.above.ctx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  ihcReplayStrokes(L.below.ctx,order[0]);
-  ihcReplayStrokes(L.above.ctx,order[1]);
+  const order=paintStackOrder(layers,baseLayers);
+  L.below.ctx.clearRect(0,0,PAINT_W,PAINT_H);
+  L.above.ctx.clearRect(0,0,PAINT_W,PAINT_H);
+  ihcReplayLayers(L.below.ctx,order[0],logoLibrary);
+  ihcReplayLayers(L.above.ctx,order[1],logoLibrary);
   paintStackLayersValid=true;
   compositePaintLayers();
 }
@@ -1026,7 +1070,7 @@ function buildMaterialManagers(){
      material and one atlas-wide mask, so "Socks · Primary" and "Jersey ·
      Primary" were the same slider — changing one changed the whole kit. */
   PIECES=ihcBuildPieceKit(player.visual,
-    {nameNumberMap:nameNumberTexture,logoMap:logoTexture,paintMap:paintTexture});
+    {nameNumberMap:nameNumberTexture,paintMap:paintTexture});
   bodyZM=PIECES.jersey; // the jersey is still what the name/number plate reads its colors from
 
   /* "Neck" (mesh "Cube") is the only exposed-skin-adjacent geometry this
@@ -1239,8 +1283,7 @@ function buildSidebar(){
   });
 }
 function layerCountForTarget(targetId){
-  return paintStrokes.filter(s=>s.target===targetId).length+
-         placedDecals.filter(d=>d.target===targetId).length;
+  return layers.filter(L=>L.target===targetId).length;
 }
 function selectCategory(id){
   currentCategory=CATEGORIES.find(c=>c.id===id)||CATEGORIES[0];
@@ -1416,36 +1459,25 @@ function presetStripHTML(){
 function paintToolsHTML(label){
   const nHere=layerCountForTarget(paintTarget);
   let html=`<div class="rp-section"><div class="btn-row">
-      <div class="btn" id="undoStrokeBtn">↶ Undo stroke</div>
-      <div class="btn" id="clearPaintBtn">🗑 Clear paint</div>
+      <div class="btn" id="undoStrokeBtn">↶ Undo layer</div>
+      <div class="btn" id="clearPaintBtn">🗑 Clear this part</div>
     </div>
-    <div style="font-size:13px;color:var(--text-faint);margin-top:8px;" id="paintNote">Strokes and logos land on the side of the ${label} you actually painted them on — the two sides are decorated separately. Clear paint wipes strokes across the whole kit, not just this part.</div>
+    <div style="font-size:13px;color:var(--text-faint);margin-top:8px;" id="paintNote">Decoration lands on the side of the ${label} you actually put it on — the two sides are decorated separately, and nothing is mirrored.</div>
   </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Stamp a shape</div>
-      <div class="lc-shape-grid" id="quickShapeGrid">
-        <div class="lc-shape-btn" data-qshape="circle" title="Circle">●</div>
-        <div class="lc-shape-btn" data-qshape="square" title="Square">■</div>
-        <div class="lc-shape-btn" data-qshape="triangle" title="Triangle">▲</div>
-        <div class="lc-shape-btn" data-qshape="star" title="Star">★</div>
-        <div class="lc-shape-btn" data-qshape="hexagon" title="Hexagon">⬡</div>
-        <div class="lc-shape-btn" data-qshape="shield" title="Shield">🛡</div>
-      </div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps straight onto the ${label} in the current brush colour, then arms the ✥ move tool so you can drag it into place.</div>
+      <div class="lc-shape-grid" id="shapeGrid"></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Stamps onto the middle of the ${label} in the current brush colour, then arms ✥ so you can drag it into place. Every shape stays a vector — stretch, rotate and recolour it any time from the layer below.</div>
     </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Logos<span class="btn ghost" id="openLogoCreatorBtn" style="flex:none;padding:5px 10px;font-size:12.5px;">+ Create Logo</span></div>
       <div class="palette-grid" id="logoLibraryGrid"></div>
       <div class="btn-row" style="margin-top:10px;"><label class="btn" style="flex:1;text-align:center;cursor:pointer;">📁 Import Image<input type="file" id="importLogoFile" accept="image/*" style="display:none;"></label></div>
     </div>`;
   html+=`<div class="rp-section"><div class="rp-section-title">Layers
-      <span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${nHere} on this part · ${(paintStrokes.length+placedDecals.length)} total</span></div>
+      <span class="sb-chip" style="font-weight:600;" id="layersTotalBadge">${nHere} on this part · ${layers.length} total</span></div>
       <label class="rp-check" style="margin:0 0 10px;"><input type="checkbox" id="layersThisPartOnly"${layersThisPartOnly?' checked':''}> Only show this part's layers</label>
-      <div class="rp-section-title" style="margin-top:2px;">🖼 Decals</div>
-      <div id="placedDecalsList"></div>
-      <div id="placedDecalControls"></div>
-      <div class="rp-section-title" style="margin-top:14px;">🖌 Paint Strokes</div>
-      <div id="paintLayersList"></div>
-      <div id="paintLayerControls"></div>
-      <div style="font-size:13px;color:var(--text-faint);margin-top:10px;">Two separate stacks — later draws on top within each, and paint always renders above decals overall.</div>
+      <div id="layersList"></div>
+      <div id="layerControls"></div>
+      <div style="font-size:13px;color:var(--text-faint);margin-top:10px;">One stack, top of the list = on top on the model. Strokes and decals share it, so a decal can sit over paint or under it, and any layer can be flipped to 🧽 Remove to punch a hole through everything below it.</div>
     </div>`;
   return html;
 }
@@ -1883,27 +1915,32 @@ function wireDecalsPanel(){
   const partOnly=document.getElementById('layersThisPartOnly');
   if(partOnly)partOnly.addEventListener('change',()=>{
     layersThisPartOnly=partOnly.checked;
-    renderPlacedDecalsList();renderPaintLayersList();
+    renderLayersList();
   });
 
   document.getElementById('undoStrokeBtn').addEventListener('click',()=>{
-    if(paintStrokes.length){paintStrokes.pop();selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();buildSidebar();pushHistory();showToast('Stroke undone');}
-    else showToast('No strokes to undo');
+    if(!layers.length){showToast('Nothing to undo on the kit');return;}
+    layers.pop();selectedLayerIdx=-1;
+    redrawPaintLayer();renderLayersList();renderLayerControls();buildSidebar();pushHistory();
+    showToast('Top layer removed');
   });
+  /* Scoped to the part you are looking at. It used to wipe paint across the
+     WHOLE kit from a button sitting inside one part's panel — and leave the
+     decals, which the label didn't say either. */
   document.getElementById('clearPaintBtn').addEventListener('click',()=>{
-    if(!paintStrokes.length){showToast('No paint to clear');return;}
-    if(!confirm('Delete all '+paintStrokes.length+' paint strokes on the whole kit? Decals are not affected.'))return;
-    paintStrokes=[];selectedStrokeIdx=-1;redrawPaintLayer();renderPaintLayersList();renderPaintLayerControls();buildSidebar();pushHistory();showToast('Paint cleared');
+    const n=layerCountForTarget(paintTarget);
+    if(!n){showToast('Nothing on this part to clear');return;}
+    if(!confirm('Delete all '+n+' layer'+(n===1?'':'s')+' on the '+paintTarget+'? Other parts are not affected.'))return;
+    layers=layers.filter(L=>L.target!==paintTarget);
+    selectedLayerIdx=-1;
+    redrawPaintLayer();renderLayersList();renderLayerControls();buildSidebar();pushHistory();
+    showToast('Cleared the '+paintTarget);
   });
 
-  document.querySelectorAll('#quickShapeGrid .lc-shape-btn').forEach(b=>{
-    b.addEventListener('click',()=>quickStampShape(b.dataset.qshape));
-  });
+  renderShapeGrid();
   renderLogoLibraryGrid();
-  renderPlacedDecalsList();
-  renderPlacedDecalControls();
-  renderPaintLayersList();
-  renderPaintLayerControls();
+  renderLayersList();
+  renderLayerControls();
   document.getElementById('openLogoCreatorBtn').addEventListener('click',openLogoCreator);
   document.getElementById('importLogoFile').addEventListener('change',e=>{
     const file=e.target.files[0];if(!file)return;
@@ -1987,9 +2024,16 @@ function applyLive(){
     if(L){L.color=currentHex();const sw=document.getElementById('lcColorSwatch');if(sw)sw.style.background=L.color;renderLogoCreatorCanvas();}
     return;
   }
-  if(cpState.mgrKey==='paintstroke'){
-    const s=paintStrokes[cpState.idx];
-    if(s){s.color=currentHex();const sw=document.getElementById('strokeColorSwatch');if(sw)sw.style.background=s.color;redrawPaintLayer();renderPaintLayersList();}
+  if(cpState.mgrKey==='layercolor'||cpState.mgrKey==='layeroutline'){
+    const L=layerAt(cpState.idx);
+    if(L){
+      const outline=cpState.mgrKey==='layeroutline';
+      if(outline){(L.outline||(L.outline={on:true,width:8})).color=currentHex();}
+      else L.color=currentHex();
+      const sw=document.getElementById(outline?'layerOutlineSwatch':'layerColorSwatch');
+      if(sw)sw.style.background=currentHex();
+      redrawPaintLayer();renderLayersList();
+    }
     return;
   }
   const mgr=mgrByKey(cpState.mgrKey);
@@ -2009,7 +2053,8 @@ function openColorPicker(anchorEl,mgrKey,idx){
   let startHex='#ffffff';
   if(mgrKey==='paint')startHex=paintBrushColor;
   else if(mgrKey==='lclayer')startHex=(lcLayers[lcSelectedIdx]&&lcLayers[lcSelectedIdx].color)||'#7c5cff';
-  else if(mgrKey==='paintstroke')startHex=(paintStrokes[idx]&&paintStrokes[idx].color)||'#7c5cff';
+  else if(mgrKey==='layercolor')startHex=(layerAt(idx)&&layerAt(idx).color)||'#7c5cff';
+  else if(mgrKey==='layeroutline')startHex=(layerAt(idx)&&layerAt(idx).outline&&layerAt(idx).outline.color)||'#000000';
   else{const m=mgrByKey(mgrKey);if(m&&m.zones[idx])startHex='#'+m.zones[idx].color.getHexString();}
   const rgb=hexToRgb(startHex);
   const hsv=rgbToHsv(rgb.r,rgb.g,rgb.b);
@@ -2144,24 +2189,10 @@ function lcLayerRadius(L){
   if(L.type==='image'&&L.img&&L.img.complete)return Math.max(L.img.width,L.img.height)/2*0.55*L.scale;
   return 60*L.scale;
 }
-function lcDrawShapePath(ctx,shape,r){
-  ctx.beginPath();
-  if(shape==='circle'){ctx.arc(0,0,r,0,Math.PI*2);}
-  else if(shape==='square'){ctx.rect(-r,-r,r*2,r*2);}
-  else if(shape==='triangle'){ctx.moveTo(0,-r);ctx.lineTo(r*0.87,r*0.5);ctx.lineTo(-r*0.87,r*0.5);ctx.closePath();}
-  else if(shape==='star'){
-    const spikes=5,outer=r,inner=r*0.45;
-    for(let i=0;i<spikes*2;i++){const ang=i*Math.PI/spikes-Math.PI/2,rad=i%2===0?outer:inner;
-      const x=Math.cos(ang)*rad,y=Math.sin(ang)*rad;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
-    ctx.closePath();
-  }else if(shape==='hexagon'){
-    for(let i=0;i<6;i++){const ang=i*Math.PI/3-Math.PI/2,x=Math.cos(ang)*r,y=Math.sin(ang)*r;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
-    ctx.closePath();
-  }else if(shape==='shield'){
-    ctx.moveTo(-r,-r*0.7);ctx.lineTo(r,-r*0.7);ctx.lineTo(r,r*0.15);
-    ctx.quadraticCurveTo(r,r*0.9,0,r);ctx.quadraticCurveTo(-r,r*0.9,-r,r*0.15);ctx.closePath();
-  }
-}
+/* The compositor and the on-model decal replay draw from the SAME path set
+   (IHC_SHAPES/ihcShapePath in core) — a second copy here is how the two would
+   drift into "the logo I built isn't the shape that got stamped". */
+function lcDrawShapePath(ctx,shape,r){ihcShapePath(ctx,shape,r);}
 function lcRenderLayer(ctx,L){
   ctx.save();
   ctx.translate(L.x,L.y);ctx.rotate(L.rotation);ctx.scale(L.scale,L.scale);
@@ -2303,9 +2334,16 @@ function closeLogoCreator(){document.getElementById('logoCreatorOverlay').classL
 document.getElementById('logoCreatorClose').addEventListener('click',closeLogoCreator);
 document.getElementById('lcCancelBtn').addEventListener('click',closeLogoCreator);
 document.getElementById('lcAddText').addEventListener('click',()=>lcAddLayer({type:'text',text:'LOGO',color:'#ffffff',fontSize:64}));
-document.querySelectorAll('.lc-shape-btn').forEach(b=>{
-  b.addEventListener('click',()=>lcAddLayer({type:'shape',shape:b.dataset.shape,color:'#7c5cff'}));
-});
+/* Same shape set as the on-model stamper, built from the same list. */
+(function(){
+  const g=document.getElementById('lcShapeGrid');
+  if(!g)return;
+  g.innerHTML=IHC_SHAPES.map(s=>
+    `<div class="lc-shape-btn" data-shape="${s.id}" title="${s.label}">${s.icon}</div>`).join('');
+  g.querySelectorAll('[data-shape]').forEach(b=>{
+    b.addEventListener('click',()=>lcAddLayer({type:'shape',shape:b.dataset.shape,color:'#7c5cff'}));
+  });
+})();
 document.getElementById('lcImportFile').addEventListener('change',e=>{
   const file=e.target.files[0];if(!file)return;
   const reader=new FileReader();
@@ -2331,25 +2369,30 @@ document.getElementById('lcSaveBtn').addEventListener('click',()=>{
 });
 
 /* ============================== DECAL PLACEMENT ============================== */
-/* Saved logos get stamped onto the model as independently-transformable
-   instances (position/scale/rotation), composited on their own texture
-   layer (see logoMap in the Material Manager) — separate from freehand
-   paint so a placed logo stays editable instead of being baked in. */
-let logoLibrary=[],placedDecals=[],selectedDecalIdx=-1;
+/* A decal is a LAYER in the one stack (see THE LAYER STACK above), stored as a
+   description and re-rendered from it every time:
+
+     kind 'shape'  a vector path from core's IHC_SHAPES + a colour and an
+                   optional outline. Stays crisp at any size and stays
+                   recolourable forever, because nothing was ever rasterized.
+     kind 'logo'   a bitmap from the saved-logo library (the 2D compositor's
+                   output, or an imported PNG).
+
+   Both carry the same transform — u/v position, sx/sy (independent, so a
+   decal can be STRETCHED, not just scaled), rotation, flips — plus the layer
+   fields every layer has: opacity, paint/erase mode, visibility, name.
+   Quick-stamped shapes used to be rasterized to a 256px PNG and pushed into
+   the logo library, which froze their colour and their resolution at stamp
+   time and littered the library with one entry per stamp. */
+let logoLibrary=[];
+const DECAL_DEFAULT_SIZE=0.15;
+function isDecalLayer(L){return !!L&&L.kind!=='stroke'&&!L.points;}
 function loadLogoLibrary(){
   try{logoLibrary=JSON.parse(localStorage.getItem('ihc_logos_v1')||'[]');}catch(e){logoLibrary=[];}
-  logoLibrary.forEach(l=>{l.img=new Image();l.img.onload=()=>redrawLogoLayer();l.img.src=l.dataURL;});
+  logoLibrary.forEach(l=>{l.img=new Image();l.img.onload=()=>redrawPaintLayer();l.img.src=l.dataURL;});
 }
 function saveLogoLibrary(){
   localStorage.setItem('ihc_logos_v1',JSON.stringify(logoLibrary.map(l=>({id:l.id,name:l.name,dataURL:l.dataURL}))));
-}
-function redrawLogoLayer(){
-  if(!logoCtx)return;
-  logoCtx.clearRect(0,0,DECAL_SIZE,DECAL_SIZE);
-  // same ownership order as paint: team design decals under player accents
-  paintStackOrder(placedDecals,baseDecals)
-    .forEach(list=>ihcReplayDecals(logoCtx,list,logoLibrary));
-  syncCanvasToDataTexture(logoCtx,logoCanvas,logoTexture);
 }
 function renderLogoLibraryGrid(){
   const grid=document.getElementById('logoLibraryGrid');
@@ -2361,266 +2404,309 @@ function renderLogoLibraryGrid(){
     d.className='palette-swatch';
     d.style.background=`#14151c url(${l.dataURL}) center/contain no-repeat`;
     d.title=l.name+' — click to place on '+paintTarget;
-    d.addEventListener('click',()=>placeDecal(l.id));
+    /* Start at the bitmap's OWN aspect rather than a forced square — a wide
+       wordmark stamped into a square box lands pre-squashed, and "fix the
+       stretch I never asked for" is a bad first move. */
+    d.addEventListener('click',()=>{
+      const ar=(l.img&&l.img.complete&&l.img.naturalWidth)
+        ?l.img.naturalHeight/l.img.naturalWidth:1;
+      placeDecal({kind:'logo',logoId:l.id,name:l.name,
+        sx:DECAL_DEFAULT_SIZE,sy:DECAL_DEFAULT_SIZE*ar});
+    });
     grid.appendChild(d);
   });
 }
-function placeDecal(logoId){
-  // same skinned-proxy raycast the brush uses — without it a centre-screen
-  // drop onto the helmet missed the bind-pose collider and fell back to the
-  // atlas centre (0.5,0.5), which is outside the helmet's UV island entirely,
-  // so the logo landed on no visible surface at all.
+function renderShapeGrid(){
+  const grid=document.getElementById('shapeGrid');
+  if(!grid)return;
+  grid.innerHTML=IHC_SHAPES.map(s=>
+    `<div class="lc-shape-btn" data-qshape="${s.id}" title="${s.label}">${s.icon}</div>`).join('');
+  grid.querySelectorAll('[data-qshape]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const def=ihcShape(b.dataset.qshape);
+      const ar=def.ar||1;
+      placeDecal({kind:'shape',shape:def.id,name:def.label,color:paintBrushColor,
+        sx:DECAL_DEFAULT_SIZE*ar,sy:DECAL_DEFAULT_SIZE,
+        outline:{on:false,color:'#000000',width:8}});
+    });
+  });
+}
+/* Where a freshly stamped decal lands: dead centre of the viewport, on the
+   current paint target. Uses the same skinned-proxy raycast the brush does —
+   without it a centre-screen drop onto the helmet missed the bind-pose
+   collider and fell back to the atlas centre (0.5,0.5), which is outside the
+   helmet's UV island entirely, so the decal landed on no visible surface. */
+function decalDropPoint(){
   const meshes=getPaintTargetMeshes().map(skinnedPaintProxy);
-  let uv={x:0.5,y:0.5},side=1;
   if(meshes.length){
     raycaster.setFromCamera(new THREE.Vector2(0,0),camera);
     const hits=raycaster.intersectObjects(meshes,false);
     if(hits.length&&hits[0].uv){
-      uv=hits[0].uv;
-      side=hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1;
+      return{u:hits[0].uv.x,v:hits[0].uv.y,
+        side:hits[0].object.worldToLocal(hits[0].point.clone()).x>=0?1:-1,
+        b:ihcMeshBothHalves(hits[0].object.name)?1:0,hit:true};
     }
   }
-  placedDecals.push({id:'D'+Date.now(),logoId,u:uv.x,v:uv.y,side,scale:0.15,rotation:0,target:paintTarget,visible:true});
-  selectedDecalIdx=placedDecals.length-1;
-  redrawLogoLayer();
-  renderPlacedDecalsList();
-  renderPlacedDecalControls();
+  return{u:0.5,v:0.5,side:1,b:0,hit:false};
+}
+function placeDecal(spec){
+  const p=decalDropPoint();
+  if(!p.hit)showToast('Turn the model so the part faces you — the decal landed off-surface');
+  layers.push(Object.assign({
+    id:newLayerId('D'),target:paintTarget,visible:true,opacity:1,mode:'paint',
+    u:p.u,v:p.v,side:p.side,b:p.b,
+    sx:DECAL_DEFAULT_SIZE,sy:DECAL_DEFAULT_SIZE,rot:0,flipX:false,flipY:false,
+  },spec));
+  selectedLayerIdx=layers.length-1;
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   buildSidebar();
   pushHistory();
-  /* Arm the move tool on placement. Placing a logo and then hunting for a
+  /* Arm the move tool on placement. Placing a decal and then hunting for a
      "Move on Model" button two panels down was the single clunkiest step in
-     the old decal flow — the thing you want next is always to position it. */
-  setActiveTool('decal');
-  showToast('Logo placed — drag it on the model, or use the sliders');
-}
-/* one-click Forza-style shape stamp: skips the Logo Creator round-trip
-   entirely — rasterizes a single shape straight to the library (reusing the
-   same shape paths) using the current brush color, then places it exactly
-   like any other saved logo (drag/scale/rotate below). */
-function quickStampShape(shape){
-  const cvs=document.createElement('canvas');cvs.width=cvs.height=256;
-  const ctx=cvs.getContext('2d');
-  ctx.save();ctx.translate(128,128);
-  lcDrawShapePath(ctx,shape,104);
-  ctx.fillStyle=paintBrushColor;ctx.fill();
-  ctx.restore();
-  const dataURL=cvs.toDataURL('image/png');
-  const img=new Image();
-  const entry={id:'LG'+Date.now(),name:'Shape: '+shape,dataURL,img};
-  img.onload=()=>{
-    logoLibrary.push(entry);
-    saveLogoLibrary();
-    renderLogoLibraryGrid();
-    placeDecal(entry.id);
-  };
-  img.src=dataURL;
+     the old flow — the thing you want next is always to position it. */
+  setActiveTool('decal',true);
+  syncToolRail();
 }
 function moveSelectedDecal(uv){
-  const d=placedDecals[selectedDecalIdx];if(!d)return;
-  d.u=uv.x;d.v=uv.y;d.side=uv.side;d.target=paintTarget;
-  redrawLogoLayer();
+  const d=selectedLayer();
+  if(!isDecalLayer(d))return;
+  d.u=uv.x;d.v=uv.y;d.side=uv.side;d.b=uv.b?1:0;d.target=paintTarget;
+  redrawPaintLayer();
 }
-/* selectedDecalIdx used to only ever get set by placeDecal() — once you'd
-   placed a second logo, or reopened this category, the first one had no
-   surviving handle: the "Selected Logo" panel only ever showed the most
-   recently placed decal, so anything placed earlier couldn't be reached to
-   delete. This list shows every placed decal with its own delete button,
-   independent of which one (if any) is currently selected. */
-function selectDecal(idx){
-  selectedDecalIdx=(selectedDecalIdx===idx)?-1:idx;
-  renderPlacedDecalsList();
-  renderPlacedDecalControls();
+/* ---------------------------- THE LAYER PANEL ----------------------------
+   One list for the whole stack, newest/topmost first — the GIMP convention,
+   and the same one the logo compositor's own list uses. There used to be two
+   lists (decals, then paint strokes) that could not be interleaved because
+   the shader composited their two textures in a fixed order. */
+function selectLayer(idx){
+  selectedLayerIdx=(selectedLayerIdx===idx)?-1:idx;
+  /* The move tool only means anything with a decal selected; picking a stroke
+     while it is armed would otherwise leave a drag that silently does nothing. */
+  if(activeTool==='decal'&&!isDecalLayer(selectedLayer()))setActiveTool('orbit',true);
+  renderLayersList();renderLayerControls();syncToolRail();
 }
-function deleteDecal(idx){
-  if(idx<0||idx>=placedDecals.length)return;
-  placedDecals.splice(idx,1);
-  if(selectedDecalIdx===idx)selectedDecalIdx=-1;
-  else if(selectedDecalIdx>idx)selectedDecalIdx--;
-  if(activeTool==='decal')setActiveTool('orbit'); // nothing left to drag
-  redrawLogoLayer();
-  renderPlacedDecalsList();
-  renderPlacedDecalControls();
+function deleteLayer(idx){
+  if(idx<0||idx>=layers.length)return;
+  layers.splice(idx,1);
+  if(selectedLayerIdx===idx)selectedLayerIdx=-1;
+  else if(selectedLayerIdx>idx)selectedLayerIdx--;
+  if(activeTool==='decal'&&!isDecalLayer(selectedLayer()))setActiveTool('orbit',true);
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   buildSidebar();
   pushHistory();
 }
-/* Swaps array-adjacent entries — since redrawLogoLayer draws placedDecals in
-   array order (later = on top), this is a genuine z-order reorder within
-   the decal stack, not just a list-display reshuffle. */
-function reorderDecal(idx,dir){
+function duplicateLayer(idx){
+  const L=layerAt(idx);
+  if(!L)return;
+  const copy=JSON.parse(JSON.stringify(L));
+  copy.id=newLayerId(copy.kind==='stroke'?'S':'D');
+  copy.name=(copy.name||'Layer')+' copy';
+  // offset a duplicated decal so it isn't invisibly stacked on its original
+  if(isDecalLayer(copy)){copy.u+=0.02;copy.v+=0.02;}
+  layers.splice(idx+1,0,copy);
+  selectedLayerIdx=idx+1;
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
+  buildSidebar();
+  pushHistory();
+  showToast('Layer duplicated');
+}
+/* Swaps array-adjacent entries — replay draws `layers` in array order (later =
+   on top), so this is a genuine z-order change, not a list reshuffle. */
+function reorderLayer(idx,dir){
   const j=idx+dir;
-  if(j<0||j>=placedDecals.length)return;
-  [placedDecals[idx],placedDecals[j]]=[placedDecals[j],placedDecals[idx]];
-  if(selectedDecalIdx===idx)selectedDecalIdx=j;else if(selectedDecalIdx===j)selectedDecalIdx=idx;
-  redrawLogoLayer();
-  renderPlacedDecalsList();
-  renderPlacedDecalControls();
+  if(j<0||j>=layers.length)return;
+  [layers[idx],layers[j]]=[layers[j],layers[idx]];
+  if(selectedLayerIdx===idx)selectedLayerIdx=j;else if(selectedLayerIdx===j)selectedLayerIdx=idx;
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   pushHistory();
 }
-function toggleDecalVisible(idx){
-  const d=placedDecals[idx];if(!d)return;
-  d.visible=d.visible===false;
-  redrawLogoLayer();
-  renderPlacedDecalsList();
+function toggleLayerVisible(idx){
+  const L=layerAt(idx);if(!L)return;
+  L.visible=L.visible===false;
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   pushHistory();
+}
+function layerLabel(L){
+  if(L.kind==='stroke')return L.name||(L.mode==='erase'?'Erase':'Stroke');
+  if(L.kind==='logo'){
+    const lib=logoLibrary.find(l=>l.id===L.logoId);
+    return L.name||(lib?lib.name:'Logo');
+  }
+  return L.name||ihcShape(L.shape).label;
+}
+/* A real thumbnail of the layer itself, not a colour chip: for a shape that
+   means the actual path, drawn at the layer's own aspect. */
+function layerThumbCSS(L){
+  if(L.kind==='stroke'){
+    return L.mode==='erase'
+      ?'background:repeating-conic-gradient(#2a2d3a 0% 25%,#1b1d27 0% 50%) 50%/10px 10px;'
+      :'background:'+(L.color||'#fff')+';';
+  }
+  if(L.kind==='logo'){
+    const lib=logoLibrary.find(l=>l.id===L.logoId);
+    return 'background:#14151c'+(lib?` url(${lib.dataURL}) center/contain no-repeat`:'')+';';
+  }
+  const c=document.createElement('canvas');c.width=c.height=44;
+  const x=c.getContext('2d');
+  x.translate(22,22);
+  const ar=(L.sx||1)/(L.sy||1);
+  x.scale(ar>=1?1:ar,ar>=1?1/ar:1);
+  ihcShapePath(x,L.shape,19);
+  x.fillStyle=L.mode==='erase'?'#8a8f9e':(L.color||'#fff');
+  x.fill();
+  return `background:#14151c url(${c.toDataURL()}) center/contain no-repeat;`;
 }
 function updateLayersTotalBadge(){
   const b=document.getElementById('layersTotalBadge');
-  if(b)b.textContent=layerCountForTarget(paintTarget)+' on this part · '+
-    (paintStrokes.length+placedDecals.length)+' total';
+  if(b)b.textContent=layerCountForTarget(paintTarget)+' on this part · '+layers.length+' total';
 }
-function renderPlacedDecalsList(){
+function renderLayersList(){
   updateLayersTotalBadge();
-  const el=document.getElementById('placedDecalsList');
+  const el=document.getElementById('layersList');
   if(!el)return;
-  if(!placedDecals.length){el.innerHTML='<div class="rp-note">No logos placed on the model yet — click one above to stamp it on.</div>';return;}
-  /* Rows are addressed by their index in the REAL array, so the this-part
-     filter drops rows rather than building a compacted list — an index off by
-     the number of hidden rows would delete the wrong layer. */
-  let shown=0;
-  el.innerHTML=placedDecals.map((d,i)=>{
-    if(layersThisPartOnly&&d.target!==paintTarget)return'';
+  if(!layers.length){
+    el.innerHTML='<div class="rp-note">Nothing on the kit yet — stamp a shape above, or pick 🖌 on the tool rail (B) and drag on the model.</div>';
+    return;
+  }
+  /* Top of the stack first. Rows are addressed by their index in the REAL
+     array, so the this-part filter drops rows rather than compacting the list
+     — an index off by the number of hidden rows would delete the wrong layer. */
+  let shown=0,html='';
+  for(let i=layers.length-1;i>=0;i--){
+    const L=layers[i];
+    if(layersThisPartOnly&&L.target!==paintTarget)continue;
     shown++;
-    const lib=logoLibrary.find(l=>l.id===d.logoId);
-    const thumb=lib?lib.dataURL:'';
-    const active=i===selectedDecalIdx,hidden=d.visible===false;
-    return`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
-      <div class="layer-thumb" style="background:#14151c url(${thumb}) center/contain no-repeat;"></div>
-      <div class="layer-label">${lib?lib.name:'Logo'} — ${d.target}</div>
+    const active=i===selectedLayerIdx,hidden=L.visible===false;
+    const op=L.opacity===undefined?1:L.opacity;
+    const meta=[
+      L.kind==='stroke'?(L.points?L.points.length+'pt':''):Math.round((L.sx||0)*100)+'×'+Math.round((L.sy||0)*100),
+      L.mode==='erase'?'erase':'',
+      op<1?Math.round(op*100)+'%':'',
+    ].filter(Boolean).join(' · ');
+    html+=`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
+      <div class="layer-thumb" style="${layerThumbCSS(L)}"></div>
+      <div class="layer-label">${L.mode==='erase'?'🧽 ':''}${layerLabel(L)}<span style="opacity:.55;font-weight:500;"> ${meta}</span></div>
       <div class="layer-btn" data-vis-idx="${i}" title="${hidden?'Show':'Hide'}">${hidden?'🚫':'👁'}</div>
-      <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===placedDecals.length-1?' disabled':''}>↑</div>
+      <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===layers.length-1?' disabled':''}>↑</div>
       <div class="layer-btn" data-down-idx="${i}" title="Move down"${i===0?' disabled':''}>↓</div>
+      <div class="layer-btn" data-dup-idx="${i}" title="Duplicate">⧉</div>
       <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
     </div>`;
-  }).join('');
-  if(!shown)el.innerHTML='<div class="rp-note">No logos on this part. Untick “Only show this part’s layers” to see the other '+placedDecals.length+'.</div>';
+  }
+  el.innerHTML=shown?html
+    :'<div class="rp-note">Nothing on this part. Untick “Only show this part’s layers” to see the other '+layers.length+'.</div>';
   el.querySelectorAll('.layer-row').forEach(row=>{
     row.addEventListener('click',e=>{
       if(e.target.closest('.layer-btn'))return;
-      selectDecal(+row.dataset.idx);
+      selectLayer(+row.dataset.idx);
     });
   });
-  el.querySelectorAll('[data-vis-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();toggleDecalVisible(+btn.dataset.visIdx);}));
-  el.querySelectorAll('[data-up-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderDecal(+btn.dataset.upIdx,1);}));
-  el.querySelectorAll('[data-down-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderDecal(+btn.dataset.downIdx,-1);}));
-  el.querySelectorAll('[data-del-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();deleteDecal(+btn.dataset.delIdx);}));
+  const on=(attr,fn)=>el.querySelectorAll('['+attr+']').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation();fn(+b.getAttribute(attr));
+  }));
+  on('data-vis-idx',toggleLayerVisible);
+  on('data-up-idx',i=>reorderLayer(i,1));
+  on('data-down-idx',i=>reorderLayer(i,-1));
+  on('data-dup-idx',duplicateLayer);
+  on('data-del-idx',deleteLayer);
 }
-/* ----- paint-stroke layers (same list/reorder/hide/delete pattern as decals above) ----- */
-function selectStroke(idx){
-  selectedStrokeIdx=(selectedStrokeIdx===idx)?-1:idx;
-  renderPaintLayersList();
-  renderPaintLayerControls();
-}
-function deleteStroke(idx){
-  if(idx<0||idx>=paintStrokes.length)return;
-  paintStrokes.splice(idx,1);
-  if(selectedStrokeIdx===idx)selectedStrokeIdx=-1;
-  else if(selectedStrokeIdx>idx)selectedStrokeIdx--;
-  redrawPaintLayer();
-  renderPaintLayersList();
-  renderPaintLayerControls();
-  buildSidebar();
-  pushHistory();
-}
-function reorderStroke(idx,dir){
-  const j=idx+dir;
-  if(j<0||j>=paintStrokes.length)return;
-  [paintStrokes[idx],paintStrokes[j]]=[paintStrokes[j],paintStrokes[idx]];
-  if(selectedStrokeIdx===idx)selectedStrokeIdx=j;else if(selectedStrokeIdx===j)selectedStrokeIdx=idx;
-  redrawPaintLayer();
-  renderPaintLayersList();
-  renderPaintLayerControls();
-  pushHistory();
-}
-function toggleStrokeVisible(idx){
-  const s=paintStrokes[idx];if(!s)return;
-  s.visible=s.visible===false;
-  redrawPaintLayer();
-  renderPaintLayersList();
-  pushHistory();
-}
-function renderPaintLayersList(){
-  updateLayersTotalBadge();
-  const el=document.getElementById('paintLayersList');
+/* Properties of the selected layer. Shape/logo decals get the full Forza
+   transform set; strokes get what a replayed point path can honestly still
+   change after the fact (thickness, colour, opacity). */
+function renderLayerControls(){
+  const el=document.getElementById('layerControls');
   if(!el)return;
-  if(!paintStrokes.length){el.innerHTML='<div class="rp-note">No paint strokes yet — pick 🖌 on the tool rail (or press B) and drag on the model.</div>';return;}
-  let shown=0;
-  el.innerHTML=paintStrokes.map((s,i)=>{
-    if(layersThisPartOnly&&s.target!==paintTarget)return'';
-    shown++;
-    const active=i===selectedStrokeIdx,hidden=s.visible===false;
-    const erase=s.mode==='erase';
-    return`<div class="layer-row${active?' active':''}${hidden?' hidden-layer':''}" data-idx="${i}">
-      <div class="layer-thumb" style="background:${erase?'repeating-conic-gradient(#2a2d3a 0% 25%,#1b1d27 0% 50%) 50%/10px 10px':s.color};"></div>
-      <div class="layer-label">${erase?'🧽 Erase':'Stroke'} — ${s.target} · ${s.points.length}pt</div>
-      <div class="layer-btn" data-vis-idx="${i}" title="${hidden?'Show':'Hide'}">${hidden?'🚫':'👁'}</div>
-      <div class="layer-btn" data-up-idx="${i}" title="Move up"${i===paintStrokes.length-1?' disabled':''}>↑</div>
-      <div class="layer-btn" data-down-idx="${i}" title="Move down"${i===0?' disabled':''}>↓</div>
-      <div class="layer-btn" data-del-idx="${i}" title="Delete">🗑</div>
+  const L=selectedLayer();
+  if(!L){el.innerHTML='';return;}
+  const isStroke=L.kind==='stroke';
+  const op=L.opacity===undefined?1:L.opacity;
+  const slider=(id,label,min,max,step,val,fmt)=>
+    `<div class="mat-slider-row"><div class="mat-slider-label"><span>${label}</span><b id="${id}Val">${fmt}</b></div>
+      <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}"></div>`;
+  let html=`<div class="rp-section-title" style="margin-top:14px;">Selected layer</div>
+    <input id="layerNameInput" value="${(layerLabel(L)||'').replace(/"/g,'&quot;')}"
+      style="width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-weight:600;padding:8px 10px;margin-bottom:10px;">`;
+  /* Any layer can be a REMOVER: flipped to erase it composites destination-out
+     and rubs out everything below it in its own stack instead of painting.
+     That is what "paint or remove over" means for a shape — a star-shaped hole
+     punched through the paint underneath, still movable and still undoable. */
+  html+=`<div class="btn-row" style="margin-bottom:10px;">
+      <div class="btn${L.mode!=='erase'?' primary':''}" id="layerModePaint">🖌 Paint</div>
+      <div class="btn${L.mode==='erase'?' primary':''}" id="layerModeErase">🧽 Remove</div>
     </div>`;
-  }).join('');
-  if(!shown)el.innerHTML='<div class="rp-note">No strokes on this part. Untick “Only show this part’s layers” to see the other '+paintStrokes.length+'.</div>';
-  el.querySelectorAll('.layer-row').forEach(row=>{
-    row.addEventListener('click',e=>{
-      if(e.target.closest('.layer-btn'))return;
-      selectStroke(+row.dataset.idx);
-    });
-  });
-  el.querySelectorAll('[data-vis-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();toggleStrokeVisible(+btn.dataset.visIdx);}));
-  el.querySelectorAll('[data-up-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderStroke(+btn.dataset.upIdx,1);}));
-  el.querySelectorAll('[data-down-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();reorderStroke(+btn.dataset.downIdx,-1);}));
-  el.querySelectorAll('[data-del-idx]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();deleteStroke(+btn.dataset.delIdx);}));
-}
-function renderPaintLayerControls(){
-  const el=document.getElementById('paintLayerControls');
-  if(!el)return;
-  const s=paintStrokes[selectedStrokeIdx];
-  if(!s){el.innerHTML='';return;}
-  el.innerHTML=`<div class="rp-section-title" style="margin-top:14px;">Selected Stroke</div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Thickness</span><b id="strokeSizeVal"></b></div>
-      <input type="range" id="strokeSizeSlider" min="6" max="140" step="2"></div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Opacity</span><b id="strokeOpVal"></b></div>
-      <input type="range" id="strokeOpSlider" min="0.05" max="1" step="0.05"></div>
-    <div class="zone-row" id="strokeColorRow"><div class="zone-swatch" id="strokeColorSwatch" style="background:${s.color}"></div>
-      <div class="zone-info"><div class="zone-name">Recolor Stroke</div></div></div>
-    <div class="btn-row" style="margin-top:8px;"><div class="btn" id="strokeDeleteBtn">🗑 Delete Stroke</div></div>`;
-  const sizeSlider=document.getElementById('strokeSizeSlider');
-  sizeSlider.value=s.size;document.getElementById('strokeSizeVal').textContent=s.size;
-  sizeSlider.addEventListener('input',()=>{s.size=+sizeSlider.value;document.getElementById('strokeSizeVal').textContent=s.size;redrawPaintLayer();});
-  sizeSlider.addEventListener('change',pushHistory);
-  const opSlider=document.getElementById('strokeOpSlider');
-  opSlider.value=s.opacity;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';
-  opSlider.addEventListener('input',()=>{s.opacity=+opSlider.value;document.getElementById('strokeOpVal').textContent=Math.round(s.opacity*100)+'%';redrawPaintLayer();});
-  opSlider.addEventListener('change',pushHistory);
-  document.getElementById('strokeColorRow').addEventListener('click',()=>{
-    openColorPicker(document.getElementById('strokeColorSwatch'),'paintstroke',selectedStrokeIdx);
-  });
-  document.getElementById('strokeDeleteBtn').addEventListener('click',()=>{
-    deleteStroke(selectedStrokeIdx);
-  });
-}
-function renderPlacedDecalControls(){
-  const el=document.getElementById('placedDecalControls');
-  if(!el)return;
-  const d=placedDecals[selectedDecalIdx];
-  if(!d){el.innerHTML='';return;}
-  el.innerHTML=`<div class="rp-section-title" style="margin-top:14px;">Selected Logo</div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Scale</span><b id="decalScaleVal"></b></div>
-      <input type="range" id="decalScaleSlider" min="0.03" max="0.6" step="0.01"></div>
-    <div class="mat-slider-row"><div class="mat-slider-label"><span>Rotation</span><b id="decalRotVal"></b></div>
-      <input type="range" id="decalRotSlider" min="-180" max="180" step="1"></div>
-    <div class="btn-row"><div class="btn" id="decalDeleteBtn">🗑 Delete Logo</div></div>
-    <div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Pick ✥ on the tool rail (or press M) to drag this logo around on the model.</div>`;
-  const scaleSlider=document.getElementById('decalScaleSlider');
-  scaleSlider.value=d.scale;document.getElementById('decalScaleVal').textContent=Math.round(d.scale*100)+'%';
-  scaleSlider.addEventListener('input',()=>{d.scale=+scaleSlider.value;document.getElementById('decalScaleVal').textContent=Math.round(d.scale*100)+'%';redrawLogoLayer();});
+  html+=slider('layerOpacity','Opacity',0.05,1,0.05,op,Math.round(op*100)+'%');
+  if(isStroke){
+    html+=slider('layerSize','Thickness',6,140,2,L.size,L.size);
+  }else{
+    html+=slider('layerSx','Width',0.02,0.9,0.01,L.sx,Math.round(L.sx*100)+'%');
+    html+=slider('layerSy','Height',0.02,0.9,0.01,L.sy,Math.round(L.sy*100)+'%');
+    html+=slider('layerRot','Rotation',-180,180,1,Math.round((L.rot||0)*180/Math.PI),Math.round((L.rot||0)*180/Math.PI)+'°');
+    html+=`<div class="btn-row" style="margin-top:4px;">
+        <div class="btn" id="layerFlipX">⇄ Flip H</div>
+        <div class="btn" id="layerFlipY">⇅ Flip V</div>
+        <div class="btn" id="layerUniform" title="Match height to width">⬜ Un-stretch</div>
+      </div>`;
+  }
+  if(isStroke||L.kind==='shape'){
+    html+=`<div class="zone-row" id="layerColorRow" style="margin-top:10px;">
+        <div class="zone-swatch" id="layerColorSwatch" style="background:${L.color||'#ffffff'}"></div>
+        <div class="zone-info"><div class="zone-name">${L.mode==='erase'?'Colour (unused while removing)':'Colour'}</div></div></div>`;
+  }
+  if(L.kind==='shape'){
+    const o=L.outline||(L.outline={on:false,color:'#000000',width:8});
+    html+=`<label class="rp-check" style="margin-top:10px;"><input type="checkbox" id="layerOutlineOn"${o.on?' checked':''}> Outline</label>`;
+    if(o.on){
+      html+=slider('layerOutlineW','Outline width',1,30,1,o.width,o.width);
+      html+=`<div class="zone-row" id="layerOutlineRow"><div class="zone-swatch" id="layerOutlineSwatch" style="background:${o.color}"></div>
+        <div class="zone-info"><div class="zone-name">Outline colour</div></div></div>`;
+    }
+  }
+  html+=`<div class="btn-row" style="margin-top:10px;">
+      <div class="btn" id="layerDupBtn">⧉ Duplicate</div>
+      <div class="btn" id="layerDelBtn">🗑 Delete</div>
+    </div>`;
+  if(!isStroke)html+=`<div style="font-size:13px;color:var(--text-faint);margin-top:6px;">Pick ✥ on the tool rail (or press M) to drag this decal around on the model.</div>`;
+  el.innerHTML=html;
 
-  const rotSlider=document.getElementById('decalRotSlider');
-  rotSlider.value=(d.rotation||0)*180/Math.PI;document.getElementById('decalRotVal').textContent=Math.round(rotSlider.value)+'°';
-  rotSlider.addEventListener('input',()=>{d.rotation=(+rotSlider.value)*Math.PI/180;document.getElementById('decalRotVal').textContent=Math.round(rotSlider.value)+'°';redrawLogoLayer();});
+  const live=()=>{redrawPaintLayer();};
+  const commit=()=>{renderLayersList();buildSidebar();pushHistory();};
+  const bind=(id,fn,fmt)=>{
+    const s=document.getElementById(id);
+    if(!s)return;
+    s.addEventListener('input',()=>{fn(+s.value);document.getElementById(id+'Val').textContent=fmt(+s.value);live();});
+    s.addEventListener('change',commit);
+  };
+  bind('layerOpacity',v=>L.opacity=v,v=>Math.round(v*100)+'%');
+  bind('layerSize',v=>L.size=v,v=>v);
+  bind('layerSx',v=>L.sx=v,v=>Math.round(v*100)+'%');
+  bind('layerSy',v=>L.sy=v,v=>Math.round(v*100)+'%');
+  bind('layerRot',v=>L.rot=v*Math.PI/180,v=>Math.round(v)+'°');
+  bind('layerOutlineW',v=>L.outline.width=v,v=>v);
 
-  document.getElementById('decalDeleteBtn').addEventListener('click',()=>{
-    deleteDecal(selectedDecalIdx);
-  });
+  const nameInput=document.getElementById('layerNameInput');
+  nameInput.addEventListener('input',()=>{L.name=nameInput.value;});
+  // rename repaints the LIST, which would blow away the focused input mid-type
+  nameInput.addEventListener('change',()=>{renderLayersList();pushHistory();});
+
+  const setMode=m=>{L.mode=m;live();renderLayerControls();renderLayersList();pushHistory();};
+  document.getElementById('layerModePaint').addEventListener('click',()=>setMode('paint'));
+  document.getElementById('layerModeErase').addEventListener('click',()=>setMode('erase'));
+
+  const btn=(id,fn)=>{const b=document.getElementById(id);if(b)b.addEventListener('click',fn);};
+  btn('layerFlipX',()=>{L.flipX=!L.flipX;live();commit();});
+  btn('layerFlipY',()=>{L.flipY=!L.flipY;live();commit();});
+  btn('layerUniform',()=>{L.sy=L.sx;live();renderLayerControls();commit();});
+  btn('layerDupBtn',()=>duplicateLayer(selectedLayerIdx));
+  btn('layerDelBtn',()=>deleteLayer(selectedLayerIdx));
+  btn('layerColorRow',()=>openColorPicker(document.getElementById('layerColorSwatch'),'layercolor',selectedLayerIdx));
+  btn('layerOutlineRow',()=>openColorPicker(document.getElementById('layerOutlineSwatch'),'layeroutline',selectedLayerIdx));
+  const oc=document.getElementById('layerOutlineOn');
+  if(oc)oc.addEventListener('change',()=>{L.outline.on=oc.checked;live();renderLayerControls();commit();});
 }
 
 /* ============================== HISTORY MANAGER ============================== */
@@ -2632,10 +2718,9 @@ function captureState(){
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
     name:jerseyName,number:jerseyNumber,
-    // vector data (points/target/style), not raw pixels — cheap enough to
+    // vector data (points/transforms/style), not raw pixels — cheap enough to
     // snapshot on every history push, see redrawPaintLayer's own note.
-    paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
-    placedDecals:JSON.parse(JSON.stringify(placedDecals)),
+    layers:JSON.parse(JSON.stringify(layers)),
     jerseyFont,
   };
 }
@@ -2644,6 +2729,14 @@ function pushHistory(){
   history.length=historyIdx+1;
   history.push(snap);historyIdx++;
   if(history.length>60){history.shift();historyIdx--;}
+  /* Decoration autosaves HERE. saveToStore's own header has always claimed
+     "every edit path funnels through redrawNameNumber or pushHistory, and
+     both call this" — pushHistory did not, so a session spent only painting
+     (no colour, name or font change, no Save & Exit) persisted nothing.
+     It also matters more now than it did: undo/presets REPLACE the `layers`
+     array rather than mutating it, so the store's reference to the old one
+     goes stale the moment you undo, and only a write puts it right. */
+  saveToStore();
 }
 function applyState(s){
   // pre-per-piece snapshots only carry `body` — migrate them the same way a
@@ -2658,13 +2751,16 @@ function applyState(s){
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   jerseyFont=s.jerseyFont||'Arial';
   const fs=document.getElementById('fontSelect');if(fs)fs.value=jerseyFont;
-  // ||[] guards presets/history saved before paint/decal layers existed
-  paintStrokes=JSON.parse(JSON.stringify(s.paintStrokes||[]));
-  placedDecals=JSON.parse(JSON.stringify(s.placedDecals||[]));
-  selectedStrokeIdx=-1;selectedDecalIdx=-1;
-  redrawPaintLayer();redrawLogoLayer();
-  renderPlacedDecalsList();renderPlacedDecalControls();
-  renderPaintLayersList();renderPaintLayerControls();
+  /* Snapshots taken before the layer stack existed carry the old two-list
+     shape; migrating on the way in is what keeps a preset saved last week
+     restorable today. A snapshot with neither key predates decoration
+     entirely and restores as an empty stack. */
+  layers=JSON.parse(JSON.stringify(
+    s.layers||ihcMigrateLayers(s.paintStrokes,s.placedDecals)));
+  selectedLayerIdx=-1;
+  if(activeTool==='decal')setActiveTool('orbit',true);
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   refreshSwatches();
 }
 function undo(){if(historyIdx>0){historyIdx--;applyState(history[historyIdx]);showToast('Undo');}}
@@ -2714,8 +2810,7 @@ function promptSavePreset(){
     stick:stickZM.zones.map(z=>'#'+z.color.getHexString()),
     neck:'#'+neckZone.color.getHexString(),
     jname:jerseyName,jnumber:jerseyNumber,jfont:jerseyFont,
-    paintStrokes:JSON.parse(JSON.stringify(paintStrokes)),
-    placedDecals:JSON.parse(JSON.stringify(placedDecals)),
+    layers:JSON.parse(JSON.stringify(layers)),
   });
   savePresets(presets);renderRightPanel();showToast('Preset saved');
 }
@@ -2730,12 +2825,12 @@ function applyPreset(id){
   { const fs=document.getElementById('fontSelect'); if(fs)fs.value=jerseyFont; }
   const ni=document.getElementById('nameInput');if(ni)ni.value=jerseyName;
   const nu=document.getElementById('numberInput');if(nu)nu.value=jerseyNumber;
-  paintStrokes=JSON.parse(JSON.stringify(p.paintStrokes||[]));
-  placedDecals=JSON.parse(JSON.stringify(p.placedDecals||[]));
-  selectedStrokeIdx=-1;selectedDecalIdx=-1;
-  redrawPaintLayer();redrawLogoLayer();
-  renderPlacedDecalsList();renderPlacedDecalControls();
-  renderPaintLayersList();renderPaintLayerControls();
+  // presets saved before the layer stack carry the old two-list shape
+  layers=JSON.parse(JSON.stringify(p.layers||ihcMigrateLayers(p.paintStrokes,p.placedDecals)));
+  selectedLayerIdx=-1;
+  if(activeTool==='decal')setActiveTool('orbit',true);
+  redrawPaintLayer();
+  renderLayersList();renderLayerControls();
   refreshSwatches();pushHistory();showToast(p.name+' loaded');
 }
 
@@ -2746,7 +2841,8 @@ function applyPreset(id){
    ten sections down a scrolling property panel. */
 function toolAvailable(t){
   if(t.decorateOnly&&currentActivity!=='decorate')return false;
-  if(t.id==='decal'&&!placedDecals.length)return false; // nothing to move yet
+  // ✥ moves the SELECTED decal, so it is only meaningful with one selected
+  if(t.id==='decal'&&!isDecalLayer(selectedLayer()))return false;
   return true;
 }
 function buildToolRail(){
@@ -2789,7 +2885,7 @@ function setActiveTool(id,quiet){
   const t=toolDef(id);
   if(!toolAvailable(t)){
     if(!quiet&&t.decorateOnly)showToast(t.label+' lives in Decorate — switch activity first');
-    else if(!quiet&&t.id==='decal')showToast('Place a logo first, then ✥ can move it');
+    else if(!quiet&&t.id==='decal')showToast('Select a decal layer first, then ✥ can move it');
     return;
   }
   activeTool=t.id;
@@ -2873,8 +2969,30 @@ addEventListener('keydown',e=>{
     showToast('Brush '+paintBrushSize);
     return;
   }
+  /* Layer keys, live wherever you are in Decorate — the layer panel is a long
+     scroll and reaching for its buttons to nudge a decal a few texels was the
+     slowest part of placing one. Arrows move the selected decal in UV, Shift
+     makes it a coarse step; Delete removes whatever layer is selected. */
+  const L=selectedLayer();
+  if(currentActivity==='decorate'&&L){
+    if(e.key==='Delete'||e.key==='Backspace'){
+      e.preventDefault();deleteLayer(selectedLayerIdx);return;
+    }
+    if(isDecalLayer(L)&&e.key.indexOf('Arrow')===0){
+      e.preventDefault();
+      const d=e.shiftKey?0.01:0.002;
+      if(e.key==='ArrowLeft')L.u-=d; else if(e.key==='ArrowRight')L.u+=d;
+      else if(e.key==='ArrowUp')L.v-=d; else L.v+=d;
+      redrawPaintLayer();
+      return;
+    }
+  }
   const t=TOOLS.find(x=>x.key.toLowerCase()===e.key.toLowerCase());
   if(t)setActiveTool(t.id);
+});
+/* An arrow-key nudge run is one undo step, the same way a drag is. */
+addEventListener('keyup',e=>{
+  if(currentActivity==='decorate'&&e.key.indexOf('Arrow')===0&&isDecalLayer(selectedLayer()))pushHistory();
 });
 addEventListener('keyup',e=>{
   if(e.code==='Space'&&spaceOrbit){spaceOrbit=false;syncToolRail();}
