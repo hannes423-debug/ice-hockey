@@ -4696,6 +4696,25 @@ const CONFIG={
      grounded windup — real slap shots start high and come down through the
      puck. */
   slapBackFwd:-0.25,slapBackSide:0.45,slapBackHeight:1.85,
+  /* SLAPSHOT CLIP SPLIT (2026-08-04). The authored `SlapShot` clip is ONE
+     continuous swing — backswing, downswing, follow-through, settle — but the
+     control is charge-and-release, so it is played as two pieces (playHold /
+     releaseHold):
+       [0 .. slapClipApex]      while both buttons are HELD, then FROZEN
+       [slapClipApex .. slapClipEnd]  on the release
+     Times measured off the shipped payload, not guessed: forward-kinematic the
+     clip's hand_l/hand_r and take the draw-back metric (hands pulled back and
+     across the body, (x-z) summed over both hands). It peaks at t=0.208 —
+     hand_r (0.262, 1.384, 0.011) — and bottoms out through contact at t=0.523;
+     everything after ~0.55 is a settle the locomotion graph does better, so the
+     tail is not played and the graph takes over instead.
+     NOTE the grip bake pins the blade to the ice on every frame of every clip
+     (see ANIMFIX_PROGRESS.md), so this backswing reads as a low draw-back
+     sweep, NOT the overhead loaded stick slapBackHeight describes. Re-measure
+     both numbers with the same FK if the clip is ever rebaked.
+     slapClipRate stretches the backswing so its apex lands exactly when
+     slapChargeT tops out — pose and charge meter fill together. */
+  slapClipApex:0.208,slapClipEnd:0.72,
   /* wrist/backhand-shot feel: blade stays low/grounded through the
      windup+release (real wristers sweep the ice, they don't point the
      shaft at the sky — see poseAimPt in updatePlayer) with a front-leg
@@ -5914,6 +5933,14 @@ function setLoco(ent,moving){
    "did the value change" skip (see mixerUpdateClean) is computed across ALL of
    them, so silent actions change when bones get written. */
 function animGraphTick(ent,dt){
+  /* freeze a held one-shot on the last frame of its windup half (see playHold).
+     Runs AFTER mixer.update, so the applied pose can overshoot the stop point
+     by at most one frame of clip time (~7 ms at the slapshot's stretched rate)
+     before it is pinned — invisible, and rewinding before the update instead
+     would cost a frame of the windup every frame. */
+  if(ent.holdAct&&ent.holdStopAt!=null&&!ent.holdAct.paused&&ent.holdAct.time>=ent.holdStopAt){
+    ent.holdAct.time=ent.holdStopAt;ent.holdAct.paused=true;
+  }
   if(ent.fadingOut){
     ent.fadeT-=dt;
     if(ent.fadeT<=0||ent.fadingOut.getEffectiveWeight()<=0.001){
@@ -5936,6 +5963,45 @@ function animGraphTick(ent,dt){
    to start on the frame it was fired — and clears it so the return to a loco
    clip when oneShot expires is not held back by the dwell this switch set. */
 function playOnce(ent,act,hold){if(!act)return;if(ent.curAction)ent.curAction.fadeOut(0.1);act.reset();act.setLoop(THREE.LoopOnce,1);act.clampWhenFinished=true;act.fadeIn(0.08).play();ent.curAction=act;ent.oneShot=hold?999:act.getClip().duration;ent.clipHoldT=0;}
+/* ----- HELD ONE-SHOT: play a clip up to `stopAt`, then FREEZE there -----
+   This is what makes a charged input hold its stance. A paused three.js action
+   keeps applying its pose at full weight (pause only stops time advancing), so
+   the frozen frame IS the held stance — no separate hold pose, no second clip,
+   and the release continues from exactly where the windup stopped rather than
+   restarting the swing from frame 0 after the puck has already left.
+   `rate` stretches the windup half so its end lands on the charge timer.
+   COST, stated plainly: the graph has ONE curAction per skater and the clips
+   drive all 64 bones, so a held windup owns the whole body — the legs stop
+   striding for as long as the button is down. Fixing that means an additive
+   upper-body layer (the UPPER_STATES table that has never been written), not a
+   tweak here; see the ARMS/LOWER/SPINE authority note above.
+   Freezing itself happens in animGraphTick, which is the one place guaranteed
+   to run right after every mixer update. */
+function playHold(ent,act,stopAt,rate){
+  if(!act)return false;
+  playOnce(ent,act,true);                     // oneShot=999 -> setLoco stays off
+  act.setEffectiveTimeScale(rate||1);
+  ent.holdAct=act;ent.holdStopAt=stopAt;
+  return true;
+}
+/* Let a frozen one-shot run on to `endAt` (default: the whole clip). Returns
+   false when nothing was held, so callers can fall back to firing the clip
+   from the start — a one-timer slap never had a windup to hold. */
+function releaseHold(ent,endAt){
+  const act=ent&&ent.holdAct;if(!act)return false;
+  act.paused=false;act.setEffectiveTimeScale(1);
+  const end=(endAt!==undefined?endAt:act.getClip().duration);
+  ent.oneShot=Math.max(0.05,end-act.time);    // graph resumes when the tail is done
+  ent.holdAct=null;ent.holdStopAt=null;
+  return true;
+}
+/* Abandon a frozen one-shot (fake, cancel, mode flip): drop oneShot to 0 so
+   setLoco crossfades straight back to locomotion on the next frame. */
+function cancelHold(ent){
+  const act=ent&&ent.holdAct;if(!act)return;
+  act.paused=false;act.setEffectiveTimeScale(1);
+  ent.holdAct=null;ent.holdStopAt=null;ent.oneShot=0;
+}
 
 /* palmOff() and snapHandToShaft() DELETED 2026-08-01 (full purge) — they
    existed only to place the skater's hand ON the shaft. poseStick now reads
@@ -6708,7 +6774,7 @@ function refreshScore(){
      reads 95+ the goalie gaps need widening, below ~80 tighten them. */
   const faced=goalScore+saveScore;
   const sv=faced?' · SV% '+Math.round(100*saveScore/faced):'';
-  if(GAME.mode==='match')scoreEl.textContent='TEAM A '+MATCH.scoreA+' — '+MATCH.scoreB+' TEAM B'+sv;
+  if(GAME.mode==='match')scoreEl.textContent=ihTeamShort('A')+' '+MATCH.scoreA+' — '+MATCH.scoreB+' '+ihTeamShort('B')+sv;
   else if(GAME.mode==='1v1')scoreEl.textContent='YOU '+GAME.scoreP+' — '+GAME.scoreB+' BOT'+sv;
   else scoreEl.textContent='GOALS: '+goalScore+' · SAVES: '+saveScore+sv;
 }
@@ -6739,6 +6805,12 @@ function buildStartMenu(){
       '<span id="smBWrap"> &nbsp;·&nbsp; <span id="smBLbl">TEAM B BOTS</span> <button id="smBm" class="smOpt" style="padding:2px 10px;font-size:11px;">−</button> '+
       '<span id="smBn" style="color:#c45cff;font-weight:800;">1</span> '+
       '<button id="smBp" class="smOpt" style="padding:2px 10px;font-size:11px;">+</button></span></div>'+
+      /* club picker: one row per side, so a club can be played AS (side A,
+         P1's own side) or AGAINST (side B) — see IH_CLUBS */
+      '<div id="smClubRow" style="margin-top:6px;line-height:2.2;">'+
+        '<div><span id="smCALbl">TEAM A KIT</span> <span id="smCA"></span></div>'+
+        '<div><span id="smCBLbl">TEAM B KIT</span> <span id="smCB"></span></div>'+
+      '</div>'+
     '</div>'+
     '<div id="smSkillRow" style="margin-bottom:18px;font-size:12px;">BOT OVERALL '+
       '<span id="smSkillVal" style="color:#c45cff;font-weight:800;">99</span><br>'+
@@ -6787,7 +6859,26 @@ function buildStartMenu(){
     lobbyEl.style.display=(m==='match'||m==='practice')?'block':'none';
     card.querySelector('#smALbl').textContent=m==='practice'?'TEAMMATE BOTS':'TEAM A BOTS';
     card.querySelector('#smBLbl').textContent=m==='practice'?'OPPONENT BOTS':'TEAM B BOTS';
-    if(m!=='1v1')renderRoster();};
+    card.querySelector('#smCALbl').textContent=m==='practice'?'YOUR KIT':'TEAM A KIT';
+    card.querySelector('#smCBLbl').textContent=m==='practice'?'OPPONENT KIT':'TEAM B KIT';
+    if(m!=='1v1'){renderRoster();renderClubs();}};
+  /* Club picker — GENERIC (the original randomized team palette) plus one
+     button per IH_CLUBS entry, per side. Both sides may wear the same club;
+     nothing here forbids it, and a scrimmage against yourselves is a legitimate
+     thing to want. */
+  function renderClubs(){
+    ['A','B'].forEach(side=>{
+      const host=card.querySelector(side==='A'?'#smCA':'#smCB');
+      const bs='class="smOpt" style="padding:3px 10px;font-size:10px;"';
+      let h='<button data-id="generic" '+bs+'>GENERIC</button>';
+      for(const c of IH_CLUBS)h+=' <button data-id="'+c.id+'" '+bs+'>'+c.name+'</button>';
+      host.innerHTML=h;
+      host.querySelectorAll('button').forEach(btn=>{
+        btn.classList.toggle('sel',btn.dataset.id===ihTeamIdentity[side]);
+        btn.onclick=()=>{ihSetTeamIdentity(side,btn.dataset.id);renderClubs();};
+      });
+    });
+  }
   pB.onclick=()=>sel('practice');vB.onclick=()=>sel('1v1');mB.onclick=()=>sel('match');
   /* name-tag mode picker — persists immediately (setNameTagMode writes
      localStorage), so it survives the reload the front-end menu does on
@@ -6889,6 +6980,11 @@ function buildStartMenu(){
     GAME.mode=selMode;
     GAME.scoreP=0;GAME.scoreB=0;GAME.attacker=null;
     GAME.needClear.p=false;GAME.needClear.b=false;GAME.whistleT=0;GAME.whistleFn=null;
+    /* the standalone 1v1 opponent and the practice goalie live outside
+       MATCH.skaters, so they miss matchDressSkaters — re-dress them here so a
+       club picked in the menu shows up in every mode, not just MATCH */
+    if(typeof bot!=='undefined'&&bot)ihApplyBotZoneRecolor(bot,'B');
+    if(typeof goalie!=='undefined'&&goalie)ihApplyBotZoneRecolor(goalie,'A');
     if(selMode==='1v1'){resetCenter('p',false);flashMsg('1VS1 — YOUR PUCK');}
     else{
       if(bot){bot.root.visible=false;bot.hasPuck=false;}
@@ -7589,7 +7685,9 @@ function botShoot(){botShootG(bot,GOAL_ZONE,goalie,'BOT SHOOTS!');}
    passes GOAL_B and the mirrored goalie; that goalie's sim-frame x is the
    real x, so corner picking reads it directly) */
 function botShootG(e,g,gl,label){
-  const skill=GAME.botSkill;
+  /* a named roster spot can carry its own rating (ihApplyBotZoneRecolor writes
+     skillMul) — DEVA shoots like a 99 whatever the BOT OVERALL slider says */
+  const skill=(e.skillMul!==undefined&&e.skillMul!==null)?e.skillMul:GAME.botSkill;
   const gx=gl?gl.pos.x:0;
   const corners=[[-g.halfW+0.15,g.height-0.18],[g.halfW-0.15,g.height-0.18],
                  [-g.halfW+0.12,0.25],[g.halfW-0.12,0.25]];
@@ -7609,7 +7707,7 @@ function botShootG(e,g,gl,label){
   const t=dl/spd;
   e.hasPuck=false;puck.noPickupBotT=0.5;puck.noPickupT=0.15;
   puck.vel.set(ndx*spd,Math.max(0,(best[1]-puck.pos.y)/t+4.9*t),ndz*spd);
-  flashMsg(label||'SHOT!');
+  flashMsg((e.ihName?e.ihName+' — ':'')+(label||'SHOT!'));
 }
 /* bot brain — the researched 1v1 loop */
 function updateBotAI(dt){
@@ -7811,6 +7909,19 @@ function ensureGoalieB(cb){
     cb();
   },()=>cb());
 }
+/* Dress everyone on the ice in their side's kit and hand out the named roster
+   spots. Roster spots go to AI skaters ONLY, in the order they were built (so
+   the Heroes' first bot is DEVA #88) — a human on that side wears the club kit
+   but keeps their own Locker Room name and number, which is the right split:
+   you can PLAY FOR the club without being one of its listed players. */
+function matchDressSkaters(){
+  ihResetRosters();
+  ihRefreshPlayerJersey();   // P1's crest follows their side's club too
+  for(const s of MATCH.skaters){
+    if(s.ent===player)continue;
+    ihApplyBotZoneRecolor(s.ent,s.team,s.ctrl==='ai'?ihTakeRosterSpot(s.team):null);
+  }
+}
 function startMatch(){
   const need=MATCH.joined.length+MATCH.botsA+MATCH.botsB;
   flashMsg('LOADING PLAYERS…');
@@ -7834,9 +7945,13 @@ function startMatch(){
       MATCH.skaters.push({ent:MATCH.pool[pi++],team:'B',ctrl:'ai',
         ai:{pos:AI_POS[MATCH.botsB-1][i],side:i%2?-1:1}});
     for(let i=pi;i<MATCH.pool.length;i++){MATCH.pool[i].root.visible=false;MATCH.pool[i].hasPuck=false;}
-    for(const s of MATCH.skaters)if(s.ent!==player)ihApplyBotZoneRecolor(s.ent,s.team);
+    matchDressSkaters();
     if(typeof dummy!=='undefined'&&dummy&&dummy.group)dummy.group.visible=false;
     if(typeof bot!=='undefined'&&bot){bot.root.visible=false;bot.hasPuck=false;}
+    /* both goalies re-dress too: they were colored at boot, before either side
+       had picked a club (a no-op when nothing changed — see the key test) */
+    if(typeof goalie!=='undefined'&&goalie)ihApplyBotZoneRecolor(goalie,'A');
+    ihApplyBotZoneRecolor(MATCH.goalieB,'B');
     MATCH.goalieB.root.visible=true;
     MATCH.active=true;MATCH.freeSkate=false;MATCH.scoreA=0;MATCH.scoreB=0;
     GAME.whistleT=0;GAME.whistleFn=null;
@@ -7844,7 +7959,7 @@ function startMatch(){
     refreshScore();
     GAME.menuEl.style.display='none';window.__poseFrozen=false;
     document.body.classList.add('hideCursor'); // gameplay started — hand the pointer to the in-game reticle
-    flashMsg('MATCH — TEAM A vs TEAM B');
+    flashMsg('MATCH — '+ihTeamName('A')+' vs '+ihTeamName('B'));
   }));
 }
 /* PRACTICE with company: joined pads + bots all skate TEAM A on the single
@@ -7884,7 +7999,8 @@ function startFreeSkate(){
         ai:{pos:AI_POS[MATCH.botsO-1][i],side:i%2?-1:1}});
     }
     for(let i=pi;i<MATCH.pool.length;i++){MATCH.pool[i].root.visible=false;MATCH.pool[i].hasPuck=false;}
-    for(const s of MATCH.skaters)if(s.ent!==player)ihApplyBotZoneRecolor(s.ent,s.team);
+    matchDressSkaters();
+    if(typeof goalie!=='undefined'&&goalie)ihApplyBotZoneRecolor(goalie,'A');
     MATCH.freeSkate=true;
     flashMsg('PRACTICE — '+(MATCH.skaters.length)+' SKATERS');
   });
@@ -7916,7 +8032,7 @@ function matchGoalScored(team){
   if(team==='A')MATCH.scoreA++;else MATCH.scoreB++;
   goalScore++;
   padRumble(0.9,0.55,380);
-  flashMsg(team==='A'?'GOAL — TEAM A!':'GOAL — TEAM B!');
+  flashMsg('GOAL — '+ihTeamName(team)+'!');
   refreshScore();
   whistle(1.4,matchFaceoff);
 }
@@ -8653,7 +8769,17 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
      exactly as before. */
   if(player.actions){
     const shotAct=(type==='slap'&&player.actions.uSlap)||player.actions.shoot;
-    if(shotAct)playOnce(player,shotAct);
+    /* A shot that was WOUND UP is already frozen at the top of its backswing
+       (playHold, from the button press) — release it in place so the downswing
+       plays on from there. Restarting the clip would replay the whole
+       backswing after the puck had already left the blade. Only the slapshot
+       winds up today; a slap windup turned into a slap PASS (eaSlapPass) is
+       the same physical swing, so it releases the same clip rather than
+       cutting to the wrist-shot one — which is why this tests the held action,
+       not the shot type. Nothing held (one-timer, pad swat) = fire the clip
+       from the start, exactly as before. */
+    if(player.holdAct)releaseHold(player,CONFIG.slapClipEnd);
+    else if(shotAct)playOnce(player,shotAct);
   }
   /* routine shot labels (type + clean%) were made redundant by the world-
      space AR readout at the ribbon — only the exceptional events still
@@ -9306,7 +9432,7 @@ function toggleDefenseMode(){
   defenseMode=!defenseMode;
   refreshModeEl();
   // cancel any in-progress shot windup so a held button can't fire across the switch
-  if(player){player.shotType='none';player.slapChargeT=0;player.hitChargeT=0;player.holdPokeActive=false;}
+  if(player){player.shotType='none';player.slapChargeT=0;player.hitChargeT=0;player.holdPokeActive=false;cancelHold(player);}
   shootHeld=false;
 }
 function triggerPoke(){
@@ -10057,7 +10183,7 @@ function pollPad(dt){
     const rsUp=-PAD.rsY,vertDom=Math.abs(PAD.rsY)>=Math.abs(PAD.rsX)*0.8;
     if(!offense||PAD.dekeMod){
       if(PAD.eaShot==='slap'||PAD.eaShot==='wrist'){ // layer/mod flip mid-windup = clean cancel
-        player.shotType='none';shootHeld=false;player.slapChargeT=0;resetGesture();
+        player.shotType='none';shootHeld=false;player.slapChargeT=0;resetGesture();cancelHold(player);
         if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
       }
       PAD.eaShot='none';PAD.eaCenterT=0;
@@ -10071,7 +10197,7 @@ function pollPad(dt){
         if(PAD.eaCenterT>0.4){
           PAD.eaShot='none';PAD.eaCenterT=0;
           player.shotType='none';shootHeld=false;player.shotSuppressed=true;
-          player.slapChargeT=0;resetGesture();
+          player.slapChargeT=0;resetGesture();cancelHold(player);
           if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
           flashMsg('FAKE!');
         }
@@ -10238,7 +10364,7 @@ function pollPad(dt){
      releasing it afterwards fires nothing. */
   if(eDown(11)&&offense&&player.shotType&&player.shotType!=='none'){
     player.shotType='none';shootHeld=false;player.shotSuppressed=true;
-    player.slapChargeT=0;resetGesture();
+    player.slapChargeT=0;resetGesture();cancelHold(player);
     if(typeof aimViz!=='undefined'&&aimViz)aimViz.cancel();
     flashMsg('FAKE!');
   }
@@ -10545,7 +10671,18 @@ function updatePlayer(dt){
       if(!anyDown)player.shotSuppressed=false;
       rawShotType='none';
     }
-    if(rawShotType!=='none'&&(prevShotType==='none'||slapUpgrade)){resetGesture();if(skillStickOn)ssAnchorReset();}
+    if(rawShotType!=='none'&&(prevShotType==='none'||slapUpgrade)){
+      resetGesture();if(skillStickOn)ssAnchorReset();
+      /* SLAPSHOT WINDUP — the backswing half of the SlapShot clip starts HERE,
+         on the press, and freezes at the top of the draw for as long as both
+         buttons stay down; fireShot releases the downswing half. Everything
+         else keeps its single one-shot fired at release. Identical for mouse
+         and pad: both feed this one state machine (the pad's slap windup holds
+         lmb+rmb true while the RS is pulled down / B is held). */
+      if(rawShotType==='slap'&&player.actions)
+        playHold(player,player.actions.uSlap,CONFIG.slapClipApex,
+                 CONFIG.slapClipApex/Math.max(0.05,CONFIG.slapWindupTime));
+    }
     if(rawShotType!=='none'&&mouseCtl.active)updateGesture(dt||0);
     /* the FAKE is now a deliberate spatial act, not a timing one: pull the
        ice reticle INSIDE your own player-circle indicator and release —
@@ -10567,6 +10704,7 @@ function updatePlayer(dt){
       if(aimInCircle){
         // reticle parked inside the player circle = the fake
         flashMsg('CANCELED');if(aimViz)aimViz.cancel();
+        cancelHold(player); // drop a frozen slap backswing back into locomotion
       }else{
         // release ALWAYS fires: the last completed swipe of the hold wins,
         // its own peak speed already baked into its stored .pow; a swipe
@@ -11690,6 +11828,78 @@ function ihApplyPieceColors(pieces,colorMap){
    Shoulder pad size, jersey tuck, and other per-player silhouette options
    are a deliberately later phase, not attempted here. */
 const IH_TEAM_HUE={A:212,B:4}; // matches tintTeam's old fixed colors: 0x3f6fd2 (blue, team A) / 0xd23a3a (red, team B)
+/* ===================== NAMED CLUBS =====================
+   A "team" was two letters and a hue. A CLUB is a named identity a side can
+   wear instead: a FIXED three-zone kit (so it looks the same every game,
+   unlike the randomized generic sides) and an optional named roster whose
+   entries are handed to that side's AI skaters in order.
+   Either side of the ice can wear any club — that is the whole "play AS or
+   AGAINST them" feature; the picker sits in the start menu. A side left on
+   the generic identity behaves EXACTLY as before (random hue-family palette,
+   'TEAM A'/'TEAM B' on the scoreboard), so the default game is untouched.
+   Adding a club = adding one entry here. */
+/* ---- CLUB CREST ART ----
+   The Cock-Cola Heroes shield, cut off its reference render (the gray plate
+   and the red outer glow are gone; alpha is the shield silhouette itself,
+   grown out over the crisp red border and feathered 2 px) and quantized to
+   96 colours — 21 KB, which is what keeps this single-file build single-file.
+   Stored at its NATURAL aspect (384x359) and stretched by the draw, see
+   IH_CREST_RECT for why. */
+const IH_CREST_COCKCOLA="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAYAAAAFnCAMAAACYWG63AAABIFBMVEWcCAklFiGyBArfb3HRBQ/fjo/i3+FaXmO0CxLKAw6cnqG6vcFkEAt5fILNHSE9QUh9gYW9wcTUPUExEgacCArgfoHpvsDnwL7egH5fICzQQD7yZGT///8A//+oTU1BP0WEfYL/ZpkAAP8+QD8AVVUA/wB/VVWqVaq/wb7iOFXUVSoAECkAAADMBA/8/PwADicCBBGQEhtTFyRwEx2vBAppFiHw6On+AACYCxKlEhpZEx19AADJFhjV19gyFCMmKS/z19e1t7nMJinwx8jPNzjGyMrSR0jstrbop6gSFBqmqKvZZ2hFR0yTlZfVVlYyNDlnaWyPFiDll5fbdnZzdXnKBA9TVVmGiYzjh4jMBA/JBA+tBAnKBA+tAAE5PEKsBAgaR7XiAAAAYHRSTlMl/6D/H////9xO//8N////////BlP///////8FAQEG//8FAf8DAQYD/wkG/wD+/////////v//Af///wT/////////////////////////////////0f///3GvcY8I/1B4pLgAAABS9UlEQVR42u19B0MbS5auQCYYnO1778zsvt2XUyOqDKLBIKGco4UQGNv4//+L15VPpQ6SCJ59vTu+Bit0n+/kVLmDZ3Wdsuvigv3X+vdc7td3fsm/wOtT7mP0qo+56LI/ln/o6bN64tzzoX1EdQfBP32ilP1Grh9319eF+Ov67kf0st3d3c3NzV8RRp8+fcpdmN/08+L0/wOgU/7nqSD4q1evPr6KGD26Xn67S6J3qut6c/P7y1+/crmLV/QSMDBR+48LQKQSfgLm/Pjq0ya97u7uCg9yXUeffEe+4bsmFNFdXDydXnoCAAjfXZwCElwQzb65WSw83hVh8eP7r9yvSOD+ld/Fz5+n/xEAuLiACj4i++aP68ITXsXdze9EOX3kQvnz4p8XAKFx/8sL4qR839x9UsrrV2SzIxyUTXo8lZR7JHUvtGzu1+bm7m7xGdEe6iUiDEpWL/4pAKAKn/4t8j9+be4WC8/7ilymX7mLi1dcZk9/ZwAi2nPDxqzs9XXhN7muSRjxKfcYIOQekPqM7y8+Rep+nWYz/ioU12gYIi+JeUgPB8LDAMA4P0dov3n9APT+ol/y5/Ujck0UkvSQTn8DAE55dPUx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";
+/* WHERE IT GOES ON THE JERSEY — measured off the rig, not eyeballed.
+   Rasterizing Cube001's front-facing chest triangles into the 2048 atlas gives
+   the front torso island; every vertex at x=0 in that band maps to u=946 px
+   exactly, which IS the chest centreline, and the rect below is centred on it
+   with 60 px of margin to the island edge at its narrowest row (verified 100%
+   inside — a decal that runs off the island lands on some other body part).
+   THE ASPECT IS DELIBERATELY WRONG: the island is anisotropic — 1177 px per
+   metre across the chest but 911 px per metre down it — so a square drawn here
+   renders 1.29x too tall. 272x196 texture px is 23.1 x 21.5 cm on the body,
+   i.e. the crest's true 1.07 proportion once the stretch is undone.
+   Re-measure all of it if the model or its UVs are ever rebaked. */
+const IH_CREST_RECT={x:810,y:1112,w:272,h:196};
+/* One Image for the whole session. Canvases that want the crest before it has
+   decoded register a redraw and get it on load — a jersey drawn without it
+   would otherwise stay blank until something else happened to redraw it. */
+let ihCrestImg=null,ihCrestSrc=null,ihCrestWaiters=[];
+function ihCrestBitmap(src,redraw){
+  if(!src)return null;
+  if(ihCrestSrc!==src){
+    ihCrestSrc=src;ihCrestWaiters=[];
+    ihCrestImg=new Image();
+    ihCrestImg.onload=()=>{const w=ihCrestWaiters;ihCrestWaiters=[];for(const f of w)f();};
+    ihCrestImg.src=src;
+  }
+  if(ihCrestImg&&ihCrestImg.complete&&ihCrestImg.naturalWidth)return ihCrestImg;
+  if(redraw)ihCrestWaiters.push(redraw);
+  return null;
+}
+function ihDrawCrest(ctx,src,redraw){
+  const img=ihCrestBitmap(src,redraw);
+  if(!img)return;
+  const r=IH_CREST_RECT;
+  ctx.drawImage(img,r.x,r.y,r.w,r.h);
+}
+const IH_CLUBS=[
+  {id:'cockcola',name:'COCK-COLA HEROES',short:'HEROES',
+   /* Primary / Secondary / Trim — the same three zones the Locker Room
+      paints, read off the club's kit sheet: navy shell, red accent stripe,
+      white trim. ihPiecesFromBody spreads them over the other eight pieces
+      exactly the way it does for the player's own loadout. */
+   colors:['#111f45','#c8102e','#f2f5fa'],
+   crest:IH_CREST_COCKCOLA,      // chest crest, drawn at IH_CREST_RECT
+   /* Named roster, handed out one per AI skater in order (ihTakeRosterSpot).
+      `ovr` overrides the menu's BOT OVERALL slider for that skater only. */
+   roster:[{name:'DEVA',number:'88',ovr:0.99}]},
+];
+/* The identity each side is wearing. Written by the start menu. */
+let ihTeamIdentity={A:'generic',B:'generic'};
+function ihTeamDef(side){
+  const c=IH_CLUBS.find(t=>t.id===ihTeamIdentity[side]);
+  return c||{id:'generic',name:'TEAM '+side,short:'TEAM '+side,colors:null,roster:null};
+}
+function ihTeamName(side){return ihTeamDef(side).name;}
+function ihTeamShort(side){return ihTeamDef(side).short;}
 function ihRandomBotZoneColors(hueCenter){
   const jitter=()=>(Math.random()*2-1)*32;
   const hue=h=>(((hueCenter+h+jitter())%360)+360)%360/360;
@@ -11705,8 +11915,47 @@ function ihRandomBotZoneColors(hueCenter){
    matches everyone already on the ice. */
 let ihTeamZoneColors={A:null,B:null};
 function ihGetTeamZoneColors(team){
-  if(!ihTeamZoneColors[team])ihTeamZoneColors[team]=ihRandomBotZoneColors(IH_TEAM_HUE[team]||IH_TEAM_HUE.B);
+  if(!ihTeamZoneColors[team]){
+    const def=ihTeamDef(team);
+    // a club wears its own fixed kit; a generic side keeps the random one
+    ihTeamZoneColors[team]=def.colors?def.colors.map(h=>new THREE.Color(h))
+                                    :ihRandomBotZoneColors(IH_TEAM_HUE[team]||IH_TEAM_HUE.B);
+  }
   return ihTeamZoneColors[team];
+}
+/* Roster spots left to hand out on each side, refilled from the club def on
+   first use and reset per game (ihResetRosters). Humans and goalies never take
+   one — DEVA is a skater. A side with no club, or one whose list is spent,
+   returns null and those skaters keep the anonymous random-number treatment. */
+let ihTeamRoster={A:null,B:null};
+function ihTakeRosterSpot(side){
+  if(!ihTeamRoster[side]){
+    const r=ihTeamDef(side).roster;
+    ihTeamRoster[side]=r?r.map(e=>Object.assign({},e)):[];
+    // reserve the named numbers so a teammate can't roll DEVA's 88
+    for(const e of ihTeamRoster[side])
+      (ihTeamUsedNumbers[side]||(ihTeamUsedNumbers[side]=new Set())).add(parseInt(e.number,10));
+  }
+  return ihTeamRoster[side].shift()||null;
+}
+function ihResetRosters(){ihTeamRoster.A=null;ihTeamRoster.B=null;}
+/* Switch a side's identity. Everything derived from it is dropped so the next
+   ihApplyBotZoneRecolor rebuilds it — except the eight SHARED non-jersey piece
+   materials, which every skater already on that side holds by reference: those
+   are recolored IN PLACE (the shader's uniform values are those very Color
+   objects), because swapping them for a new set would leave anyone already on
+   the ice wearing the old pants and gloves. */
+function ihSetTeamIdentity(side,id){
+  if(ihTeamIdentity[side]===id)return;
+  ihTeamIdentity[side]=id;
+  ihTeamZoneColors[side]=null;
+  ihTeamRoster[side]=null;
+  ihTeamUsedNumbers[side]=new Set();
+  const set=ihTeamPieceMats[side];
+  if(set&&set.kit)
+    ihApplyPieceColors(set.kit,ihPiecesFromBody(ihGetTeamZoneColors(side).map(c=>'#'+c.getHexString())));
+  // P1 is on side A: their crest changes the moment the pick does
+  if(side==='A'&&typeof ihRefreshPlayerJersey==='function')ihRefreshPlayerJersey();
 }
 /* Per-team pool so two teammates don't end up wearing the same number —
    best-effort, not a hard guarantee (falls back to a possible repeat past
@@ -11732,13 +11981,22 @@ function ihAssignBotNumber(team){
    "install once, mutate in place thereafter" working without needing a
    stored shader/uniform reference) so mutating them in place is what makes
    a team switch actually show up without reinstalling the shader. */
-function ihApplyBotZoneRecolor(ent,team){
+function ihApplyBotZoneRecolor(ent,team,spot){
   if(!ent||!ent.visual)return;
   const bodyMesh=ent.visual.getObjectByName('Cube001');
   if(!bodyMesh||!bodyMesh.material||!bodyMesh.material.map)return;
-  if(bodyMesh.userData.ihTeam===team)return; // already correctly colored+numbered for this team
+  /* The skip test is a KEY, not just the team letter: the same letter can now
+     be wearing a different club than it was last game (and this entity may be
+     a pool body that skated for the other side then), so the identity and the
+     named-roster spot have to be part of what "already correct" means. */
+  const key=team+'|'+ihTeamIdentity[team]+'|'+(spot?spot.name+spot.number:'');
+  if(bodyMesh.userData.ihTeamKey===key)return;
   const teamColors=ihGetTeamZoneColors(team);
-  const number=ihAssignBotNumber(team);
+  /* A named roster spot brings its own number and nameplate; everyone else
+     keeps whatever number they already had (so a re-apply doesn't reshuffle
+     the whole team's jerseys) or draws a fresh one. */
+  const number=spot?spot.number:(bodyMesh.userData.ihNumber||ihAssignBotNumber(team));
+  const name=spot?spot.name:null;
   if(!bodyMesh.userData.ihZoneColors){
     /* The whole kit is per-piece now, so a bot needs its own piece materials
        too — but only the JERSEY's has to be unique per bot (it carries that
@@ -11762,9 +12020,18 @@ function ihApplyBotZoneRecolor(ent,team){
   const live=bodyMesh.userData.ihZoneColors;
   live[0].copy(teamColors[0]);live[1].copy(teamColors[1]);live[2].copy(teamColors[2]);
   ihDrawNumberToCanvas(bodyMesh.userData.ihNameCtx,bodyMesh.userData.ihNameTexture,
-    '#'+teamColors[0].getHexString(),'#'+teamColors[1].getHexString(),'#'+teamColors[2].getHexString(),number);
+    '#'+teamColors[0].getHexString(),'#'+teamColors[1].getHexString(),'#'+teamColors[2].getHexString(),
+    number,name,ihTeamDef(team).crest);
   bodyMesh.userData.ihTeam=team;
+  bodyMesh.userData.ihTeamKey=key;
   bodyMesh.userData.ihNumber=number;
+  bodyMesh.userData.ihName=name;
+  /* gameplay side of a roster spot: `ihName` labels this skater's events and
+     `skillMul` overrides the menu's BOT OVERALL for them alone (botShootG).
+     Always written, never left over — pool bodies are recycled between games
+     and a stale star rating on an anonymous bot would be invisible. */
+  ent.ihName=name;
+  ent.skillMul=(spot&&spot.ovr!==undefined)?spot.ovr:undefined;
 }
 /* Per-bot number plate canvas, stashed on the jersey mesh (its texture is what
    the jersey material samples as nameNumberMap). */
@@ -11783,19 +12050,44 @@ function ihMakeNumberTexture(bodyMesh){
    real uniform spreads it (ihPiecesFromBody). */
 let ihTeamPieceMats={A:null,B:null};
 function ihGetTeamPieceMats(team,kit){
-  if(ihTeamPieceMats[team])return ihTeamPieceMats[team];
+  if(ihTeamPieceMats[team])return ihTeamPieceMats[team].mats;
   const tc=ihGetTeamZoneColors(team);
   ihApplyPieceColors(kit,ihPiecesFromBody(tc.map(c=>'#'+c.getHexString())));
-  const set={};
-  Object.keys(kit).forEach(id=>{if(id!=='jersey')set[id]=kit[id].material;});
-  ihTeamPieceMats[team]=set;
-  return set;
+  const mats={};
+  Object.keys(kit).forEach(id=>{if(id!=='jersey')mats[id]=kit[id].material;});
+  /* the KIT is kept, not just the materials: its Color objects ARE the shader
+     uniforms for this shared set, so ihSetTeamIdentity can recolor every
+     teammate's pants/gloves/helmet in place when the side changes club */
+  ihTeamPieceMats[team]={mats,kit};
+  return mats;
 }
-/* Bot/goalie equivalent of ihRedrawNameNumber — number only (no nameplate;
-   AI skaters don't have a real name to show), reusing the same fixed-size
-   fit-text machinery so bot numbers scale identically to the player's own. */
-function ihDrawNumberToCanvas(ctx,texture,primary,secondary,trim,number){
+/* Bot/goalie equivalent of ihRedrawNameNumber, reusing the same fixed-size
+   fit-text machinery so bot numbers scale identically to the player's own.
+   `name` is optional and normally absent — anonymous AI skaters have no name
+   to show — but a NAMED ROSTER spot (DEVA #88) gets the same nameplate the
+   human player's jersey draws, laid out by the same IH_NAME_RECT so the two
+   are indistinguishable on the ice. */
+function ihDrawNumberToCanvas(ctx,texture,primary,secondary,trim,number,name,crest){
   ctx.clearRect(0,0,IH_DECAL_SIZE,IH_DECAL_SIZE);
+  // chest crest first: it and the back plate live in disjoint UV islands, but
+  // the redraw-on-decode path re-runs this whole function, so order is fixed
+  if(crest)ihDrawCrest(ctx,crest,
+    ()=>ihDrawNumberToCanvas(ctx,texture,primary,secondary,trim,number,name,crest));
+  if(name){
+    const r=IH_NAME_RECT;
+    ihFillRoundedRect(ctx,r.x,r.y,r.w,r.h,18,secondary);
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    const size=ihFixedNameSize(ctx,r.w-40);
+    ctx.font=`bold ${size}px ${ihJerseyFont}`;
+    const squeeze=Math.min(1,(r.w-40)/Math.max(1,ctx.measureText(name).width));
+    ctx.save();
+    ctx.translate(r.x+r.w/2,r.y+r.h/2+2);
+    ctx.scale(squeeze,1);
+    ctx.lineJoin='round';ctx.lineWidth=Math.max(4,size*0.09);ctx.strokeStyle=primary;
+    ctx.strokeText(name,0,0);
+    ctx.fillStyle=trim;ctx.fillText(name,0,0);
+    ctx.restore();
+  }
   if(number){
     const r=IH_NUMBER_RECT;
     ctx.fillStyle=primary;ctx.fillRect(r.x,r.y,r.w,r.h);
@@ -11819,7 +12111,7 @@ function ihFillRoundedRect(ctx,x,y,w,h,r,color){
 }
 let ihJerseyFont='Arial'; // synced from the Locker Room loadout's own font picker
 /* the name currently on the jersey — also what the HUD name tag draws */
-let ihPlayerName='';
+let ihPlayerName='',ihPlayerNumber='';
 function ihFitText(ctx,text,maxWidth,startSize,minSize){
   let size=startSize;
   ctx.font=`bold ${size}px ${ihJerseyFont}`;
@@ -11846,6 +12138,11 @@ function ihRedrawNameNumber(name,number){
   const primary='#'+ihBodyColors[0].getHexString();
   const secondary='#'+ihBodyColors[1].getHexString();
   const trim='#'+ihBodyColors[2].getHexString();
+  /* P1 wears the crest of whichever club their side is playing for — but NOT
+     its kit colours: the Locker Room loadout is personal and stays personal.
+     P1 is locked to TEAM A (see the MATCH header), so that is the side to ask.
+     ihRefreshPlayerJersey() re-runs this when the menu changes clubs. */
+  ihDrawCrest(ctx,ihTeamDef('A').crest,()=>ihRedrawNameNumber(name,number));
   if(name){
     const r=IH_NAME_RECT;
     ihFillRoundedRect(ctx,r.x,r.y,r.w,r.h,18,secondary);
@@ -12299,8 +12596,13 @@ function ihApplySavedLoadout(){
       ihApplyPaintLayers(lo.paint);
     }
   }catch(e){console.warn('Locker Room loadout failed to load',e);}
-  ihPlayerName=name;
+  ihPlayerName=name;ihPlayerNumber=number;
   ihRedrawNameNumber(name,number);
+}
+/* Re-stamp P1's own jersey decal — the club crest is drawn from the CURRENT
+   team identity, so switching clubs in the menu has to redraw it. */
+function ihRefreshPlayerJersey(){
+  if(ihNameCtx)ihRedrawNameNumber(ihPlayerName,ihPlayerNumber);
 }
 function applyLockerRoomLoadout(){
   if(!player||!player.visual||!stickGroup)return;
