@@ -1,0 +1,63 @@
+import numpy as np, json, os
+from scipy.optimize import least_squares
+from PIL import Image
+a=np.asarray(Image.open(os.path.expanduser('~/Lataukset/Ylhäältä kuvattu tyhjä jääkiekkokaukalo.png')).convert('RGB')).astype(np.int32)
+R,G,Bl=a[:,:,0],a[:,:,1],a[:,:,2]
+yel=(R>150)&(G>110)&(R-Bl>60)&(G-Bl>45)
+KV=[];KH=[]
+for y in range(245,1275,12):
+    xs=np.where(yel[y])[0]
+    if len(xs)<4: continue
+    L=xs[xs<508]; Rt=xs[xs>=508]
+    if len(L)<2 or len(Rt)<2: continue
+    KV.append(y); KH.append((Rt.min()-L.max())/2.0)
+KV=np.array(KV,float); KH=np.array(KH,float)
+CIRC=[('far-L',-1,+1,304.47,294.71,122.23),('far-R',+1,+1,716.67,294.17,118.08),
+      ('near-L',-1,-1,258.87,1203.41,131.49),('near-R',+1,-1,753.56,1203.70,131.11)]
+CC=(507.27,761.47,121.28,114.80); TH=np.linspace(0,2*np.pi,181)
+Zgrid=np.linspace(4.0,-4.0,6000)
+def mkproj(p):
+    f,th,h,Zc,cx,cy=p[:6]; s,c=np.sin(th),np.cos(th)
+    def proj(X,Z):
+        zc=h*s+(Z-Zc)*c; yc=-h*c+(Z-Zc)*s
+        return cx+f*X/zc, cy-f*yc/zc
+    return proj
+def resid(p):
+    f,th,h,Zc,cx,cy,D,CR,Zb,Zg,Xf,Zf,Rf,Rc=p
+    P=mkproj(p); vg=P(0.0,Zgrid)[1]
+    Zk=np.interp(KV,vg,Zgrid)
+    r=list(2.0*((P(1.0,Zk)[0]-P(0.0,Zk)[0])-KH))          # boards, weight 2
+    vZ=lambda Z:P(0.0,Z)[1]
+    r+=[3*(vZ(0)-760.5),3*(vZ(Zb)-563.0),3*(vZ(-Zb)-962.0),
+        3*(vZ(Zg)-160.0),3*(vZ(-Zg)-1384.5),3*(vZ(D)-90.5),2*(vZ(D-CR)-240.0)]
+    for nm,sx,sz,ex,ey,esx in CIRC:
+        u,v=P(sx*Xf+Rf*np.cos(TH), sz*Zf+Rf*np.sin(TH))
+        r+=[((u.max()+u.min())/2-ex),((v.max()+v.min())/2-ey),((u.max()-u.min())/2-esx)]
+    u,v=P(Rc*np.cos(TH),Rc*np.sin(TH))
+    r+=[((u.max()-u.min())/2-CC[2]),((v.max()-v.min())/2-CC[3]),((v.max()+v.min())/2-CC[1])]
+    return np.array(r)
+p0=np.array([5016.,np.radians(68.56),10.65,-4.23,508.4,768., 1.7045,0.4035,0.491,1.50,0.5182,1.1131,0.2862,0.2796])
+lo=np.array([600.,np.radians(35),1.5,-40.,480.,500., 1.0,0.05,0.1,0.5,0.2,0.5,0.1,0.1])
+hi=np.array([40000.,np.radians(89.5),120.,4.,540.,1100., 4.0,1.0,1.5,3.5,0.9,3.4,0.6,0.6])
+s=least_squares(resid,p0,bounds=(lo,hi),x_scale='jac',xtol=1e-15,ftol=1e-15,max_nfev=4000)
+p=s.x; f,th,h,Zc,cx,cy,D,CR,Zb,Zg,Xf,Zf,Rf,Rc=p
+print('cost=%.2f nfev=%d'%(s.cost,s.nfev))
+print('CAMERA f=%.1fpx pitch=%.3fdeg h=%.4fW Zcam=%.4fW cx=%.2f cy=%.2f vFOV=%.3fdeg'%(f,np.degrees(th),h,Zc,cx,cy,2*np.degrees(np.arctan(768/f))))
+r=resid(p); nk=len(KV)
+print('\nRESIDUALS px:  boards rms %.2f max %.2f (n=%d)'%((r[:nk]/2).std(),abs(r[:nk]/2).max(),nk))
+for i,(nm,w) in enumerate(zip(['centre line','blue far','blue near','goal far','goal near','far ice end','corner tan'],[3,3,3,3,3,3,2])):
+    print('  %-14s %+7.2f'%(nm,r[nk+i]/w))
+o=nk+7
+for nm,_,_,_,_,_ in CIRC:
+    print('  %-14s dx %+6.2f dy %+6.2f dR %+6.2f'%(nm,r[o],r[o+1],r[o+2])); o+=3
+print('  %-14s dRx %+6.2f dRy %+6.2f dy %+6.2f'%('centre circ',r[o],r[o+1],r[o+2]))
+W=12.954
+geo=dict(camera=dict(f_px=f,pitch_deg=float(np.degrees(th)),h_W=h,Zcam_W=Zc,cx=cx,cy=cy,
+                     vfov_deg=float(2*np.degrees(np.arctan(768/f))),img_w=1024,img_h=1536),
+         rink_W_units=dict(D=D,CR=CR,Zb=Zb,Zg=Zg,Xf=Xf,Zf=Zf,Rf=Rf,Rc=Rc),
+         metres=dict(halfW=W,halfD=D*W,corner=CR*W,blueZ=Zb*W,goalZ=Zg*W,
+                     foX=Xf*W,foZ=Zf*W,foR=Rf*W,centreR=Rc*W))
+json.dump(geo,open('rinkgeo.json','w'),indent=1)
+print('\nMETRES (halfW anchored to NHL 12.954):')
+for k,v in geo['metres'].items(): print('  %-8s %8.3f'%(k,v))
+print('  full rink %.2f m x %.2f m   (NHL 60.96 x 25.91)'%(2*D*W,2*W))

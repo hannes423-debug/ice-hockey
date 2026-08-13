@@ -1,0 +1,72 @@
+Reorganisation 2026-08-01. Every move, oldpath -> newpath.
+
+All paths are relative to your home directory.
+To undo a line:  mv "$HOME/newpath" "$HOME/oldpath"
+
+Use double quotes, not single. $HOME does not expand inside single quotes, and
+several of these paths contain spaces.
+
+Lataukset/ice_hockey.html	->	Työpöytä/hoki/game/ice_hockey.html
+Lataukset/ANIMFIX_PROGRESS.md	->	Työpöytä/hoki/game/ANIMFIX_PROGRESS.md
+Lataukset/ice-hockey-menu.html	->	Työpöytä/hoki/game/ice-hockey-menu.html
+Lataukset/ice_hockey.html.bak_pre_animfix3	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_animfix3
+Lataukset/ice_hockey.html.bak_pre_modelswap2	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_modelswap2
+Lataukset/ice_hockey.html.bak_pre_animfix2	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_animfix2
+Lataukset/ice_hockey.html.bak_pre_anims	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_anims
+Lataukset/ice_hockey.html.bak_pre_cradlecut	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_cradlecut
+Lataukset/ice_hockey.html.bak_pre_animarch	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_animarch
+Lataukset/ice_hockey.html.bak_pre_modelswap	->	Työpöytä/hoki/game/backups/ice_hockey.html.bak_pre_modelswap
+Lataukset/ice_hockey(1).html	->	Työpöytä/hoki/game/backups/ice_hockey(1).html
+Lataukset/ice_hockey(2).html	->	Työpöytä/hoki/game/backups/ice_hockey(2).html
+Lataukset/ice-hockey-customize-data.js.bak_pre_modelswap2	->	Työpöytä/hoki/customizer/ice-hockey-customize-data.js.bak_pre_modelswap2
+Lataukset/ice-hockey-customize-core.js	->	Työpöytä/hoki/customizer/ice-hockey-customize-core.js
+Lataukset/ice-hockey-customize-app.js	->	Työpöytä/hoki/customizer/ice-hockey-customize-app.js
+Lataukset/ice-hockey-customize-data.js	->	Työpöytä/hoki/customizer/ice-hockey-customize-data.js
+Lataukset/ice-hockey-customize.html	->	Työpöytä/hoki/customizer/ice-hockey-customize.html
+Lataukset/street_hockey.html	->	Työpöytä/hoki/legacy/street_hockey.html
+Lataukset/street_hockey(1).html	->	Työpöytä/hoki/legacy/street_hockey(1).html
+Lataukset/street_hockey(2).html	->	Työpöytä/hoki/legacy/street_hockey(2).html
+Lataukset/ice_hockey_skate.html	->	Työpöytä/hoki/legacy/ice_hockey_skate.html
+Työpöytä/hoki/hasa1992 - 3D Low Poly with Rig.rar	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig.rar
+Työpöytä/hoki/hasa1992 - 3D Low Poly with Rig.glb	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig.glb
+Työpöytä/hoki/hasa1992 - 3D Low Poly with Rig.blend	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig.blend
+Työpöytä/hoki/hasa1992 - 3D Low Poly with Rig.fbx	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig.fbx
+Lataukset/hasa1992 - 3D Low Poly with Rig.zip	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig.zip
+Lataukset/hasa1992 - 3D Low Poly with Rig(1).rar	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig(1).rar
+Lataukset/hasa1992 - 3D Low Poly with Rig (2) (1).zip	->	Työpöytä/hoki/assets/player-model/hasa1992 - 3D Low Poly with Rig (2) (1).zip
+Lataukset/NHL Game/hasa1992 - 3D Low Poly with Rig	->	Työpöytä/hoki/assets/player-model/hasa1992-source
+Työpöytä/goalie_helmet_lowpoly_README.md	->	Työpöytä/hoki/assets/goalie/goalie_helmet_lowpoly_README.md
+Työpöytä/goalie_helmet_lowpoly.glb	->	Työpöytä/hoki/assets/goalie/goalie_helmet_lowpoly.glb
+Työpöytä/goalie_helmet_lowpoly_low.glb	->	Työpöytä/hoki/assets/goalie/goalie_helmet_lowpoly_low.glb
+Työpöytä/goalie_helmet_realistic.blend	->	Työpöytä/hoki/assets/goalie/goalie_helmet_realistic.blend
+Työpöytä/goalie_helmet_realistic.blend1	->	Työpöytä/hoki/assets/goalie/goalie_helmet_realistic.blend1
+Työpöytä/goalie_helmet_lowpoly.py	->	Työpöytä/hoki/assets/goalie/goalie_helmet_lowpoly.py
+Työpöytä/goalie_helmet_lowpoly_high.glb	->	Työpöytä/hoki/assets/goalie/goalie_helmet_lowpoly_high.glb
+Työpöytä/goalie_helmet_realistic.py	->	Työpöytä/hoki/assets/goalie/goalie_helmet_realistic.py
+Lataukset/goalie_lowpoly.glb	->	Työpöytä/hoki/assets/goalie/goalie_lowpoly.glb
+Lataukset/goalie_lowpoly.py	->	Työpöytä/hoki/assets/goalie/goalie_lowpoly.py
+Lataukset/goalie_lowpoly_README.md	->	Työpöytä/hoki/assets/goalie/goalie_lowpoly_README.md
+Työpöytä/__pycache__/goalie_helmet_realistic.cpython-312.pyc	->	Työpöytä/hoki/assets/goalie/goalie_helmet_realistic.cpython-312.pyc
+Lataukset/hockey_stick.glb	->	Työpöytä/hoki/assets/stick/hockey_stick.glb
+Työpöytä/3D Models/hockeyplayer.blend	->	Työpöytä/hoki/assets/misc-3d/hockeyplayer.blend
+Työpöytä/3D Models/lowpolyhockeyplayer.blend	->	Työpöytä/hoki/assets/misc-3d/lowpolyhockeyplayer.blend
+Työpöytä/3D Models/lowpolyhockeyplayer.blend1	->	Työpöytä/hoki/assets/misc-3d/lowpolyhockeyplayer.blend1
+Työpöytä/3D Models/lowpolyhockeyplayer.fbx	->	Työpöytä/hoki/assets/misc-3d/lowpolyhockeyplayer.fbx
+Lataukset/nhl25_reference	->	Työpöytä/hoki/reference/nhl25/nhl25_reference
+Lataukset/NHL 25 Xbox Series X_S-2026_07_24-16_43_52.hv8tBLCk.mp4.part	->	Työpöytä/hoki/reference/nhl25-captures/NHL 25 Xbox Series X_S-2026_07_24-16_43_52.hv8tBLCk.mp4.part
+Lataukset/NHL 25-2026_05_22-16-38-21.png	->	Työpöytä/hoki/reference/nhl25-captures/NHL 25-2026_05_22-16-38-21.png
+Lataukset/NHL 25-2026_05_22-02-54-40.mp4	->	Työpöytä/hoki/reference/nhl25-captures/NHL 25-2026_05_22-02-54-40.mp4
+Lataukset/NHL 25-2026_05_22-16-38-21.xcf	->	Työpöytä/hoki/reference/nhl25-captures/NHL 25-2026_05_22-16-38-21.xcf
+Lataukset/NHL 25 Xbox Series X_S-2026_07_24-16_43_52.mp4	->	Työpöytä/hoki/reference/nhl25-captures/NHL 25 Xbox Series X_S-2026_07_24-16_43_52.mp4
+Lataukset/NHL Game/NHL_HybridControls__Offense_1920x1080_XBOX.avif	->	Työpöytä/hoki/reference/controls/NHL_HybridControls__Offense_1920x1080_XBOX.avif
+Lataukset/NHL Game/NHL_HybridControls_Defense_1920x1080_XBOX.avif	->	Työpöytä/hoki/reference/controls/NHL_HybridControls_Defense_1920x1080_XBOX.avif
+Lataukset/NHL Game/NHL_SkillStickControls_Offense_1920x1080_XBOX.avif	->	Työpöytä/hoki/reference/controls/NHL_SkillStickControls_Offense_1920x1080_XBOX.avif
+Lataukset/NHL Game/NHL_SkillStickControls_Defense_1920x1080_XBOX.avif	->	Työpöytä/hoki/reference/controls/NHL_SkillStickControls_Defense_1920x1080_XBOX.avif
+Työpöytä/hoki pictures	->	Työpöytä/hoki/reference/pictures/hoki-pictures
+Työpöytä/the prompt for goalie3d.odt	->	Työpöytä/hoki/reference/docs/the prompt for goalie3d.odt
+Lataukset/Hockey pelipaita suunnittelun ruutunäkymä.png	->	Työpöytä/hoki/reference/docs/Hockey pelipaita suunnittelun ruutunäkymä.png
+Lataukset/hasa92_unicorn_investigation.pdf	->	Työpöytä/hoki/reference/docs/hasa92_unicorn_investigation.pdf
+Työpöytä/ice-hockey	->	Työpöytä/hoki/deploy
+Lataukset/ChatGPT Image 14.7.2026 klo 14.23.31.png	->	Työpöytä/hoki/reference/goalie-art/ChatGPT Image 14.7.2026 klo 14.23.31.png
+Lataukset/ChatGPT Image 14.7.2026 klo 14.23.00.png	->	Työpöytä/hoki/reference/goalie-art/ChatGPT Image 14.7.2026 klo 14.23.00.png
+Lataukset/ChatGPT Image 14.7.2026 klo 14.23.21.png	->	Työpöytä/hoki/reference/goalie-art/ChatGPT Image 14.7.2026 klo 14.23.21.png

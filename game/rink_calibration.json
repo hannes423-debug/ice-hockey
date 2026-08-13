@@ -1,0 +1,41 @@
+{
+ "_source": "markings and dimensions: nhl_spec.py (NHL Official Rules, sec. 1). Ice appearance and paint colour: rink_reference_2026-08-13.png (1024x1536). Camera angle and lens: fitted to that photo by measure_photo.py + fit_photo.py.",
+ "_anchor": "The photo sets how the ice LOOKS and where the camera IS. The rulebook sets every dimension. The photo cannot do the latter: it disagrees with itself by up to 2.14 m between halves, and its rink is 44 m long against the regulation 61.",
+ "camera_image": {
+  "f_px": 1817.2617066933635,
+  "pitch_deg": 62.141950666935756,
+  "h_W": 4.054296470161674,
+  "Zcam_W": -2.152746344284081,
+  "cx": 511.5,
+  "cy": 767.5,
+  "vfov_deg": 45.79243361152507,
+  "img_w": 1024,
+  "img_h": 1536
+ },
+ "camera_metres": {
+  "pitch_deg": 62.141950666935756,
+  "vfov_deg": 45.79243361152507,
+  "hfov_deg": 31.440364635321522,
+  "height": 76.32198151885295,
+  "z": -40.3388897474609,
+  "dist": 86.3265364127505,
+  "dist_as_photographed": 59.46385045424837
+ },
+ "metres": {
+  "halfW": 12.954,
+  "halfD": 30.48,
+  "corner": 8.5344,
+  "blueZ": 7.62,
+  "goalZ": 27.127200000000002,
+  "foX": 6.7056000000000004,
+  "foZ": 21.031200000000002,
+  "foR": 4.572,
+  "centreR": 4.572,
+  "ndX": 6.7056000000000004,
+  "ndZ": 6.096,
+  "goalHalfW": 0.9144000000000001,
+  "goalHeight": 1.2192,
+  "creaseR": 1.8288000000000002,
+  "goalDepth": 1.016
+ }
+}
