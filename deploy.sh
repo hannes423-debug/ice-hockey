@@ -49,7 +49,8 @@ MANIFEST=(
 # are edited in place and this script must never touch them. Listed so that a
 # file appearing in deploy/ and in neither list gets flagged rather than
 # silently ignored.
-DEPLOY_ONLY=(index.html style.css script.js menu-player.js README.md .gitignore)
+DEPLOY_ONLY=(index.html style.css script.js menu-player.js README.md .gitignore
+             img/locker-room.jpg)
 
 # Source files that happen to sit at the root. Since the merge, the root holds
 # both the published site AND project-level source, so "a root-level file in

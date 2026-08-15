@@ -45,6 +45,12 @@
 /reference/*
 !/reference/rink_reference_2026-08-13.png
 !/reference/RINK_IMAGE_PROMPT.md
+# The menu's locker-room backdrop, kept for the same reason as the rink
+# picture above: img/locker-room.jpg is DERIVED from it (one PIL call, recipe
+# in reference/LOCKER_ROOM_IMAGE.md) and an irreplaceable input that lives only
+# in ~/Lataukset cannot be rebuilt from a clone.
+!/reference/locker_room_reference_2026-08-15.png
+!/reference/LOCKER_ROOM_IMAGE.md
 
 __pycache__/
 *.pyc

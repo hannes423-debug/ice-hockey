@@ -12,6 +12,12 @@ physics, on a regulation NHL rink.
   on sharp angles, poke checks, rare baitable desperation dives, live rebounds
   and puck covers, goalie stamina that slows recoveries when gassed, and a hard
   rule that a goalie already blocking the shot line never moves out of the way
+- **VS mode — you play the whole side.** A regulation five against five where
+  control moves between your own skaters: `1`–`5` pick C / LW / RW / LD / RD
+  while the puck is not yours, and the moment your team wins it you *become*
+  the carrier and stay him until you pass, shoot or lose it. Your own goalie
+  holding the puck counts as nobody, so you keep playing a skater. `6` is the
+  goalie, built and reserved — goalies are AI for now
 - Stance-gated wrist / backhand / slap / pass shots with swipe-gesture release
   (curve depth controls saucer and chip loft)
 - NHL 25 style energy model: only sprint/hustle drains stamina, normal skating
@@ -30,7 +36,8 @@ It holds **both** the published site and the source that builds it.
 |---|---|
 | `game/` | The game source and the pipeline that builds it. |
 | `customizer/` | The Locker Room equipment editor. Its HTML needs its three sibling `.js` files in the same folder. |
-| `reference/` | The rink reference picture and the prompt used to generate it. |
+| `img/` | Site images. `locker-room.jpg` is the main menu's backdrop. |
+| `reference/` | The rink and locker-room reference pictures, the prompt used to generate the rink, and `LOCKER_ROOM_IMAGE.md` (how the menu backdrop is made, and the contract future set dressing follows). |
 | `assets/`, `legacy/`, `tools/`, `armtest/` | Models, the fork parent, and side rigs. Not tracked; they live on disk only. |
 
 `game.html` is **generated**, not written. It is `game/ice_hockey_25d.html`,
@@ -54,6 +61,22 @@ for each figure; `verify_mask.py` measures the result back out of the pixels
 and fails if anything is more than 25 mm off. The picture supplies how the ice
 and the boards LOOK, and nothing else. Full notes, and why it works that way,
 are in `game/TWOFIVED_PROTOTYPE.md`.
+
+## Checking it
+
+Every check is headless and reports `FAILURES=0` or names what broke.
+
+```bash
+cd game
+./simprobe.sh                       # the simulation-first contract
+./vsprobe.sh                        # VS mode + player switching
+SLOT=3 ./ih25_vsshot.sh vs_rw 1 1280x800   # photograph VS, having taken the RW
+../tools/menu_probe.sh index.html 500x700  # is the menu operable at that size
+```
+
+`vsprobe.sh` reloads the page once on purpose: the front-end menu enters VS
+through a one-shot `ihAutoStart` key rather than the in-game card, and that
+path can only be tested from before the page boots.
 
 ## Publishing
 

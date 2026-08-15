@@ -54,48 +54,57 @@ ul{list-style:none;margin:0;padding:0}
 h1,h2,p{margin:0}
 
 /* ============================================================
-   BACKGROUND — CSS-only locker room (no images, no canvas)
+   BACKGROUND — the locker room, photographed
+   ------------------------------------------------------------
+   Four stacked layers: the photo, a grade, an EMPTY props layer,
+   and the floor/vignette falloff. Source picture and the recipe
+   that produced it: reference/LOCKER_ROOM_IMAGE.md.
    ============================================================ */
 .bg-locker{position:fixed;inset:0;z-index:0;overflow:hidden;background:var(--bg-0);pointer-events:none}
 
+/* The room. `cover` crops differently at every window shape, which is why
+   anything positioned against it is positioned in PERCENTAGES (see .bg-props).
+   The flat colour underneath is not decoration: it is what shows while a
+   227 KB progressive JPEG is still arriving, and it matches the photo's own
+   darkest corner so the first paint is not a bright flash. */
 .bg-locker .base{
   position:absolute;inset:0;
+  background:#05070b url("img/locker-room.jpg") center center / cover no-repeat;
+}
+
+/* Grade. The photograph is warm (tungsten stall lights, wood benches) and the
+   UI is cold blue, so one cool wash reconciles them; the second pass darkens
+   the top third, where the open doorway is the brightest thing in the frame
+   and the topnav's white text has to survive crossing it. */
+.bg-locker .grade{
+  position:absolute;inset:0;
   background:
-    radial-gradient(130% 85% at 50% -8%, #172136 0%, #0d1220 40%, #05070b 76%);
+    linear-gradient(180deg, rgba(5,9,20,.62) 0%, rgba(5,9,20,.22) 34%, rgba(5,9,20,.30) 100%),
+    linear-gradient(0deg, rgba(28,48,86,.30), rgba(28,48,86,.30));
 }
 
-/* locker-door seams along the back wall, faded top & bottom */
-.bg-locker .lockers{
-  position:absolute;inset:0;opacity:.55;
-  background-image:
-    repeating-linear-gradient(90deg, rgba(255,255,255,.035) 0 1px, transparent 1px 108px),
-    repeating-linear-gradient(90deg, transparent 0 104px, rgba(79,141,253,.06) 104px 108px);
-  -webkit-mask-image:linear-gradient(180deg, transparent 0%, #000 20%, #000 52%, transparent 74%);
-          mask-image:linear-gradient(180deg, transparent 0%, #000 20%, #000 52%, transparent 74%);
-}
+/* TEAM AND PLAYER PROPS — intentionally empty.
+   The room ships as a template. Props mount here as children, absolutely
+   positioned in PERCENTAGES of this box (never pixels: the photo is `cover`,
+   so a prop pinned in pixels slides off its hook the moment the window
+   changes shape). The anchors already in the photograph — the picture frame,
+   the doorway, the stall hook rails, the near bench — are measured out as
+   percentages in reference/LOCKER_ROOM_IMAGE.md.
+   Scenery only. The whole backdrop is pointer-events:none; anything the
+   player can click belongs in .app. */
+.bg-locker .bg-props{position:absolute;inset:0}
 
-/* soft ceiling light shafts */
-.bg-locker .rays{
-  position:absolute;top:-6%;left:50%;width:78vw;height:70vh;transform:translateX(-50%);
-  background:
-    linear-gradient(100deg, transparent 42%, rgba(190,215,255,.05) 46%, transparent 50%),
-    linear-gradient(80deg, transparent 58%, rgba(190,215,255,.04) 62%, transparent 67%);
-}
-
-/* floor */
+/* floor: the photo's own concrete runs out at the bottom of the frame on tall
+   windows, and the hint bar needs a dark bed to sit on either way */
 .bg-locker .floor{
-  position:absolute;left:0;right:0;bottom:0;height:44%;
-  background:linear-gradient(180deg, rgba(9,12,19,0) 0%, rgba(7,9,15,.92) 62%, #03040a 100%);
-}
-.bg-locker .floor::before{
-  content:"";position:absolute;left:50%;bottom:0;width:60%;height:100%;transform:translateX(-50%);
-  background:radial-gradient(closest-side, rgba(79,141,253,.10), transparent 72%);
+  position:absolute;left:0;right:0;bottom:0;height:34%;
+  background:linear-gradient(180deg, rgba(9,12,19,0) 0%, rgba(6,8,14,.72) 66%, rgba(3,4,10,.94) 100%);
 }
 
 /* vignette */
 .bg-locker .vignette{
   position:absolute;inset:0;
-  background:radial-gradient(120% 100% at 50% 38%, transparent 52%, rgba(0,0,0,.58) 100%);
+  background:radial-gradient(120% 100% at 50% 38%, transparent 46%, rgba(0,0,0,.62) 100%);
 }
 
 /* ============================================================
@@ -311,8 +320,14 @@ h1,h2,p{margin:0}
 .menu-item:hover{background:rgba(255,255,255,.045)}
 .menu-item svg{width:21px;height:21px;flex:none;stroke:var(--ink-dim);transition:stroke var(--dur) var(--ease)}
 .menu-item[aria-selected="true"] svg{stroke:var(--accent)}
+/* Title over subtitle. Both are <span>s inside a wrapper <span> (script.js
+   builds them that way), so without this they are inline and run together as
+   one sentence — "VS5v5 · you control the whole team" — and the .s margin-top
+   silently does nothing, because vertical margins do not apply to an inline
+   box. Stacking the wrapper is what makes the second line a second line. */
+.menu-item>span{display:flex;flex-direction:column;min-width:0}
 .menu-item .t{font-family:var(--font-display);font-weight:600;font-size:16.5px;letter-spacing:.06em;line-height:1.15}
-.menu-item .s{font-size:11.5px;color:var(--ink-dim);margin-top:2px}
+.menu-item .s{font-size:11.5px;color:var(--ink-dim);margin-top:2px;line-height:1.25}
 .menu-item.is-pressed{transform:scale(.985)}
 
 /* ---------- 3. CENTER STAGE ---------- */
@@ -321,16 +336,23 @@ h1,h2,p{margin:0}
   display:flex;align-items:flex-end;justify-content:center;
   padding-bottom:clamp(18px,3vh,40px);
 }
+/* The room supplies its own light now — the doorway behind the model is the
+   brightest thing in the frame, and menu-player.js already rims the model
+   from behind to match it. So the stage cone and the floor glow are down to
+   a suggestion: enough to lift the model off the far wall, not a second
+   light source arguing with the photograph's. */
 .stage-spot{
   position:absolute;left:50%;top:0;width:min(48%,400px);height:66%;transform:translateX(-50%);
-  background:linear-gradient(180deg, rgba(185,212,255,.11), rgba(185,212,255,0) 72%);
+  background:linear-gradient(180deg, rgba(185,212,255,.05), rgba(185,212,255,0) 72%);
   clip-path:polygon(38% 0%, 62% 0%, 100% 100%, 0% 100%);
   animation:spotBreathe 7s ease-in-out infinite;
 }
 @keyframes spotBreathe{0%,100%{opacity:.75}50%{opacity:1}}
 .stage-floor-glow{
   position:absolute;left:50%;bottom:7%;width:min(72%,540px);height:15%;transform:translateX(-50%);
-  background:radial-gradient(closest-side, rgba(79,141,253,.30), rgba(79,141,253,0) 70%);
+  background:
+    radial-gradient(closest-side, rgba(6,9,16,.55), rgba(6,9,16,0) 72%),
+    radial-gradient(closest-side, rgba(79,141,253,.16), rgba(79,141,253,0) 70%);
 }
 
 /* Intentionally empty mount point for a future WebGL player.

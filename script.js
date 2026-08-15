@@ -19,6 +19,7 @@
     { id:'play', label:'PLAY', items:[
       { icon:'play',   t:'Quick Match', s:'Jump into a game' },
       { icon:'bolt',   t:'Match Mode',  s:'Full team lobby · local multiplayer' },
+      { icon:'club',   t:'VS',          s:'5v5 · you control the whole team' },
       { icon:'target', t:'Practice',    s:'Free skate with adjustable bots' },
       { icon:'ranked', t:'Ranked',      s:'Compete and climb the ranks' },
       { icon:'club',   t:'Drop-In',     s:'Find a game already in progress' },
@@ -304,6 +305,28 @@
     }, 90);
   }
 
+  /* ---------------- locker-room set dressing (EMPTY TEMPLATE) ----------
+     The backdrop is a photograph of an empty room, and it stays empty until
+     there is something true to put in it. This is the hook that will fill it:
+     a jersey on a hook, the club crest on the far wall, a stick against the
+     bench, a nameplate over a stall — the props that make the room YOUR room
+     and this week's opponent's room.
+
+     It is wired up and called now, doing nothing, on purpose. A prop system
+     added later as a data table should not also have to find its call site,
+     invent a coordinate convention and re-open the backdrop CSS.
+
+     The contract, spelled out in reference/LOCKER_ROOM_IMAGE.md: children of
+     #bgProps, positioned in PERCENTAGES of the layer (the photo is `cover`,
+     so pixel offsets drift off their anchors as the window changes shape),
+     scenery only — the whole backdrop is pointer-events:none. */
+  var $bgProps = document.getElementById('bgProps');
+  function setLockerProps(/* {team, player} */){
+    if (!$bgProps) return;
+    $bgProps.innerHTML = '';
+  }
+  setLockerProps();
+
   function activate(){
     var el = itemButtons[itemIdx];
     if (el){
@@ -324,6 +347,7 @@
       }
       if (item.t === 'Practice'){ openConfirm('practice'); return; }
       if (item.t === 'Match Mode'){ openConfirm('match'); return; }
+      if (item.t === 'VS'){ openConfirm('vs'); return; }
     }
     // CUSTOMIZE hands off to the standalone Locker Room equipment editor —
     // Player/Equipment/Jerseys/Sticks all live in that one tool (its own
@@ -349,7 +373,11 @@
     practice: { mode: 'practice', botsP: 0, botsO: 0, skill: 99 },
     // full regulation 5-skater sides by default (P1 + 4 bots vs 5 bots) —
     // still adjustable with the steppers before confirming
-    match:    { mode: 'match',    botsA: 4, botsB: 5, skill: 99 }
+    match:    { mode: 'match',    botsA: 4, botsB: 5, skill: 99 },
+    // VS has nothing to size: it is always a regulation five a side and
+    // always exactly one human, who plays ALL of them. Bot skill is the only
+    // knob, so the overlay drops both steppers and the party rows.
+    vs:       { mode: 'vs',       skill: 99 }
   };
   function cloneDefaults(mode){
     var d = MODE_DEFAULTS[mode], out = {};
@@ -401,22 +429,24 @@
 
   function renderConfirm(){
     var isMatch = pending.mode === 'match';
+    var isVs = pending.mode === 'vs';
     // Match Mode caps at a regulation 5-skater side (C+LW+RW+LD+RD): team A
     // reserves one spot for P1, team B is bots-only so it can fill all 5.
     var aLabel = isMatch ? 'TEAM A BOTS' : 'TEAMMATE BOTS', aKey = isMatch ? 'botsA' : 'botsP', aMax = isMatch ? 4 : 3;
     var bLabel = isMatch ? 'TEAM B BOTS' : 'OPPONENT BOTS', bKey = isMatch ? 'botsB' : 'botsO', bMax = isMatch ? 5 : 3;
+    function stepperRow(label, key, max){
+      return '<div class="confirm-row"><span>' + label + '</span><div class="stepper">' +
+        '<button data-act="dec" data-key="' + key + '">−</button><b>' + pending[key] + '</b>' +
+        '<button data-act="inc" data-key="' + key + '" data-max="' + max + '">+</button>' +
+      '</div></div>';
+    }
     $confirmOverlay.innerHTML =
       '<div class="confirm-card glass">' +
-        '<div class="confirm-title">' + (isMatch ? 'MATCH MODE' : 'PRACTICE') + '</div>' +
-        '<div class="confirm-sub">Confirm your settings, then start</div>' +
-        '<div class="confirm-row"><span>' + aLabel + '</span><div class="stepper">' +
-          '<button data-act="dec" data-key="' + aKey + '">−</button><b>' + pending[aKey] + '</b>' +
-          '<button data-act="inc" data-key="' + aKey + '" data-max="' + aMax + '">+</button>' +
-        '</div></div>' +
-        '<div class="confirm-row"><span>' + bLabel + '</span><div class="stepper">' +
-          '<button data-act="dec" data-key="' + bKey + '">−</button><b>' + pending[bKey] + '</b>' +
-          '<button data-act="inc" data-key="' + bKey + '" data-max="' + bMax + '">+</button>' +
-        '</div></div>' +
+        '<div class="confirm-title">' + (isVs ? 'VS' : isMatch ? 'MATCH MODE' : 'PRACTICE') + '</div>' +
+        '<div class="confirm-sub">' + (isVs
+          ? 'You play the whole side · 1 C · 2 LW · 3 RW · 4 LD · 5 RD'
+          : 'Confirm your settings, then start') + '</div>' +
+        (isVs ? '' : stepperRow(aLabel, aKey, aMax) + stepperRow(bLabel, bKey, bMax)) +
         '<div class="confirm-row"><span>BOT SKILL — ' + pending.skill + '</span><div class="confirm-slider">' +
           '<input type="range" id="confirmSkill" min="50" max="99" value="' + pending.skill + '">' +
         '</div></div>' +
@@ -426,7 +456,8 @@
           '<button data-scheme="prostick" class="' + (pendingScheme === 'prostick' ? 'sel' : '') + '">PRO STICK</button>' +
           '<button data-scheme="allstar" class="' + (pendingScheme === 'allstar' ? 'sel' : '') + '">ALL-STAR</button>' +
         '</div></div>' +
-        renderConfirmPartyRows(isMatch) +
+        // VS is single-human by definition — a party has nowhere to sit in it
+        (isVs ? '' : renderConfirmPartyRows(isMatch)) +
         '<div class="confirm-actions">' +
           '<button class="confirm-cancel" id="confirmCancel">BACK</button>' +
           '<button class="confirm-start" id="confirmStart">START</button>' +

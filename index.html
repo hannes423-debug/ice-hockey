@@ -10,10 +10,17 @@
 </head>
 <body>
 
+<!-- The room you stand in before a game. The photograph IS the room now: the
+     CSS-drawn lockers and light shafts that used to be here are gone, because
+     drawn seams over a real photograph of lockers read as a rendering bug
+     rather than as detail. #bgProps is deliberately EMPTY — it is the mount
+     point for team and player specific set dressing (a jersey on a hook, a
+     crest on the far wall, a stick against the bench). See
+     reference/LOCKER_ROOM_IMAGE.md for the contract props follow. -->
 <div class="bg-locker" aria-hidden="true">
   <div class="base"></div>
-  <div class="lockers"></div>
-  <div class="rays"></div>
+  <div class="grade"></div>
+  <div class="bg-props" id="bgProps"></div>
   <div class="floor"></div>
   <div class="vignette"></div>
 </div>

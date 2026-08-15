@@ -5562,6 +5562,12 @@ function remapBoneNames(root){
 function ihNoCull(root){root.traverse(o=>{if(o.isMesh)o.frustumCulled=false;});}
 
 let player=null,stickGroup=null,puck=null;
+/* `player` is REASSIGNABLE (VS mode hands it to whichever skater you switch
+   to), so the one body that is really P1's — the one wearing the Locker Room
+   loadout, the one every other mode plays — has to be remembered separately.
+   Leaving VS restores it; without that you would walk out of a match still
+   driving a pool bot, and matchTeardown hides pool bots. */
+let p1Body=null;
 const clock=new THREE.Clock();
 let camYaw=0,firstFrame=true,cameraFocus='player';
 
@@ -7078,11 +7084,22 @@ function buildStartMenu(){
       '<button id="smPractice" class="smOpt">PRACTICE<br><span style="font-size:10px;opacity:.7">1 vs GOALIE</span></button>'+
       '<button id="sm1v1" class="smOpt">1VS1<br><span style="font-size:10px;opacity:.7">SWEDISH STYLE</span></button>'+
       '<button id="smMatch" class="smOpt">MATCH<br><span style="font-size:10px;opacity:.7">TEAMS · 2 NETS</span></button>'+
+      '<button id="smVs" class="smOpt">VS<br><span style="font-size:10px;opacity:.7">5v5 · WHOLE TEAM</span></button>'+
     '</div>'+
     '<div id="smLobby" style="display:none;margin-bottom:14px;font-size:11px;line-height:1.9;">'+
+      /* VS runs a fixed regulation five and one human, so it shows the kit
+         pickers and nothing else in here — no bot counts to set, no lobby to
+         join. Hence the ids on the rows: they are hidden individually rather
+         than by hiding the whole block, which would take the clubs with them. */
+      '<div id="smVsNote" style="display:none;opacity:.85;margin:2px 0 8px;line-height:1.7;">'+
+        'YOU PLAY THE WHOLE SIDE — <b style="color:#c45cff;">1</b> C · '+
+        '<b style="color:#c45cff;">2</b> LW · <b style="color:#c45cff;">3</b> RW · '+
+        '<b style="color:#c45cff;">4</b> LD · <b style="color:#c45cff;">5</b> RD · '+
+        '<b style="color:#c45cff;">6</b> G<br>'+
+        '<span style="opacity:.7">WIN THE PUCK AND YOU BECOME THE CARRIER · PASS IT TO SWITCH AGAIN · GOALIE IS AI</span></div>'+
       '<div id="smRoster"></div>'+
-      '<div style="opacity:.75;margin:2px 0 6px;">✕/A ON A FREE PAD JOINS · ◯/B LEAVES</div>'+
-      '<div><span id="smALbl">TEAM A BOTS</span> <button id="smAm" class="smOpt smStep">−</button> '+
+      '<div id="smJoinHint" style="opacity:.75;margin:2px 0 6px;">✕/A ON A FREE PAD JOINS · ◯/B LEAVES</div>'+
+      '<div id="smBotRow"><span id="smALbl">TEAM A BOTS</span> <button id="smAm" class="smOpt smStep">−</button> '+
       '<span id="smAn" style="color:#c45cff;font-weight:800;">0</span> '+
       '<button id="smAp" class="smOpt smStep">+</button>'+
       '<span id="smBWrap"> &nbsp;·&nbsp; <span id="smBLbl">TEAM B BOTS</span> <button id="smBm" class="smOpt smStep">−</button> '+
@@ -7148,20 +7165,27 @@ function buildStartMenu(){
   GAME.menuEl=wrap;
   let selMode='practice';
   const pB=card.querySelector('#smPractice'),vB=card.querySelector('#sm1v1'),
-        mB=card.querySelector('#smMatch'),lobbyEl=card.querySelector('#smLobby'),
+        mB=card.querySelector('#smMatch'),vsB=card.querySelector('#smVs'),
+        vsNoteEl=card.querySelector('#smVsNote'),joinHintEl=card.querySelector('#smJoinHint'),
+        botRowEl=card.querySelector('#smBotRow'),lobbyEl=card.querySelector('#smLobby'),
         rosterEl=card.querySelector('#smRoster'),
         anEl=card.querySelector('#smAn'),bnEl=card.querySelector('#smBn'),
         skillRow=card.querySelector('#smSkillRow'),skill=card.querySelector('#smSkill'),
         skillVal=card.querySelector('#smSkillVal');
   const sel=m=>{selMode=m;GAME.selMode=m;
     pB.classList.toggle('sel',m==='practice');vB.classList.toggle('sel',m==='1v1');
-    mB.classList.toggle('sel',m==='match');
-    skillRow.style.display=m==='1v1'||m==='match'||MATCH.botsP>0||MATCH.botsO>0?'block':'none';
-    lobbyEl.style.display=(m==='match'||m==='practice')?'block':'none';
+    mB.classList.toggle('sel',m==='match');vsB.classList.toggle('sel',m==='vs');
+    skillRow.style.display=m==='1v1'||m==='match'||m==='vs'||MATCH.botsP>0||MATCH.botsO>0?'block':'none';
+    lobbyEl.style.display=(m==='match'||m==='practice'||m==='vs')?'block':'none';
+    const isVs=m==='vs';
+    vsNoteEl.style.display=isVs?'block':'none';
+    rosterEl.style.display=isVs?'none':'block';
+    joinHintEl.style.display=isVs?'none':'block';
+    botRowEl.style.display=isVs?'none':'block';
     card.querySelector('#smALbl').textContent=m==='practice'?'TEAMMATE BOTS':'TEAM A BOTS';
     card.querySelector('#smBLbl').textContent=m==='practice'?'OPPONENT BOTS':'TEAM B BOTS';
-    card.querySelector('#smCALbl').textContent=m==='practice'?'YOUR KIT':'TEAM A KIT';
-    card.querySelector('#smCBLbl').textContent=m==='practice'?'OPPONENT KIT':'TEAM B KIT';
+    card.querySelector('#smCALbl').textContent=m==='practice'?'YOUR KIT':(isVs?'YOUR TEAM KIT':'TEAM A KIT');
+    card.querySelector('#smCBLbl').textContent=m==='practice'?'OPPONENT KIT':(isVs?'OPPONENT KIT':'TEAM B KIT');
     if(m!=='1v1'){renderRoster();renderClubs();}};
   /* Club picker — GENERIC (the original randomized team palette) plus one
      button per IH_CLUBS entry, per side. Both sides may wear the same club;
@@ -7181,6 +7205,7 @@ function buildStartMenu(){
     });
   }
   pB.onclick=()=>sel('practice');vB.onclick=()=>sel('1v1');mB.onclick=()=>sel('match');
+  vsB.onclick=()=>sel('vs');
   /* name-tag mode picker — persists immediately (setNameTagMode writes
      localStorage), so it survives the reload the front-end menu does on
      hand-off, exactly like padScheme. */
@@ -7277,6 +7302,7 @@ function buildStartMenu(){
   card.querySelector('#smStart').onclick=()=>{
     GAME.botSkill=parseInt(skill.value,10)/99;
     if(selMode==='match'){startMatch();return;} // async: hides the menu itself when bodies are ready
+    if(selMode==='vs'){startVs();return;}       // same: both wait on parsed bodies
     matchTeardown();
     GAME.mode=selMode;
     GAME.scoreP=0;GAME.scoreB=0;GAME.attacker=null;
@@ -7371,9 +7397,13 @@ function buildStartMenu(){
   (function(){
     let pending=null;
     try{const raw=localStorage.getItem('ihAutoStart');if(raw){pending=JSON.parse(raw);localStorage.removeItem('ihAutoStart');}}catch(e){}
-    if(!pending||(pending.mode!=='practice'&&pending.mode!=='match'))return;
+    if(!pending||(pending.mode!=='practice'&&pending.mode!=='match'&&pending.mode!=='vs'))return;
     wrap.style.display='none'; // never let the menu paint before auto-starting
-    if(pending.mode==='match'){
+    if(pending.mode==='vs'){
+      /* VS has no counts to carry: a regulation five a side, one human, and
+         no party — it seats nobody but P1 by definition. Bot skill below is
+         the only setting the front end can hand over. */
+    }else if(pending.mode==='match'){
       MATCH.botsA=Math.max(0,Math.min(matchTeamCap('A'),pending.botsA|0));
       MATCH.botsB=Math.max(0,Math.min(matchTeamCap('B'),pending.botsB|0));
     }else{
@@ -7387,7 +7417,7 @@ function buildStartMenu(){
        the manual pad-join path above exactly (padUsed/joined/team-cap bump)
        so it's indistinguishable from having joined by hand. A pad that
        disconnected between the menu and this page load is silently skipped. */
-    if(Array.isArray(pending.party)){
+    if(Array.isArray(pending.party)&&pending.mode!=='vs'){
       const padsNow=navigator.getGamepads?navigator.getGamepads():[];
       pending.party.forEach(pm=>{
         const i=pm.pad|0;
@@ -7919,6 +7949,28 @@ function createPuck(){
    Physics mirrors the player's carve/burst/stamina constants exactly, so
    "equal 99 OVR" is literal; GAME.botSkill scales decisions/aim, not laws. */
 let bot=null;
+/* The crude AI stick: a shaft and a blade parented straight to the root at
+   fixed offsets, i.e. a prop, not a posed object. Every skater the human is
+   NOT controlling wears one, because the real GLB stick is a single global
+   (`stickGroup`) and poseStick only ever runs it on `player`.
+
+   It is a named builder rather than inline createBot code because control is
+   no longer nailed to one body: VS mode reassigns `player` to whichever
+   skater you switch to, so P1's own body — built by createPlayer, which never
+   made a stick — needs one the moment the AI takes it over. Without that the
+   skater you just left skates the rest of the shift empty-handed, which
+   reads as a broken model rather than as a missing prop. See ihEnsureBotRig. */
+function ihBuildBotStick(ent){
+  if(ent.botStick)return ent.botStick;
+  const stickMat=new THREE.MeshStandardMaterial({color:0x241304,roughness:0.75});
+  const grp=new THREE.Group();
+  const shaft=new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,1.35,8),stickMat);
+  shaft.position.set(0.3,0.7,0.42);shaft.rotation.x=0.95;shaft.rotation.z=-0.22;grp.add(shaft);
+  const blade=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.07,0.34),stickMat);
+  blade.position.set(0.34,0.05,0.92);grp.add(blade);
+  ent.root.add(grp);ent.botStick=grp;
+  return grp;
+}
 function createBot(gltf){
   const ent=createPlayer(gltf);
   ent.pos.set(6,0,10);ent.heading=Math.PI;
@@ -7926,13 +7978,7 @@ function createBot(gltf){
   // the caller via ihApplyBotZoneRecolor once the entity's TEAM is known —
   // the single default practice/1v1 `bot` right after this returns, MATCH
   // pool bots at team-assignment time in startMatch/startFreeSkate.
-  const stickMat=new THREE.MeshStandardMaterial({color:0x241304,roughness:0.75});
-  const grp=new THREE.Group();
-  const shaft=new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,1.35,8),stickMat);
-  shaft.position.set(0.3,0.7,0.42);shaft.rotation.x=0.95;shaft.rotation.z=-0.22;grp.add(shaft);
-  const blade=new THREE.Mesh(new THREE.BoxGeometry(0.05,0.07,0.34),stickMat);
-  blade.position.set(0.34,0.05,0.92);grp.add(blade);
-  ent.root.add(grp);
+  ihBuildBotStick(ent);
   Object.assign(ent,{hasPuck:false,stamina:CONFIG.staminaMax,pokeCd:0,aiState:'idle',
     aimSide:1,paceT:0,slowPhase:false,attackT:0,protecting:false,protectActive:false,
     brakeBlend:0,stumbleBlend:0,protectBlend:0,kneelBlend:0,brakeYawTarget:0,diveT:0,pokeT:0});
@@ -8226,12 +8272,320 @@ function matchDressSkaters(){
     ihApplyBotZoneRecolor(s.ent,s.team,s.ctrl==='ai'?ihTakeRosterSpot(s.team):null);
   }
 }
+/* ================= VS MODE — you are the whole team =================
+   MATCH mode locks you to one body for the whole game. VS keeps every other
+   piece of match mode (two nets, two goalies, whistles, faceoffs, scoring)
+   and changes exactly one thing: WHICH body the human input stack drives.
+
+   The rules, in the order they fire each frame:
+
+   · YOUR TEAM HAS THE PUCK -> you ARE the carrier. A teammate who picks it up
+     hands control over on the spot (vsAutoSwitch), and while you carry it the
+     switch keys are dead. You leave a carrier by playing the puck away: pass
+     it, shoot it, or lose it. That is the whole lock — there is no timer and
+     no cooldown, because "can I switch" is just "is the puck off my stick".
+   · NOBODY ON YOUR TEAM HAS IT -> 1..5 pick a position: C, LW, RW, LD, RD.
+   · YOUR GOALIE HAS IT -> counts as nobody. You keep playing a skater exactly
+     as you would with the other team in possession, which is what
+     vsGoalieHoldsPuck exists to say out loud.
+   · 6 is the goalie and is DELIBERATELY INERT. The slot, the key, the HUD cell
+     and the lookup are all built; the only missing piece is a human goalie
+     controller, so pressing it says so instead of doing nothing silently.
+
+   Switching is not "move the camera to another player": the global `player`
+   IS reassigned, and the body you left is handed to matchAI. See
+   ihSwapControl for the two things that makes non-trivial — possession is
+   spelled differently on the two rigs, and the stick is a different object. */
+const VS_LINEUP=[
+  /* `hand` is the side of the ice in ATTACKING terms (-1 left, +1 right), not
+     a world axis: a team's left wing plays -x going one way and +x going the
+     other. vsAiFor multiplies it by the direction that team attacks.
+     `pos` is what matchAI already understands (C/W/D) — VS adds the L/R half
+     that the 3-bot lineup never needed. */
+  {slot:1,key:'C', pos:'C',hand:0},
+  {slot:2,key:'LW',pos:'W',hand:-1},
+  {slot:3,key:'RW',pos:'W',hand:1},
+  {slot:4,key:'LD',pos:'D',hand:-1},
+  {slot:5,key:'RD',pos:'D',hand:1}];
+const VS_GOALIE_SLOT=6;
+const VS={team:'A',slot:1,msgT:0};
+/* VS is a MATCH with a flag, never a fourth GAME.mode. Every existing
+   `GAME.mode==='match'` test — goal detection on both nets, the scoreboard,
+   the whistle/faceoff loop, the tick gate — is exactly as true for VS, and a
+   new mode string would have had to be added to each of them by hand. The
+   flag is what the switching code gates on; the mode string is what the rest
+   of the game keeps reading. */
+function vsActive(){return !!(MATCH.vs&&MATCH.active);}
+function vsAttackSign(team){return team==='A'?1:-1;} // team A shoots at GOAL_ZONE (+z)
+function vsAiFor(team,slot){
+  const L=VS_LINEUP[(slot||1)-1]||VS_LINEUP[0];
+  return {pos:L.pos,side:L.hand*vsAttackSign(team),slot:L.slot};
+}
+function vsSlotLabel(slot){
+  return slot===VS_GOALIE_SLOT?'G':((VS_LINEUP[(slot||1)-1]||VS_LINEUP[0]).key);
+}
+function vsSkaterAt(slot,team){
+  team=team||VS.team;
+  for(const s of MATCH.skaters)if(s.team===team&&s.slot===slot)return s;
+  return null;
+}
+/* The one body the human is driving, whichever it is. */
+function vsMySkater(){for(const s of MATCH.skaters)if(s.ent===player)return s;return null;}
+/* Our own goalie sitting on the puck. Today that only ever means a covered
+   puck (goalie.coverT), which is a whistle a moment later — but a goalie who
+   can HOLD and play it is the next thing to be built here, so the question is
+   asked as "does the goalie have it", not as "is coverT running". Either way
+   the answer feeds one decision: it does NOT lock the switch keys and it does
+   NOT drag control onto the goalie, because there is no goalie controller. */
+function vsGoalieHoldsPuck(){
+  const g=VS.team==='A'?(typeof goalie!=='undefined'?goalie:null):MATCH.goalieB;
+  return !!(g&&((g.coverT||0)>0||g.hasPuck));
+}
+/* Anyone on my team carrying it — the human body via puck.possessed, an AI
+   body via ent.hasPuck. This is the lock. */
+function vsTeamCarrier(){
+  if(puck&&puck.possessed)return vsMySkater();
+  for(const s of MATCH.skaters)if(s.team===VS.team&&s.ent!==player&&s.ent.hasPuck)return s;
+  return null;
+}
+function vsCanSwitch(){return vsActive()&&!vsTeamCarrier();}
+/* Fields the AI rig reads that createPlayer never made. Filled in only where
+   they are still undefined, so handing a body BACK to the AI never resets
+   live state (stamina it has burned, a dive already in the air). */
+const VS_AI_DEFAULTS={hasPuck:false,pokeCd:0,aiState:'idle',aimSide:1,paceT:0,
+  slowPhase:false,attackT:0,protecting:false,protectActive:false,brakeBlend:0,
+  stumbleBlend:0,protectBlend:0,kneelBlend:0,brakeYawTarget:0,diveT:0,pokeT:0};
+function ihEnsureBotRig(ent){
+  if(!ent)return ent;
+  ihBuildBotStick(ent);
+  if(ent.stamina===undefined)ent.stamina=CONFIG.staminaMax;
+  for(const k in VS_AI_DEFAULTS)if(ent[k]===undefined)ent[k]=VS_AI_DEFAULTS[k];
+  return ent;
+}
+/* Human input is EDGE-triggered (windups, charges, the shot-type lock all
+   live on the entity), so a body that changes hands mid-hold would either
+   fire the shot the previous body was winding up or inherit a charge nobody
+   pressed. Both ends of a swap get wiped, and anything still physically held
+   is marked spent — shotSuppressed clears itself the moment every button is
+   up, which is the same rule a partial slap release already uses. */
+function ihClearHumanInput(e){
+  if(!e)return;
+  e.shotType='none';e.shotSuppressed=true;
+  e.holdPokeActive=false;e.hitChargeT=0;e.kneelActive=false;
+  e.protectActive=false;e.protecting=false;
+  e.defPrevLmb=typeof lmbHeld!=='undefined'&&lmbHeld;
+  e.defPrevRmb=typeof rmbHeld!=='undefined'&&rmbHeld;
+  e.defPrevMmb=typeof mmbHeld!=='undefined'&&mmbHeld;
+}
+/* THE SWAP. Two things here are not bookkeeping and are the whole reason this
+   is a function rather than `player=other`:
+
+   1. POSSESSION IS SPELLED TWICE. The human's puck is `puck.possessed`; an
+      AI's is `ent.hasPuck`. Translating it in both directions, here, is what
+      lets an auto-switch land ON a carrier and keep the puck instead of
+      dropping it under his skates — and what stops the body you leave from
+      skating away with a puck the sim thinks you still hold.
+   2. THE STICK IS A DIFFERENT OBJECT. `stickGroup` (the real GLB stick) only
+      ever follows `player`; every other skater wears the crude prop. Both
+      have to change hands or you get a skater with two sticks and one with
+      none. */
+function ihSwapControl(s){
+  if(!s||!s.ent||s.ent===player)return false;
+  const oldE=player,newE=s.ent,oldS=vsMySkater();
+  if(!oldS)return false;
+  const carrying=!!(puck&&puck.possessed);
+  oldS.ctrl='ai';
+  oldS.ai=oldS.ai||vsAiFor(oldS.team,oldS.slot);
+  ihEnsureBotRig(oldE);
+  oldE.hasPuck=carrying;
+  oldE.attackT=0;oldE.paceT=0;
+  ihClearHumanInput(oldE);
+  if(oldE.botStick)oldE.botStick.visible=true;
+  s.ctrl='p1';
+  player=newE;
+  if(newE.botStick)newE.botStick.visible=false;
+  if(puck){puck.possessed=!!newE.hasPuck;if(!puck.possessed)puck.control=0;}
+  newE.hasPuck=false;
+  ihClearHumanInput(newE);
+  /* The aim ray, the reticle and the HUD projection are all anchored on
+     `player`. faceAimNow() squares the chase camera onto the body you just
+     took — and is already a no-op in the locked 2.5D build, which is the
+     correct behaviour there rather than a special case to write. */
+  if(typeof faceAimNow==='function')faceAimNow();
+  VS.slot=s.slot||0;
+  vsHudRefresh();
+  return true;
+}
+/* Put the human back in his own body. Deliberately does NOT go through
+   ihSwapControl: it has to survive being called when MATCH.skaters is already
+   stale or empty (teardown, a mode change from the menu), so it works off the
+   two entities alone. The body is placed where the one you were driving stood
+   — every caller resets positions straight afterwards, but a restore that
+   teleports you to wherever P1's body was abandoned ten minutes ago is a
+   nasty thing to leave lying around for a future caller that does not. */
+function ihReturnToP1Body(){
+  if(!p1Body||!player)return false;
+  if(player===p1Body){if(p1Body.botStick)p1Body.botStick.visible=false;return false;}
+  const oldE=player;
+  ihEnsureBotRig(oldE);
+  oldE.hasPuck=!!(puck&&puck.possessed);
+  ihClearHumanInput(oldE);
+  if(oldE.botStick)oldE.botStick.visible=true;
+  const sk=MATCH.skaters.find(x=>x.ent===oldE);
+  if(sk){sk.ctrl='ai';sk.ai=sk.ai||vsAiFor(sk.team,sk.slot);}
+  p1Body.pos.copy(oldE.pos);p1Body.heading=oldE.heading;p1Body.vel.copy(oldE.vel);
+  p1Body.root.visible=true;
+  if(p1Body.botStick)p1Body.botStick.visible=false;
+  player=p1Body;
+  if(puck){puck.possessed=!!p1Body.hasPuck;if(!puck.possessed)puck.control=0;}
+  p1Body.hasPuck=false;
+  ihClearHumanInput(p1Body);
+  const mine=MATCH.skaters.find(x=>x.ent===p1Body);
+  if(mine){mine.ctrl='p1';VS.slot=mine.slot||0;}
+  if(typeof faceAimNow==='function')faceAimNow();
+  return true;
+}
+/* Manual switch, keys 1..6. Returns false (with a reason on screen) rather
+   than half-doing it, so every refusal is visible. */
+function vsSwitchToSlot(slot){
+  if(!vsActive())return false;
+  if(slot===VS_GOALIE_SLOT){
+    /* Prepared, not wired: there is no human goalie controller yet. Saying so
+       is the point — a key that is silently dead reads as a bug. */
+    flashMsg('GOALIE — AI ONLY (FOR NOW)');return false;
+  }
+  if(!vsCanSwitch()){flashMsg('PASS IT FIRST');return false;}
+  const s=vsSkaterAt(slot,VS.team);
+  if(!s)return false;
+  if(s.ent===player){vsHudRefresh();return false;}
+  const ok=ihSwapControl(s);
+  if(ok)flashMsg(vsSlotLabel(slot));
+  return ok;
+}
+/* Auto-switch: your team wins the puck, you get the man who won it. Runs
+   after the AI has moved for the frame, so the pickup it reacts to is this
+   frame's, not last frame's. */
+function vsAutoSwitch(){
+  if(!vsActive())return;
+  if(puck&&puck.possessed){vsHudRefresh();return;} // already the carrier
+  if(vsGoalieHoldsPuck()){vsHudRefresh();return;}  // the goalie is not a body you can be
+  const c=vsTeamCarrier();
+  if(c&&c.ent!==player)ihSwapControl(c);
+  else vsHudRefresh();
+}
+/* ---- VS HUD: the lineup strip, so "who am I and can I leave him" is on
+   screen instead of in your head. Dim = a teammate you could take, bright =
+   you, struck through = the whole strip is locked because you have the
+   puck. G is drawn from the start and always reads as unavailable. ---- */
+let vsHudEl=null;
+function buildVsHud(){
+  if(vsHudEl)return vsHudEl;
+  const w=document.createElement('div');
+  w.id='vsHud';
+  /* Hit-transparent on a pointer device and TAPPABLE on a touch one, and the
+     asymmetry is deliberate. There is no digit row on a phone, so on touch
+     these cells ARE the switch control and have to take a tap. On mouse they
+     must not: LMB is the shot button, so a strip that swallowed pointerdown
+     would eat shots taken over the bottom of the screen, and one that did not
+     would fire a shot as you clicked it. The keyboard already covers that
+     case. Lifted clear of the thumb cluster on touch. */
+  w.style.cssText='position:fixed;left:50%;transform:translateX(-50%);z-index:6;'+
+    'bottom:'+(TOUCH?'96px':'12px')+';'+
+    'display:none;gap:6px;font-size:11px;font-weight:800;letter-spacing:.06em;'+
+    'pointer-events:'+(TOUCH?'auto':'none')+';font-family:inherit;';
+  if(TOUCH)w.addEventListener('pointerdown',e=>{
+    const cell=e.target.closest?e.target.closest('[data-slot]'):null;
+    if(!cell)return;
+    e.stopPropagation();e.preventDefault();
+    vsSwitchToSlot(parseInt(cell.dataset.slot,10));
+  });
+  (document.getElementById('app')||document.body).appendChild(w);
+  vsHudEl=w;return w;
+}
+function vsHudRefresh(){
+  const w=vsHudEl||buildVsHud();
+  if(!vsActive()){w.style.display='none';return;}
+  const locked=!vsCanSwitch(),mine=vsMySkater();
+  const cur=mine?mine.slot:0;
+  /* Dim = a teammate you could take. Bright = you. The whole strip dims when
+     you are carrying, because that is the state where the keys are dead and
+     "nothing happened" needs a reason on screen. */
+  const cell=(slot,label,on,dim,dash)=>
+    '<span data-slot="'+slot+'" style="padding:'+(TOUCH?'9px 13px':'5px 9px')+';border-radius:7px;'+
+    'border:1px '+(dash?'dashed':'solid')+' '+(on?'#c45cff':'rgba(140,190,255,.28)')+';background:'+
+    (on?'rgba(168,85,255,.34)':'rgba(20,40,64,.62)')+';color:'+
+    (on?'#fff':(dim?'rgba(207,232,255,.32)':'#cfe8ff'))+';">'+slot+' '+label+'</span>';
+  let h='';
+  for(const L of VS_LINEUP)h+=cell(L.slot,L.key,L.slot===cur,locked,false);
+  h+=cell(VS_GOALIE_SLOT,'G',false,true,true); // built, never available yet
+  w.innerHTML=h;
+  w.style.display='flex';
+}
+/* VS lineup faceoff spots — the 1..5 keys only mean anything if the man
+   behind each one starts where his position starts. Centres take the dot,
+   wings flank it, D line up behind. Mirrored per side by the direction that
+   team attacks. */
+function vsFaceoffSpot(s){
+  const L=VS_LINEUP[(s.slot||1)-1]||VS_LINEUP[0];
+  const d=vsAttackSign(s.team),x=L.hand*d;
+  if(L.pos==='C')return{x:0,z:-d*1.6};
+  if(L.pos==='W')return{x:x*4.2,z:-d*2.2};
+  return{x:x*2.6,z:-d*7.0};
+}
+function startVs(){
+  const need=(VS_LINEUP.length-1)+VS_LINEUP.length; // 4 AI teammates + a full opposing five
+  flashMsg('LOADING PLAYERS…');
+  ensureGoalieB(()=>ensureBodies(need,()=>{
+    if(MATCH.pool.length<need){flashMsg('LOAD FAILED');return;}
+    GAME.mode='match';
+    /* Restart from inside a VS game: `player` is whoever you were driving, and
+       the roster below is rebuilt around P1's own body. Do this BEFORE
+       MATCH.skaters is replaced — the restore reads the old list. */
+    ihReturnToP1Body();
+    MATCH.vs=true;VS.team='A';
+    if(!GOAL_B)buildGoalB();
+    MATCH.goalBGroup.visible=true;
+    /* P1 starts at CENTRE, and takes the draw. */
+    MATCH.skaters=[{ent:player,team:'A',ctrl:'p1',slot:1,ai:vsAiFor('A',1)}];
+    let pi=0;
+    for(let i=1;i<VS_LINEUP.length;i++){
+      const slot=VS_LINEUP[i].slot;
+      MATCH.skaters.push({ent:MATCH.pool[pi++],team:'A',ctrl:'ai',slot,ai:vsAiFor('A',slot)});
+    }
+    for(const L of VS_LINEUP)
+      MATCH.skaters.push({ent:MATCH.pool[pi++],team:'B',ctrl:'ai',slot:L.slot,ai:vsAiFor('B',L.slot)});
+    for(let i=pi;i<MATCH.pool.length;i++){MATCH.pool[i].root.visible=false;MATCH.pool[i].hasPuck=false;}
+    for(const s of MATCH.skaters){
+      if(s.ent===player){if(s.ent.botStick)s.ent.botStick.visible=false;continue;}
+      ihEnsureBotRig(s.ent);
+      if(s.ent.pRing)s.ent.pRing.visible=false; // VS is one human: no P2+ indicator rings
+    }
+    matchDressSkaters();
+    if(typeof dummy!=='undefined'&&dummy&&dummy.group)dummy.group.visible=false;
+    if(typeof bot!=='undefined'&&bot){bot.root.visible=false;bot.hasPuck=false;}
+    if(typeof goalie!=='undefined'&&goalie)ihApplyBotZoneRecolor(goalie,'A');
+    ihApplyBotZoneRecolor(MATCH.goalieB,'B');
+    MATCH.goalieB.root.visible=true;
+    MATCH.active=true;MATCH.freeSkate=false;MATCH.scoreA=0;MATCH.scoreB=0;
+    GAME.whistleT=0;GAME.whistleFn=null;
+    matchFaceoff();
+    refreshScore();
+    buildVsHud();vsHudRefresh();
+    GAME.menuEl.style.display='none';window.__poseFrozen=false;
+    document.body.classList.add('hideCursor');
+    flashMsg('VS — '+ihTeamName('A')+' vs '+ihTeamName('B')+' · 1-5 SWITCH');
+  }));
+}
 function startMatch(){
   const need=MATCH.joined.length+MATCH.botsA+MATCH.botsB;
   flashMsg('LOADING PLAYERS…');
   ensureGoalieB(()=>ensureBodies(need,()=>{
     if(MATCH.pool.length<need){flashMsg('LOAD FAILED');return;}
     GAME.mode='match';
+    /* MATCH is the one-body mode: whoever you were driving in VS, you are P1
+       again here, and MATCH.vs going false is what re-locks the switch keys. */
+    ihReturnToP1Body();MATCH.vs=false;
+    if(vsHudEl)vsHudEl.style.display='none';
     if(!GOAL_B)buildGoalB();
     MATCH.goalBGroup.visible=true;
     MATCH.skaters=[{ent:player,team:'A',ctrl:'p1'}];
@@ -8277,6 +8631,7 @@ function startFreeSkate(){
   ensureBodies(need,()=>{
     if(GAME.mode!=='practice')return; // mode changed while bodies parsed
     if(MATCH.pool.length<need){flashMsg('LOAD FAILED');return;}
+    ihReturnToP1Body();MATCH.vs=false;
     MATCH.skaters=[{ent:player,team:'A',ctrl:'p1'}];
     let pi=0,aj=0,bj=0;
     MATCH.joined.forEach((j,ji)=>{
@@ -8311,7 +8666,13 @@ function startFreeSkate(){
 }
 function matchTeardown(){
   if(!MATCH.active&&!MATCH.freeSkate&&!MATCH.goalBGroup)return;
-  MATCH.active=false;MATCH.freeSkate=false;
+  /* Hand control back to P1's OWN body before anything is hidden. Leaving VS
+     while driving a pool bot would otherwise leave `player` pointing at a
+     body this function is about to make invisible — you would still be
+     playing it, from inside nothing. */
+  ihReturnToP1Body();
+  MATCH.active=false;MATCH.freeSkate=false;MATCH.vs=false;
+  if(vsHudEl)vsHudEl.style.display='none';
   for(const s of MATCH.skaters)if(s.ent!==player){s.ent.root.visible=false;s.ent.hasPuck=false;
     if(s.ent.pRing)s.ent.pRing.visible=false;}
   MATCH.skaters=[];
@@ -8325,10 +8686,18 @@ function matchFaceoff(){
   let ai=0,bi=0;
   for(const s of MATCH.skaters){
     const e=s.ent;e.hasPuck=false;e.vel.set(0,0,0);
-    if(s.team==='A'){e.pos.set(ai===0?0:(ai%2?2.8:-2.8),0,-2.5-ai*1.6);e.heading=0;ai++;}
+    /* VS lines up by POSITION, not by roster index: the switch keys are a map
+       of the ice, and they only read as one if the man on key 3 is actually
+       out on the right wing when the puck drops. */
+    if(MATCH.vs&&s.slot){const p=vsFaceoffSpot(s);e.pos.set(p.x,0,p.z);e.heading=s.team==='A'?0:Math.PI;}
+    else if(s.team==='A'){e.pos.set(ai===0?0:(ai%2?2.8:-2.8),0,-2.5-ai*1.6);e.heading=0;ai++;}
     else{e.pos.set(bi===0?0:(bi%2?2.8:-2.8),0,2.5+bi*1.6);e.heading=Math.PI;bi++;}
     e.attackT=0;
   }
+  /* You take your own draws. A faceoff with control still sitting on the
+     winger you happened to be driving when the whistle blew is the one place
+     the auto-switch cannot help you: nobody has the puck, so nothing fires. */
+  if(MATCH.vs){const c=vsSkaterAt(1,VS.team);if(c&&c.ent!==player)ihSwapControl(c);vsHudRefresh();}
   if(goalie){goalie.pos.set(0,0,GOAL_ZONE.z-CONFIG.gDepthBase);goalie.bf=0;goalie.bfTarget=0;}
   if(MATCH.goalieB){MATCH.goalieB.pos.set(0,0,GOAL_ZONE.z-CONFIG.gDepthBase);MATCH.goalieB.bf=0;MATCH.goalieB.bfTarget=0;}
 }
@@ -8698,6 +9067,10 @@ function updateMatch(dt){
     collideGoalB(player.pos,CONFIG.playerR,player.vel,false,dt);
     matchGoalieB(dt);
   }
+  /* Last thing in the frame, and deliberately so: the pickup that hands you a
+     new body happens inside matchAI above, so asking any earlier would always
+     be one frame behind the puck. */
+  if(MATCH.vs)vsAutoSwitch();
 }
 function updatePuck(dt){
   /* ONE PLACE KEEPS control AND possessed AGREEING. A dozen sites across the
@@ -11046,6 +11419,13 @@ addEventListener('keydown',e=>{
     if(defenseMode&&rmbHeld&&player&&!puck.possessed)startKneel();else togglePivot();}
   if(k==='tab'&&!e.repeat&&gameplayActive){e.preventDefault();e.stopPropagation();toggleCamFocus();}
   if(k==='x'&&!e.repeat)triggerToeDrag();
+  /* 1..6 — VS player switching by POSITION (1 C, 2 LW, 3 RW, 4 LD, 5 RD,
+     6 G). Inert in every other mode: MATCH, practice and 1v1 are all
+     one-body modes on purpose, and vsSwitchToSlot's own vsActive() gate is
+     what says so. Not preventDefault'ed — the digit row does nothing in a
+     browser, and swallowing it would break Ctrl+1 style shortcuts. */
+  if(!e.repeat&&gameplayActive&&k.length===1&&k>='1'&&k<='6'&&typeof vsSwitchToSlot==='function')
+    vsSwitchToSlot(k.charCodeAt(0)-48);
   /* Q/E: one tap = one MOMENTARY pivot step (you square back up on your own
      — see the pump note in updatePlayer). With Ctrl's angle lock on they
      instead trim the held angle — or, in the offensive zone, your angle
@@ -13312,6 +13692,7 @@ function bootSkaters(){
 loader.parse(b64ToBuf(PLAYER_B64),'',gltf=>{
   remapBoneNames(gltf.scene);
   player=createPlayer(gltf);
+  p1Body=player;
   camYaw=player.heading;
   buildReachRing();
   buildReachCurve();
