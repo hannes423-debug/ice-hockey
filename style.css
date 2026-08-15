@@ -427,12 +427,23 @@ body.pad-active .kb-hints{display:none}
    Settings for Practice / Match Mode are picked and confirmed here,
    instead of a second start-menu screen appearing after game.html loads.
    ============================================================ */
+/* The overlay is the SCROLLER and the card is centred by auto margins, not by
+   align-items:center. Measured at 800x400 — phone landscape — BACK and START
+   were off the bottom of the screen with nothing scrollable anywhere, so the
+   mode could be configured and never started. A flex container that centres
+   an over-tall child pushes the overflow off BOTH ends, and the top of a
+   centred item cannot be scrolled back. `margin:auto` centres it while it
+   fits and yields to the scroll when it does not. Same fix, same reason, as
+   the in-game start menu in game/ice_hockey.html. */
 .confirm-overlay{
-  position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;
+  position:fixed;inset:0;z-index:10;display:none;justify-content:center;
+  overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  padding:max(12px,env(safe-area-inset-top)) 10px max(12px,env(safe-area-inset-bottom));
   background:rgba(5,7,11,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
 }
 .confirm-overlay.show{display:flex}
-.confirm-card{width:min(440px,88vw);padding:28px 30px 26px;text-align:center}
+.confirm-card{box-sizing:border-box;width:min(440px,88vw);margin:auto;flex:0 0 auto;
+  padding:28px 30px 26px;text-align:center}
 .confirm-title{font-family:var(--font-display);font-weight:700;font-size:22px;letter-spacing:.1em;color:var(--ink);margin-bottom:2px}
 .confirm-sub{font-size:11.5px;color:var(--ink-dim);letter-spacing:.05em;margin-bottom:22px}
 .confirm-row{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px;font-size:12.5px;color:var(--ink-dim);letter-spacing:.04em;text-align:left}
@@ -446,7 +457,9 @@ body.pad-active .kb-hints{display:none}
 .stepper button:hover{background:var(--accent-soft);border-color:var(--accent)}
 .stepper b{min-width:14px;text-align:center;color:var(--accent);font-variant-numeric:tabular-nums}
 .confirm-slider{flex:none;width:150px}
-.confirm-slider input[type=range]{width:100%;accent-color:var(--accent)}
+/* a 16 px tall track is not draggable with a thumb — the input keeps its
+   own hit box, the visible track is unchanged */
+.confirm-slider input[type=range]{width:100%;height:44px;accent-color:var(--accent)}
 .scheme-toggle{display:flex;gap:6px;flex:none}
 .scheme-toggle button{
   padding:6px 12px;border-radius:8px;border:1px solid var(--line-strong);background:rgba(255,255,255,.05);
@@ -540,4 +553,53 @@ body.pad-active .kb-hints{display:none}
   .panel-left{width:100%;margin-bottom:12px}
   .panel-right{display:flex;width:100%}
   .confirm-row{flex-wrap:wrap;row-gap:8px}
+}
+
+/* ============================================================
+   TOUCH — added after measuring the page at phone sizes with
+   tools/menu_probe.sh, which hit-tests every control at its own centre
+   rather than reading its handlers.
+
+   Two separate faults, one layout and one ergonomic:
+
+   - AT 800x400 THE FULLSCREEN AND PARTY CHIPS OVERLAPPED. Everything in
+     .topnav is flex:none except .tabs, which has min-width:0 — so once the
+     seven tab labels no longer fit, the strip's CONTENT overflows its own
+     box and paints across the chips to its right. Both chips still render
+     perfectly; a tap on either one lands on the other. The strip already
+     scrolled below 640px, which is why this only ever appeared in phone
+     LANDSCAPE — the one shape that is short and wide at once.
+
+   - THE TABS AND CHIPS WERE 27-38 px on their short side, i.e. a coin flip
+     under a thumb.
+
+   Deliberately NOT behind @media (pointer:coarse). That query cannot be
+   exercised headlessly — Chrome reports pointer:fine with no touchscreen
+   attached and --touch-events=enabled does not change it — so gating on it
+   would mean shipping sizing rules that no test here can prove ever fire.
+   44 px is a fine size for a mouse too, so there is nothing to gate.
+   .menu-item is already 52 px and is left alone.
+   ============================================================ */
+@media (max-width:1000px){
+  .topnav{gap:12px}
+  .tabs{
+    flex:1 1 auto;justify-content:flex-start;
+    overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+  }
+  .tabs::-webkit-scrollbar{display:none}
+}
+.tab{min-height:44px;padding:11px 16px}
+.fs-chip,.party-chip{min-height:44px}
+/* below 900px the chip drops its label and is a bare glyph, which is 33 px
+   wide on its own padding — it needs a floor across as well as down */
+.fs-chip{padding:8px 12px;min-width:44px;justify-content:center}
+.party-chip{padding:8px 12px 8px 10px}
+@media (max-width:900px){.fs-chip{padding:8px 10px}}
+.stepper button,.seg button,.chip,.p1opt{min-height:44px;min-width:44px}
+.confirm-row button{min-height:48px}
+/* a tap must not be delayed 300 ms waiting for a possible double-tap, and a
+   grey flash box on every press is not this menu's language */
+.tab,.menu-item,.fs-chip,.party-chip,.stepper button,.seg button,.chip,.p1opt,
+.confirm-row button,.party-popover button{
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;
 }

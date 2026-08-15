@@ -35,7 +35,12 @@
 # the forked build this one came from.
 /assets/
 /legacy/
-/tools/
+# tools/ is ignored for its BINARY working files (armlen, regrip), not as a
+# rule about the folder — a script that belongs to the repo is re-included by
+# name. This has to be /tools/* rather than /tools/, because git cannot
+# re-include anything inside an excluded DIRECTORY.
+/tools/*
+!/tools/menu_probe.sh
 /armtest/
 /reference/*
 !/reference/rink_reference_2026-08-13.png

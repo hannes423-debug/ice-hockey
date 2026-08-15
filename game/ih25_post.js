@@ -11,7 +11,25 @@
   IH25.postRestitution = 0.55;
   IH25.postRadius = 0.05;
 
-  IH25.zoom = 0;            // 0 = whole rink (the photo's framing), 1 = tight
+  /* ZOOM. 0 is the photo's own rig — the whole sheet, which is the reference
+     framing and stays reachable on the wheel — and 1 is tight on the skater.
+     The DEFAULT is neither: it is solved (below) from how much ice should be
+     on screen, because "the whole rink fits" is a picture of a rink and not a
+     view you can play hockey from. Left null so the first applyCam solves it
+     against the real window; the wheel overwrites it from then on. */
+  IH25.zoom = null;
+  /* Metres of ice, along Z, from the bottom of the screen to the top. An NHL
+     end zone is halfD - blueZ = 22.86 m and the neutral zone is 15.24 m, so
+     31 m is the zone you are in, whole, plus a good third of the next one
+     past the blue line — the EA NHL framing, and the reason the blue line is
+     essentially always in shot there. */
+  IH25.coverZ = 31;
+  IH25.edgeMargin = 3;      // m of ice the rig may frame past the end boards
+  /* Zoom at which the view is fully on the skater rather than on centre ice.
+     The focus used to reach the player only at zoom 1, which was fine when
+     the default was 0 and the whole rink was on screen anyway; with a playing
+     default it would leave the skater drifting toward a corner. */
+  IH25.focusFull = 0.55;
   IH25.maskOpacity = 1;
   var mask = null, lastT = 0, wired = false;
 
@@ -339,6 +357,28 @@
      camera while the player was looking through this one — the aim and the
      puck landed somewhere else entirely. Set once, at the top of the frame,
      so aim, HUD and render all agree. */
+  /* HOW MUCH ICE A RIG AT `dist` PUTS ON SCREEN, along Z, as the actual ground
+     intersections of the top and bottom of the frustum — not "halfD fits in
+     the FOV", which ignores that the view is oblique and is what put the old
+     heuristic rig in a different place from the photo's camera.
+     Returned RELATIVE TO THE LOOK POINT, and the two halves are nothing like
+     equal: at this pitch about a third of what you see is behind the look
+     point and two thirds ahead of it. That asymmetry is the framing — it is
+     why a skater sits low on screen with the ice he is attacking laid out in
+     front of him, and it has to be respected by the end-of-rink clamp or the
+     rig frames a strip of black void past the boards. */
+  function groundSpan(dist) {
+    var p = IH25.camPitchDeg * Math.PI / 180, half = IH25.camFovDeg * Math.PI / 360;
+    var h = Math.sin(p) * dist, g = Math.cos(p) * dist;
+    var lo = p + half, hi = p - half;
+    var near = h / Math.tan(lo);
+    var far = (hi > 0.02) ? h / Math.tan(hi) : 1e6;   // top of frame at/over the horizon
+    return { behind: g - near, ahead: far - g, cover: far - near };
+  }
+  // groundSpan is linear in dist, so one evaluation calibrates the inverse
+  var _coverPerM = groundSpan(1000).cover / 1000;
+  function distForCover(cov) { return cov / _coverPerM; }
+
   function applyCam() {
     var cam = g('camera'), P = g('player'), pk = g('puck'), C = g('CONFIG');
     if (!cam || !P) return;
@@ -354,13 +394,32 @@
     var fit = IH25.camDist;
     var need = (IH25.halfW * 1.06) / Math.tan(IH25.camFovDeg * Math.PI / 360 * (cam.aspect || 1.6));
     if (need > fit) fit = need;
+    if (z === null || z === undefined) {
+      // solve the playing default once, against the window we actually got
+      z = IH25.zoom = Math.max(0, Math.min(1, (1 - distForCover(IH25.coverZ) / fit) / 0.80));
+    }
     var dist = fit + (fit * 0.20 - fit) * z;
     IH25._dist = dist; IH25._fit = fit;   // presentation layers scale off this
     // focus drifts from centre ice out to the player as you zoom in
     var src = (g('cameraFocus') === 'puck' && pk) ? pk.pos : P.pos;
-    var lx = src.x * z, lz = src.z * z;
-    var mx = IH25.halfW * 0.9, mz = IH25.halfD * 0.9;
-    lx = Math.max(-mx, Math.min(mx, lx)); lz = Math.max(-mz, Math.min(mz, lz));
+    var fz = Math.min(1, z / IH25.focusFull);
+    var lx = src.x * fz, lz = src.z * fz;
+    /* Stop at the ends of the rink. Once the rig is close enough to play
+       from, following the skater into a corner frames ice that is not there:
+       the arena behind the boards is hidden by design in this build, so what
+       is past them is a black void, and a camera drifting into it reads as a
+       rendering fault rather than as the end of the rink. Clamp on the
+       FRUSTUM's own ground edges, not on the look point, since those are what
+       actually reach the boards — and they are asymmetric. */
+    var sp = groundSpan(dist), lim = IH25.halfD + IH25.edgeMargin;
+    var hiZ = lim - sp.ahead, loZ = -lim + sp.behind;
+    lz = (hiZ < loZ) ? 0 : Math.max(loZ, Math.min(hiZ, lz));
+    /* Sideways the rink is only 25.9 m across and a landscape window covers
+       far more than that, so this is normally 0 — no lateral pan at all,
+       which is also what a broadcast rig does. */
+    var halfX = Math.tan(IH25.camFovDeg * Math.PI / 360) * (cam.aspect || 1.6) * dist;
+    var mx = Math.max(0, IH25.halfW + IH25.edgeMargin - halfX);
+    lx = Math.max(-mx, Math.min(mx, lx));
     /* The build's fog (45..110 m) and far plane (220) were tuned for a 14 m
        chase camera. This rig sits ~112 m up, which put the ENTIRE rink past
        fogFar — the sheet rendered as flat dark blue and read exactly like a
@@ -439,9 +498,19 @@
         'pointer-events:none;white-space:pre';
       document.body.appendChild(el);
     }
+    /* the debug readout sits bottom-left at z-index 99999 and printed itself
+       straight over the start menu's last rows. It is pointer-events:none so
+       it never blocked a tap, but on a narrow screen it covered the buttons
+       it was sitting on top of. */
+    var menu = g('GAME') && g('GAME').menuEl;
+    var menuOpen = !!(menu && menu.style.display !== 'none');
+    el.style.display = menuOpen ? 'none' : 'block';
+    if (menuOpen) return;
     var pk = g('puck');
     el.textContent =
-      '2.5D  pitch ' + IH25.camPitchDeg.toFixed(1) + '° LOCKED   zoom ' + IH25.zoom.toFixed(2) + ' (wheel)\n' +
+      '2.5D  pitch ' + IH25.camPitchDeg.toFixed(1) + '° LOCKED   zoom ' +
+      (IH25.zoom == null ? '—' : IH25.zoom.toFixed(2)) + ' (wheel)   ' +
+      (IH25._dist ? groundSpan(IH25._dist).cover.toFixed(0) + ' m of ice on screen' : '') + '\n' +
 'mask ' + IH25.maskOpacity.toFixed(2) + ' (M)   rink ' + (IH25.halfW * 2).toFixed(1) + ' x ' + (IH25.halfD * 2).toFixed(1) + ' m\n' +
       'puck ' + (pk && pk.possessed ? 'CARRIED ctrl ' + pk.control.toFixed(2) : 'loose') +
       '   contested ' + (IH25.contested() ? 'YES' : 'no');
@@ -489,6 +558,8 @@
     };
 
     addEventListener('wheel', function (e) {
+      // zoom is null until applyCam solves the default; nothing to nudge yet
+      if (IH25.zoom == null) return;
       IH25.zoom = Math.max(0, Math.min(1, IH25.zoom + (e.deltaY > 0 ? -0.06 : 0.06)));
     }, { passive: true });
 

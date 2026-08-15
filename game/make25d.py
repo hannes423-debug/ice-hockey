@@ -146,6 +146,14 @@ patch("function setFP(v){CONFIG.firstPerson=v;",
       "function setFP(v){v=false;CONFIG.firstPerson=false;",
       "camera: disable first person")
 
+# Cursor height on screen cannot mean "aim higher" under a rig that looks DOWN
+# the ice — screen-up is down-ice, so distance was buying loft and a shot aimed
+# at the goal line from 20 m arrived 3.15 m up, 1.9 m over the crossbar, with
+# the reticle sitting on the goal line the whole time. Shots leave flat here;
+# loft is the curved swipe's chip/saucer, which is a gesture and not a camera
+# artefact. See the CONFIG comment on aimLoftFromScreen.
+patch("  aimLoftFromScreen:1,", "  aimLoftFromScreen:0,", "aim: loft is a gesture, not cursor height")
+
 patch("    gStamWrap.style.display='block';",
       "    gStamWrap.style.display='none'; // 2.5D: chase-cam HUD, unreadable from 112 m",
       "HUD: hide goalie stamina bar")

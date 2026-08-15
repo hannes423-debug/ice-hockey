@@ -38,8 +38,18 @@ feature. Edit `ih25_pre.js` / `ih25_post.js` / `make25d.py`, never the output.
 | `ih25_shot.sh` | screenshots the locked view (`OVERLAY=1` for the line check) |
 | `ih25_probe.sh` | runs one acceptance probe |
 | `ih25_contact_probe.js`, `ih25_collide_probe.js`, `ih25_aim_probe.js` | the acceptance tests |
+| `ih25_cone_probe.js` | is the drawn ribbon the shot you actually take? |
+| `ih25_loft_probe.js` | does aiming at the net still hit the net? |
+| `ih25_frame_probe.js` | what is actually on screen at the default zoom |
+| `ih25_menu_probe.js` | can the start menu be OPERATED at a phone size |
+| `../tools/menu_probe.sh` | the same three menu measures against any page in the repo root |
 
 Controls: **wheel** = zoom (angle never changes), **M** = mask 100/50/0 %.
+
+`ih25_probe.sh` takes `WINDOW=500,700` to run a probe at a small viewport.
+Headless will not make a window narrower than about 500 px, and
+`--force-device-scale-factor` does not shrink the CSS viewport, so 500x700 is
+the narrowest honest portrait test and 800x400 stands in for landscape.
 
 ## The picture hides the geometry, as a texture on it
 
@@ -408,3 +418,166 @@ through:
 
 Goal posts were **already** solid in the base build (0.160 m, vz +10 → −6.8 in
 both) — the post code in `ih25_post.js` is belt-and-braces, not the fix.
+
+
+## The default zoom frames a ZONE, not the rink
+
+`IH25.zoom` starts as `null` and the first `applyCam()` solves it, because the
+number that matters is not a zoom value — it is **how much ice is on screen**.
+`IH25.coverZ = 31` metres: an NHL end zone is `halfD - blueZ` = 22.86 m and the
+neutral zone is 15.24 m, so 31 m is the zone you are in, whole, plus a good
+third of the next one past the blue line. That is the EA framing and it is why
+the blue line is essentially always in shot there. Zoom 0 is still the photo's
+own rig and still reachable on the wheel — it is the reference shot.
+
+`groundSpan(dist)` does the arithmetic, as the real ground intersections of the
+top and bottom of the frustum rather than "does halfD fit in the FOV", which
+ignores that the view is oblique. Two consequences worth knowing:
+
+- **What you see is strongly asymmetric**: about a third of it is behind the
+  look point and two thirds ahead. That asymmetry IS the framing — the skater
+  sits low with the ice he is attacking laid out in front of him — and the
+  end-of-rink clamp has to be written against the frustum's own edges, not
+  against the look point, or the rig frames a band of black void past the
+  boards. (The arena is hidden in this build, so past the boards is nothing.)
+- The rig is Z-limited, so on a 16:9 window it covers about 44 m across while
+  the rink is 25.9 m. Expect side margins. Filling the width would mean either
+  a steeper pitch or less ice on screen; the pitch is the photo's and locked.
+
+`ih25_frame_probe.js` measures it by unprojecting the real camera through the
+top and bottom of the viewport onto the ice — never by re-evaluating the
+formula that placed it. Measured: 30.9 m against a 31 m target, every zone
+centre whole, worst void past the boards 3.0 m (the configured `edgeMargin`).
+
+A note on its assertions: they are made at the CENTRE of each zone. Standing on
+a blue line, half the zone behind you is off screen and that is correct — the
+rig looks where you are going, so "the zone you are standing in is always
+whole" would be a demand for a camera that faces backwards.
+
+## The ribbon is the shot
+
+Reported as three separate things and they turned out to be three separate
+causes, only one of which was the d20:
+
+**1. The puck could leave its own ribbon.** The ribbon was drawn from
+`player.pos` and the puck is struck from `puck.pos`, and sim-first means those
+are genuinely different places — measured 0.20 to 0.34 m apart on an ordinary
+carry, which is 6 to 12 degrees over the first couple of metres. Parallel
+lines, not the same line. `shotAimFrame()` now hands both the preview and
+`fireShot` one origin (the puck, falling back to the body when the reticle is
+sitting on top of it, where a puck-relative bearing is noise). Measured
+lateral offset after: 0.024 m.
+
+**2. The cone went from regular to wide at the instant of release.** The
+turn-into-the-shot adds up to `turnShotErrCap` = 0.22 rad = **12.6 degrees** of
+extra aim error at release, four times a standing cone, with nothing on screen
+having warned you. The preview now predicts it (`predictTurnShotErr`) so the
+ribbon opens up while you are still aiming behind yourself, and the preview
+keeps running THROUGH the pivot — the buttons are up by then, but the shot has
+not happened yet and fires up to `turnShotMaxDur` later. Second offender: a
+CURVED swipe fires a chip, and the preview drew the stance type, so a flat 12
+degree wrister was previewed and a 62 degree chip was launched.
+`liveDelivery()` previews what a release right now would actually fire.
+
+**3. The ribbon is now the ENVELOPE, not an estimate of it.** `updateAiming`
+stores the cone it drew in `aimViz.shownErr`, and `fireShot` rolls the d20
+inside THAT number instead of recomputing its own. `aimViz.tick` runs at the
+end of `updatePlayer`, after the release branch, so `shownErr` is literally the
+ribbon that was on screen when the button came up. A turn shot carries it in
+`player.forcedErr`. Where no preview is running — a one-timer, a pad swat —
+`computeAimError` still answers, exactly as before.
+
+Also: the ribbon's WIDTH used to scale with shot POWER as well as with the
+cone. That is two different things wearing one cue, and it moved whenever the
+swipe speed moved. Width is now the cone and nothing else, so every millimetre
+it opens is aim error you can do something about — stand still, stop carving,
+square up, shorten the range, and watch it close.
+
+Measured by `ih25_cone_probe.js`, against the unfixed build as well as the
+fixed one:
+
+| | unfixed | fixed |
+|---|---|---|
+| cone jump at release | **12.605 deg** | 0.000 |
+| puck outside its own ribbon | **+2.017 m** | −0.111 m (inside) |
+| previewed centreline vs launch | 0.000 | 0.161 deg |
+| lateral offset, ribbon origin to puck | 0.205–0.337 m | 0.024–0.050 m |
+
+The residual spread difference is the ribbon's END snapping between the net and
+the boards behind it as the aim drifts across the goal mouth. That is the
+ribbon being honest about a genuinely different flight, so it is reported and
+not asserted.
+
+### Three traps that produced confident wrong numbers first
+
+- **`_writePath` uses `_avA` as scratch, and `_avA` IS the vector
+  `aimViz.tick` passes in as `aim`.** Read `aim.x` after calling
+  `updateAiming` and you get the ribbon's last path sample — which reads as
+  "the preview is aiming at the far boards", 30.33 m away, with the cursor
+  parked on a target at 20.
+- **`fireShot` rotates `d` by `yawErr` as `x' = x·cos − z·sin`,** which in an
+  `atan2(x, z)` convention is a NEGATIVE turn, so taking the roll back out
+  ADDS it. Backwards, it doubles every gap and a perfectly clean shot reads
+  three degrees off.
+- **Measure containment in METRES against the drawn tube, not in degrees.**
+  0.2 m off the centreline is 16 degrees at 0.7 m and 0.4 degrees at 30 m, so
+  an angular test reports a catastrophe exactly where the eye sees a puck
+  sitting on its own ribbon. And stop at the first deflection: a puck that
+  rings off a post is allowed to leave the cone.
+
+## Distance was buying loft
+
+`mouseTPSPoint` derives shot elevation from how far above the player's chest
+the cursor sits ON SCREEN. Behind the skater that is "aim higher". Looking down
+the ice at 58.6 degrees, screen-up is DOWN-ICE — so the further away you aimed,
+the more loft you bought. Measured: aiming at the goal line from 15, 20 and
+25 m launched at the 16 degree cap and arrived **2.63, 3.15 and 3.35 m up**,
+i.e. 1.4 to 2.1 m over a 1.22 m crossbar, with the reticle sitting on the goal
+line the whole time.
+
+There is no fix inside the mapping. A top-down aim point carries no vertical
+information at all, and the vertical plane it would have to be read off is
+edge-on to the camera, so one pixel of cursor is metres of height. So
+`CONFIG.aimLoftFromScreen` goes to 0 here (make25d patches it; the chase-cam
+build keeps 1) and **shots leave flat. Loft is a GESTURE, not a position** —
+the curved swipe's chip and saucer, which are range-targeted and now preview
+correctly. `ih25_loft_probe.js`: 0/4 over the bar, arriving at 0.11 m.
+
+## The start menu had to be operable with a thumb
+
+Three things make a menu unusable on a small screen and all three render
+perfectly, so none of them shows up by looking at it on a desktop:
+
+1. **The card overflowed and nothing scrolled.** Measured at 500x701: a 753 px
+   card in a 701 px viewport sitting at y = −26, with `overflow: visible` on
+   both the overlay and the card. A flex container that centres an over-tall
+   child pushes the overflow off BOTH ends, and the top of a centred item
+   cannot be scrolled back into view. The overlay is the scroller now and the
+   card is centred by `margin: auto`, which centres it while it fits and
+   yields to the scroll when it does not.
+2. **Fourteen tap targets were 23 to 29 px** on their short side. The steppers
+   and kit chips carried their own inline padding and font-size, which beats
+   any stylesheet, so they are classes now.
+3. `box-sizing` — a `94vw` card came out 512 px wide in a 500 px viewport and
+   hung 13 px off the left, because the padding is ADDED to the width by
+   default.
+
+`ih25_menu_probe.js` hit-tests every control at its own centre with
+`elementFromPoint` and scrolls each one into view first — checking only the top
+and the bottom of the scroll marks everything in the MIDDLE unreachable, which
+is a fault in the ruler and not in the menu.
+
+The same three faults, and one more, were in the front-end menu
+(`../index.html`, `../style.css`), found with `../tools/menu_probe.sh`: at
+800x400 the fullscreen and party chips **overlapped each other outright**, so a
+tap on one landed on the other. Everything in `.topnav` is `flex: none` except
+`.tabs`, which has `min-width: 0` — so once the seven tab labels no longer fit,
+the strip's CONTENT overflows its own box and paints across the chips. The
+strip already scrolled below 640 px, which is why it only ever appeared in
+phone LANDSCAPE, the one shape that is narrow and wide at once.
+
+The touch sizing is deliberately NOT behind `@media (pointer:coarse)`. That
+query cannot be exercised headlessly — Chrome reports `pointer:fine` with no
+touchscreen attached, and `--touch-events=enabled` does not change it — so
+gating on it would mean shipping sizing rules no test here can prove ever
+fire. 44 px is a fine size for a mouse too, so there is nothing to gate.

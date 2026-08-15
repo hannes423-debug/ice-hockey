@@ -4696,6 +4696,18 @@ const CONFIG={
      Min/Max within each still interpolates with aim height like before. */
   shotMaxLaunchAngle:0.28,
   shotAimVerticalPixels:220, // cursor this many px above the player on screen = full elevation
+  /* Does cursor HEIGHT ON SCREEN mean "aim higher"? Only if the camera is
+     behind the skater. Under a rig looking down the ice, screen-up is
+     down-ice, so distance silently buys loft: measured, aiming at the goal
+     line from 15-25 m launched at the 16 deg cap and arrived 2.63-3.35 m up,
+     i.e. 1.4-2.1 m OVER a 1.22 m crossbar, while the reticle sat on the goal
+     line the whole time. There is no fix inside the mapping — a top-down aim
+     point carries no vertical information at all, and the vertical plane it
+     would have to be read off is edge-on to the camera, so one pixel of
+     cursor is metres of height. So on such a rig this goes to 0 and shots
+     leave flat; LOFT BECOMES A GESTURE, not a position — the curved swipe's
+     chip/saucer/flip, which are range-targeted and preview correctly. */
+  aimLoftFromScreen:1,
   /* aim uncertainty cone: purely physical now (no swipe-cleanliness/d20
      "skill test") — a still, unbothered, high-skill player gets a
      razor-tight cone forever, no time limit. shootingSkill (0..1) is a
@@ -4727,6 +4739,9 @@ const CONFIG={
      turnShotMin 0.62 rad is ~35 degrees: anything inside that is a normal
      shoulder-and-hip rotation you can take without repositioning your feet. */
   turnShotEnable:1,turnShotMin:0.62,turnShotSecPerRad:0.16,turnShotMaxDur:0.42,
+  /* below this the reticle is close enough to the puck that a puck-relative
+     bearing is noise — the shot aims off the body instead (shotAimFrame) */
+  shotOriginMinRange:0.8,
   turnShotErrPerRad:0.10,turnShotErrCap:0.22,
   /* EA-PACE: shot speeds pushed back toward the real-NHL numbers EA uses
      (wrist ~54-74mph here). The old "crosses the screen too fast" objection
@@ -7030,10 +7045,32 @@ function refreshScore(){
 function buildStartMenu(){
   const wrap=document.createElement('div');
   wrap.id='startMenu';
-  wrap.style.cssText='position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(6,8,22,.82);backdrop-filter:blur(3px);';
+  /* THE OVERLAY IS THE SCROLLER, and the card is centred by AUTO MARGINS, not
+     by align-items:center. This is the whole reason the menu could not be
+     operated on a phone: a flex container that centres its child and then
+     overflows pushes the overflow off BOTH ends, and the top of a centred
+     item cannot be scrolled back into view — measured at 500x701, the card
+     was 753 px tall sitting at y = -26 with overflow:visible on both the
+     overlay and the card, i.e. nothing scrolled at all and the rows past
+     either fold were unreachable rather than merely below the fold.
+     `margin:auto` centres it while it fits and yields to the scroll when it
+     does not. touch-action:manipulation drops the 300 ms tap delay; the safe
+     area insets keep the first and last row clear of a notch and a home bar. */
+  wrap.style.cssText='position:fixed;inset:0;z-index:60;display:flex;justify-content:center;'+
+    'overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;'+
+    'touch-action:manipulation;background:rgba(6,8,22,.82);backdrop-filter:blur(3px);'+
+    'padding:max(12px,env(safe-area-inset-top)) 10px max(12px,env(safe-area-inset-bottom));';
+  /* The overlay swallows game input, but it must NOT swallow its own scroll:
+     preventing pointerdown here would kill touch scrolling on the card. Stop
+     propagation only. */
   wrap.addEventListener('pointerdown',e=>e.stopPropagation());
   const card=document.createElement('div');
-  card.style.cssText='min-width:300px;max-width:86vw;padding:26px 30px;border-radius:14px;background:rgba(18,14,40,.95);border:1px solid rgba(168,85,255,.5);color:#eaf6ff;font-family:inherit;text-align:center;';
+  /* border-box or the padding is ADDED to the width: at 500 px wide a
+     94vw card came out 512 px and hung 13 px off the left of the screen. */
+  card.style.cssText='box-sizing:border-box;width:min(560px,94vw);margin:auto;'+
+    'padding:22px clamp(14px,4vw,30px);border-radius:14px;'+
+    'background:rgba(18,14,40,.95);border:1px solid rgba(168,85,255,.5);color:#eaf6ff;'+
+    'font-family:inherit;text-align:center;flex:0 0 auto;';
   card.innerHTML=
     '<div style="font-size:24px;font-weight:800;letter-spacing:.06em;color:#c45cff;margin-bottom:4px;">ICE HOCKEY</div>'+
     '<div style="font-size:12px;opacity:.75;margin-bottom:18px;">TEST GAME SETTINGS</div>'+
@@ -7045,12 +7082,12 @@ function buildStartMenu(){
     '<div id="smLobby" style="display:none;margin-bottom:14px;font-size:11px;line-height:1.9;">'+
       '<div id="smRoster"></div>'+
       '<div style="opacity:.75;margin:2px 0 6px;">✕/A ON A FREE PAD JOINS · ◯/B LEAVES</div>'+
-      '<div><span id="smALbl">TEAM A BOTS</span> <button id="smAm" class="smOpt" style="padding:2px 10px;font-size:11px;">−</button> '+
+      '<div><span id="smALbl">TEAM A BOTS</span> <button id="smAm" class="smOpt smStep">−</button> '+
       '<span id="smAn" style="color:#c45cff;font-weight:800;">0</span> '+
-      '<button id="smAp" class="smOpt" style="padding:2px 10px;font-size:11px;">+</button>'+
-      '<span id="smBWrap"> &nbsp;·&nbsp; <span id="smBLbl">TEAM B BOTS</span> <button id="smBm" class="smOpt" style="padding:2px 10px;font-size:11px;">−</button> '+
+      '<button id="smAp" class="smOpt smStep">+</button>'+
+      '<span id="smBWrap"> &nbsp;·&nbsp; <span id="smBLbl">TEAM B BOTS</span> <button id="smBm" class="smOpt smStep">−</button> '+
       '<span id="smBn" style="color:#c45cff;font-weight:800;">1</span> '+
-      '<button id="smBp" class="smOpt" style="padding:2px 10px;font-size:11px;">+</button></span></div>'+
+      '<button id="smBp" class="smOpt smStep">+</button></span></div>'+
       /* club picker: one row per side, so a club can be played AS (side A,
          P1's own side) or AGAINST (side B) — see IH_CLUBS */
       '<div id="smClubRow" style="margin-top:6px;line-height:2.2;">'+
@@ -7080,13 +7117,31 @@ function buildStartMenu(){
       '<button id="smSiOn" class="smOpt" data-si="on" style="padding:6px 14px;font-size:11px;margin-top:6px;">ON<br><span style="font-size:9px;opacity:.7">TYPE · KM/H · ROLL</span></button> '+
       '<button id="smSiOff" class="smOpt" data-si="off" style="padding:6px 14px;font-size:11px;margin-top:6px;">OFF<br><span style="font-size:9px;opacity:.7">CLEAN ICE</span></button>'+
     '</div>'+
-    '<div style="display:flex;gap:10px;justify-content:center;">'+
-      '<button id="smStart" style="padding:10px 34px;font-size:15px;font-weight:800;letter-spacing:.08em;border-radius:9px;border:1px solid #c45cff;background:rgba(168,85,255,.28);color:#fff;cursor:pointer;">START</button>'+
-      '<button id="smExit" style="padding:10px 22px;font-size:12px;font-weight:700;letter-spacing:.06em;border-radius:9px;border:1px solid rgba(160,160,200,.4);background:rgba(40,40,70,.4);color:#b8c0d8;cursor:pointer;">EXIT TO MENU</button>'+
+    '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">'+
+      '<button id="smStart" style="padding:12px 34px;min-height:44px;font-size:15px;font-weight:800;letter-spacing:.08em;border-radius:9px;border:1px solid #c45cff;background:rgba(168,85,255,.28);color:#fff;cursor:pointer;">START</button>'+
+      '<button id="smExit" style="padding:12px 22px;min-height:44px;font-size:12px;font-weight:700;letter-spacing:.06em;border-radius:9px;border:1px solid rgba(160,160,200,.4);background:rgba(40,40,70,.4);color:#b8c0d8;cursor:pointer;">EXIT TO MENU</button>'+
     '</div>';
   wrap.appendChild(card);document.body.appendChild(wrap);
   const style=document.createElement('style');
-  style.textContent='.smOpt{padding:10px 16px;border-radius:9px;border:1px solid rgba(160,160,200,.4);background:rgba(40,40,70,.5);color:#eaf6ff;font-weight:700;font-size:13px;letter-spacing:.05em;cursor:pointer;line-height:1.5;}'+
+  /* TAP TARGETS. Every control in this card is at least 44 px on its short
+     side — measured, 14 of them were between 23 and 29 px tall, which is a
+     coin-flip under a thumb and is why the menu read as "it does not respond"
+     rather than as "it is too small". The steppers and kit chips used to
+     carry their own inline padding/font-size, which beats any stylesheet, so
+     they are classes now instead. */
+  style.textContent='.smOpt{padding:10px 16px;min-height:44px;border-radius:9px;border:1px solid rgba(160,160,200,.4);background:rgba(40,40,70,.5);color:#eaf6ff;font-weight:700;font-size:13px;letter-spacing:.05em;cursor:pointer;line-height:1.5;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}'+
+    '.smOpt.smStep{padding:0 14px;min-width:44px;font-size:15px;}'+
+    '.smOpt.smKit{padding:8px 12px;font-size:11px;letter-spacing:.03em;}'+
+    /* The mode row and the kit rows are pure runs of chips and must WRAP
+       rather than force the card wider than a phone screen. The labelled rows
+       (controls / name / readout / P1) are deliberately left alone: they are
+       label + <br> + buttons, and a <br> inside a flex container becomes a
+       zero-width flex ITEM instead of a line break, so flexing them would
+       silently pull every label onto the same line as its buttons. Their
+       buttons are inline-block and already wrap on their own. */
+    '#startMenu #smModes{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:stretch;}'+
+    '#startMenu #smClubRow>div{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center;}'+
+    '#startMenu input[type=range]{height:44px;width:min(260px,80vw);}'+
     '.smOpt.sel{border-color:#c45cff;background:rgba(168,85,255,.32);}'+
     '.padFocus{outline:2px solid #ffd75c;outline-offset:2px;border-radius:8px;}';
   document.head.appendChild(style);
@@ -7115,7 +7170,7 @@ function buildStartMenu(){
   function renderClubs(){
     ['A','B'].forEach(side=>{
       const host=card.querySelector(side==='A'?'#smCA':'#smCB');
-      const bs='class="smOpt" style="padding:3px 10px;font-size:10px;"';
+      const bs='class="smOpt smKit"';
       let h='<button data-id="generic" '+bs+'>GENERIC</button>';
       for(const c of IH_CLUBS)h+=' <button data-id="'+c.id+'" '+bs+'>'+c.name+'</button>';
       host.innerHTML=h;
@@ -8908,6 +8963,38 @@ function updatePuck(dt){
    range sits near aimErrSkillMin forever (no time limit, no decay). aimDist
    is the RETICLE distance (how far the player is trying to place the shot),
    not the ribbon's full drawn length — see AimVizFX for that distinction. */
+/* WHERE THE SHOT LEAVES FROM — one answer, shared by the preview and the
+   release. The ribbon used to be drawn from player.pos while the puck was
+   struck from puck.pos, and sim-first means those are genuinely different
+   places: measured 0.20-0.34 m apart on an ordinary carry. Parallel lines,
+   not the same line, which is 6-12 deg of angle over the first couple of
+   metres — that is what "the puck goes somewhere other than the ribbon"
+   looks like up close, and it is why the puck could leave its own cone.
+   The puck is the thing being struck, so the puck is the origin. */
+const _shotOrg=new THREE.Vector3();
+function shotOriginXZ(out){
+  const near=puck&&!puck.outOfPlay&&(puck.possessed||
+    (player.stickTip&&puck.pos.distanceTo(player.stickTip)<=CONFIG.shotReachRadius));
+  if(near)out.set(puck.pos.x,0,puck.pos.z);
+  else out.set(player.pos.x,0,player.pos.z);
+  return out;
+}
+/* Direction + range for a shot at `aim`, from wherever the puck actually is.
+   Falls back to the body when the reticle is sitting on top of the puck —
+   there the puck-relative bearing is pure noise, while the body always has a
+   meaningful one. Writes {x,z} (unit) and returns the range. */
+function shotAimFrame(aimX,aimZ,out){
+  shotOriginXZ(_shotOrg);
+  let dx=aimX-_shotOrg.x,dz=aimZ-_shotOrg.z,dl=Math.hypot(dx,dz);
+  if(dl<CONFIG.shotOriginMinRange){
+    _shotOrg.set(player.pos.x,0,player.pos.z);
+    dx=aimX-player.pos.x;dz=aimZ-player.pos.z;dl=Math.hypot(dx,dz);
+  }
+  if(dl<1e-4){const F=fwd(player.heading);dx=F.x;dz=F.z;dl=1;}
+  out.x=dx/dl;out.z=dz/dl;out.ox=_shotOrg.x;out.oz=_shotOrg.z;
+  return dl;
+}
+const _aimFrame={x:0,z:0,ox:0,oz:0};
 function computeAimError(aimDist){
   const skill=clamp(CONFIG.shootingSkill,0,1);
   const base=CONFIG.aimErrSkillMax+(CONFIG.aimErrSkillMin-CONFIG.aimErrSkillMax)*skill;
@@ -8951,9 +9038,47 @@ function startTurnShot(type,info){
   const mag=Math.abs(off);
   if(mag<CONFIG.turnShotMin)return false; // within a normal torso rotation
   const dur=Math.min(CONFIG.turnShotMaxDur,mag*CONFIG.turnShotSecPerRad);
-  player.turnShot={t:dur,dur:dur,type:type,info:info,
+  /* carry the cone that was on screen when the button came up. The shot lands
+     up to turnShotMaxDur later, by which time the preview has faded and there
+     is nothing left to read it off — and a freshly computed one is exactly
+     the wider cone this whole change exists to stop appearing at release. */
+  const shown=(typeof aimViz!=='undefined'&&aimViz&&aimViz.shownErr!=null)?aimViz.shownErr:null;
+  player.turnShot={t:dur,dur:dur,type:type,info:info,err:shown,
     from:player.heading,delta:off,off:mag,aim:a.clone()};
   return true;
+}
+/* The extra cone a release RIGHT NOW would carry (see startTurnShot, and the
+   turnShot block in updatePlayer that applies it). The preview has to include
+   it: measured on the unfixed build, aiming behind the skater drew a 2.15 deg
+   ribbon and then fired inside a 14.75 deg one — the cone went from regular
+   to wide at the exact instant of release, with nothing on screen having
+   warned you. Same formula the release uses, off the live aim. */
+function predictTurnShotErr(aimX,aimZ){
+  if(!CONFIG.turnShotEnable)return 0;
+  if(player.turnShot)
+    return Math.min(CONFIG.turnShotErrCap,player.turnShot.off*CONFIG.turnShotErrPerRad);
+  const hx=aimX-player.pos.x,hz=aimZ-player.pos.z;
+  if(hx*hx+hz*hz<1e-4)return 0;
+  let off=(Math.atan2(hx,hz)-player.heading+Math.PI)%(2*Math.PI);
+  if(off<0)off+=2*Math.PI;
+  off=Math.abs(off-Math.PI);                 // signed shortest turn, magnitude
+  if(off<CONFIG.turnShotMin)return 0;
+  return Math.min(CONFIG.turnShotErrCap,off*CONFIG.turnShotErrPerRad);
+}
+/* What a release RIGHT NOW would actually fire, and with what power. The
+   release maps a CURVED swipe to a chip (shot buttons) or a saucer (pass
+   button); previewing the stance type instead drew a flat 12 deg wrister and
+   then launched a 62 deg chip, i.e. the ribbon changed shape completely at
+   release. Power comes from the same stored swipe the release reads, not
+   from a live re-read that a completed swipe has already superseded. */
+function liveDelivery(){
+  const t=player.shotType;
+  if(!t||t==='none')return{type:t,curve:0.35,pow:gestPow()};
+  let info=gest.fire;
+  if(!info&&gest.swipe&&gest.pathLen>=CONFIG.gestMinLen)info=gestureAnalyze();
+  if(!info)return{type:t,curve:0.35,pow:gestPow()};
+  return{type:info.curved?(t==='pass'?'saucer':'chip'):t,
+         curve:info.curve,pow:info.pow!==undefined?info.pow:gestPow()};
 }
 function fireShot(type,oneTimerInSpeed,gestInfo){
   /* Rocket-League-ball rule: no hard possession requirement — any puck
@@ -8997,10 +9122,10 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
      meters into the air. Elevation is instead a deliberate, capped launch
      angle driven by aim height — real shots stay flat (even a "top shelf"
      release is a shallow angle over distance, not a mortar arc). */
-  let horiz=new THREE.Vector3(aimForShot.x-player.pos.x,0,aimForShot.z-player.pos.z);
-  const aimRange=horiz.length(); // reticle distance, drives saucer/chip arcs
-  if(horiz.lengthSq()<1e-4)horiz.copy(fwd(player.heading));
-  horiz.normalize();
+  /* off the PUCK, not off the body — the same frame the ribbon is drawn from
+     (shotAimFrame). See the comment there for why the two used to differ. */
+  const aimRange=shotAimFrame(aimForShot.x,aimForShot.z,_aimFrame);
+  let horiz=new THREE.Vector3(_aimFrame.x,0,_aimFrame.z);
   const heightFactor=clamp((aimForShot.y-CONFIG.iceHeight)/1.2,0,1);
   /* passes are pushed, not lofted — a real flat/snap pass stays on the ice
      regardless of where you're looking, so unlike the three shot types it
@@ -9058,7 +9183,18 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
      release: the roll picks WHERE within that cone the shot actually goes
      (roll 1 = full send to one edge, 20 = the other, ~10.5 = dead center),
      it no longer changes the cone's SIZE — that's purely physical now. */
-  const errMax=computeAimError(aimRange);
+  /* THE RIBBON IS THE ENVELOPE. The cone used here is the one the player was
+     actually SHOWN — aimViz.tick runs at the end of updatePlayer, after the
+     release branch, so aimViz.shownErr is the ribbon that was on screen at
+     the instant the button came up. Recomputing it here is what let the cone
+     grow between the last drawn frame and the shot (the turn-into-the-shot's
+     extra error alone is up to 12.6 deg, four times a standing cone), so the
+     puck could land outside its own ribbon. A turn shot fires up to 0.42 s
+     later with the preview long gone, so it carries the cone it was started
+     with in player.forcedErr. */
+  const errMax=(player.forcedErr!=null)?player.forcedErr
+    :((typeof aimViz!=='undefined'&&aimViz&&aimViz.shownErr!=null)
+        ?aimViz.shownErr:computeAimError(aimRange));
   const roll=1+Math.floor(Math.random()*20);
   const yawErr=((roll-10.5)/9.5)*errMax;
   if(Math.abs(yawErr)>1e-4){
@@ -9073,7 +9209,10 @@ function fireShot(type,oneTimerInSpeed,gestInfo){
   padRumble(type==='slap'?0.85:(type==='wrist'||type==='backhand')?0.45:type==='chip'?0.35:0.22,
             type==='slap'?0.5:0.28,type==='slap'?170:90);
   if(typeof aimViz!=='undefined'&&aimViz)aimViz.fire({
-    type,dir:d.clone(),speed,launchAngle,aimRange,errMax,roll,power:pow
+    type,dir:d.clone(),speed,launchAngle,aimRange,errMax,roll,power:pow,
+    // the realized ribbon has to start where the puck did, or it re-draws
+    // itself a fifth of a metre off the flight it is claiming to show
+    ox:_aimFrame.ox,oz:_aimFrame.oz
   });
   puck.possessed=false;puck.control=0;
   /* SHOOTING IMPARTS VELOCITY. IT DOES NOT REPOSITION THE PUCK.
@@ -9435,15 +9574,39 @@ class AimVizFX{
     this.infoTex.needsUpdate=true;
   }
   /* live preview of the current stance shot (called every frame while aiming) */
-  updateAiming(type,aim){
+  /* live preview of the shot a release RIGHT NOW would fire — the delivery,
+     the speed, the arc, the origin and the cone all read from exactly the
+     state fireShot reads, so the ribbon on screen IS the shot.
+     `aim` is _avA, which _writePath uses as its own scratch vector, so every
+     component of it is copied out on the first line. Reading aim.x after the
+     path is written hands back the ribbon's last sample instead. */
+  updateAiming(type,aim,delivery){
     this.state='aiming';this.group.visible=true;
-    const hf=clamp((aim.y-CONFIG.iceHeight)/1.2,0,1);
-    const ang=type==='pass'?0:CONFIG.shotMaxLaunchAngle*hf;
-    /* speed prediction mirrors fireShot: the hold's live swipe power picks
-       the spot in each type's range (cursor height = elevation only now) */
-    const pow=gestPow();
+    const aimX=aim.x,aimY=aim.y,aimZ=aim.z;
+    const D=delivery||liveDelivery();
+    if(D.type&&D.type!=='none')type=D.type;
+    const pow=D.pow,curveT=D.curve;
+    const hf=clamp((aimY-CONFIG.iceHeight)/1.2,0,1);
+    /* mirrors fireShot's launch-angle branch exactly, saucer/chip included:
+       those take their loft from the swipe's curve DEPTH, not from aim
+       height, and they are the two deliveries whose shape differs most from
+       the wrister the preview used to draw for them. */
+    const ang=type==='pass'?0
+      :type==='saucer'?CONFIG.saucerAngleMin+(CONFIG.saucerAngleMax-CONFIG.saucerAngleMin)*curveT
+      :type==='chip'?CONFIG.chipAngleMin+(CONFIG.chipAngleMax-CONFIG.chipAngleMin)*curveT
+      :CONFIG.shotMaxLaunchAngle*hf;
+    // direction + range from wherever the puck actually is (shared with fireShot)
+    const dl=shotAimFrame(aimX,aimZ,_aimFrame);
+    const dx=_aimFrame.x,dz=_aimFrame.z,ox=_aimFrame.ox,oz=_aimFrame.oz;
     let v;
-    if(type==='slap'){const cf=clamp((player.slapChargeT||0)/CONFIG.slapWindupTime,0,1);
+    if(type==='saucer'||type==='chip'){
+      // range-targeted arc, solved the same way fireShot solves it
+      const range=clamp(dl,type==='saucer'?CONFIG.saucerMinRange:CONFIG.chipMinRange,
+                           type==='saucer'?CONFIG.saucerMaxRange:CONFIG.chipMaxRange);
+      const vCap=(type==='saucer'?CONFIG.saucerMaxSpeed:CONFIG.chipMaxSpeed)*(0.6+0.4*pow);
+      v=Math.min(Math.sqrt(range*9.8/Math.max(1e-3,Math.sin(2*ang))),vCap);
+    }
+    else if(type==='slap'){const cf=clamp((player.slapChargeT||0)/CONFIG.slapWindupTime,0,1);
       const ceiling=CONFIG.slapSpeedMin+(CONFIG.slapSpeedMax-CONFIG.slapSpeedMin)*cf;
       v=CONFIG.slapSpeedMin+(ceiling-CONFIG.slapSpeedMin)*pow;}
     else if(type==='backhand')v=CONFIG.backhandSpeedMin+(CONFIG.backhandSpeedMax-CONFIG.backhandSpeedMin)*pow;
@@ -9451,27 +9614,35 @@ class AimVizFX{
     else v=CONFIG.wristSpeedMin+(CONFIG.wristSpeedMax-CONFIG.wristSpeedMin)*pow;
     v*=(player.stamShotMul||1);
     this.power=0.4+0.6*pow;
-    let dx=aim.x-player.pos.x,dz=aim.z-player.pos.z;
-    const dl=Math.hypot(dx,dz)||1;dx/=dl;dz/=dl;
+    /* THE CONE THE SHOT WILL BE ROLLED INSIDE. Computed here and stored, and
+       fireShot then uses this number rather than recomputing its own — so the
+       drawn ribbon is the envelope, not an estimate of it. The turn-into-the-
+       shot term is included by prediction, which is what stops the cone
+       quadrupling at the instant of release. */
+    const err=computeAimError(dl)+predictTurnShotErr(aimX,aimZ);
+    this.shownErr=err;
     /* FULL predicted flight: the cursor gives direction + elevation only —
        the ribbon runs until it actually hits something (boards, or the net
        when the arrival height is on net); after touchdown the y-profile
        hugs the ice, i.e. the slide is part of the prediction */
-    const {R}=this._clampRange(player.pos.x,player.pos.z,dx,dz,999,v,ang);
-    this._writePath(player.pos.x,player.pos.z,dx,dz,v,ang,R);
-    /* live aim cone, from the RETICLE distance (dl), not the full ribbon
-       length R — the lateral spread drawn on the ribbon/landing circle
-       still uses R, since a small angular error genuinely swings wider the
-       further the puck actually flies (see computeAimError). */
-    this.lastSpread=Math.tan(computeAimError(dl))*R;
-    if(shotInfoOn)this._drawType(type==='wrist'?'WRIST SHOT':type==='backhand'?'BACKHAND':type==='slap'?'SLAPSHOT':'PASS');
+    const {R}=this._clampRange(ox,oz,dx,dz,999,v,ang);
+    this._writePath(ox,oz,dx,dz,v,ang,R);
+    /* the cone is angular, so its lateral half-width grows with how far the
+       puck actually flies — measured at the ribbon's END, where the ribbon
+       and the landing circle are drawn. */
+    this.lastSpread=Math.tan(err)*R;
+    if(shotInfoOn)this._drawType(type==='wrist'?'WRIST SHOT':type==='backhand'?'BACKHAND'
+      :type==='slap'?'SLAPSHOT':type==='chip'?'CHIP':type==='saucer'?'SAUCER PASS':'PASS');
   }
   /* the realized shot: freeze ribbon onto the actual trajectory + info */
   fire(info){
     const d=info.dir,hl=Math.hypot(d.x,d.z)||1;
     const dx=d.x/hl,dz=d.z/hl,ang=Math.max(Math.asin(clamp(d.y,-1,1)),0),v=info.speed;
-    const {R}=this._clampRange(player.pos.x,player.pos.z,dx,dz,999,v,ang);
-    this._writePath(player.pos.x,player.pos.z,dx,dz,v,ang,R);
+    // the shot's own origin (the puck), not the body — see shotAimFrame
+    const ox=(info.ox!==undefined)?info.ox:player.pos.x;
+    const oz=(info.oz!==undefined)?info.oz:player.pos.z;
+    const {R}=this._clampRange(ox,oz,dx,dz,999,v,ang);
+    this._writePath(ox,oz,dx,dz,v,ang,R);
     this.lastSpread=Math.tan(info.errMax||0)*R;
     if(shotInfoOn)this._drawInfo(info);
     this.lastInfo=info;
@@ -9506,10 +9677,30 @@ class AimVizFX{
     }
     /* drive the aiming state from the live game each frame */
     const aiming=(mouseCtl.active||padOn)&&shootHeld&&player&&player.shotType&&player.shotType!=='none'&&(player.diveT||0)<=0;
+    /* A TURN-INTO-THE-SHOT IS STILL AIMING. The buttons are already up, so
+       `aiming` above is false, but the shot has not happened yet — it lands up
+       to turnShotMaxDur later, out of the pivot. Leaving the ribbon to fade
+       through the turn meant the last thing drawn was a ribbon from where the
+       puck was before the spin, and then the puck left from somewhere else in
+       a cone four times as wide. Keep previewing: the aim is frozen (it was
+       captured at release), the origin and the cone track the pivot, and the
+       shot fires into the ribbon that is on screen when it goes. */
+    const ts=player&&player.turnShot;
     if(aiming){
       if(mouseCtl.active)mouseTPSPoint(_avA);else padShotAimPoint(_avA);
       this.updateAiming(player.shotType,_avA);
-    }else if(this.state==='aiming')this.state='cancel'; // released with no fire event routed here
+    }else if(ts){
+      _avA.copy(ts.aim);
+      this.updateAiming(ts.type,_avA,{type:ts.type,
+        curve:ts.info&&ts.info.curve!==undefined?ts.info.curve:0.35,
+        pow:ts.info&&ts.info.pow!==undefined?ts.info.pow:0.5});
+    }else{
+      /* nothing is being previewed, so there is no drawn cone for fireShot to
+         be bound by — a one-timer, a pad swat or a touch tap falls back to
+         computeAimError, exactly as before. */
+      this.shownErr=null;
+      if(this.state==='aiming')this.state='cancel'; // released with no fire event routed here
+    }
     /* info text: independent timeline — fades in fast after release, holds,
        then fades out slightly AFTER the ribbon has vanished */
     if(this.infoShow){
@@ -9532,10 +9723,16 @@ class AimVizFX{
     /* apply fade + width to the ribbon layers — flares from a fixed base
        radius (power-scaled, as before) at the player out to a wider end
        radius set by the live aim cone's lateral spread (this.lastSpread) */
-    const w=0.85+0.5*(this.power||0.6);
+    /* THE WIDTH IS THE CONE AND NOTHING ELSE. It used to also scale with shot
+       POWER, which reads as "this shot is less accurate" while meaning "this
+       shot is harder" — two different things wearing one cue, and it moved
+       whenever the swipe speed moved. The base radius is now fixed, so every
+       millimetre the ribbon opens up is aim error you can actually do
+       something about: stand still, stop carving, square up, shorten the
+       range, and watch it close. */
     this.mats.forEach((m,i)=>{m.uniforms.uFade.value=this.fade;m.uniforms.uTime.value=this.t;
-      m.uniforms.uRadiusStart.value=AVZ_R*this.radMul[i]*w;
-      m.uniforms.uRadiusEnd.value=(AVZ_R*w+(this.lastSpread||0))*this.radMul[i];});
+      m.uniforms.uRadiusStart.value=AVZ_R*this.radMul[i];
+      m.uniforms.uRadiusEnd.value=(AVZ_R+(this.lastSpread||0))*this.radMul[i];});
     /* landing circle: flat footprint on the ice at the ribbon's end point,
        radius = the lateral spread at that range — "the general area the
        puck might go," scaling with the same fade lifecycle as the ribbon */
@@ -9892,7 +10089,7 @@ function mouseTPSPoint(out){
   const chestPt=_tpsPlanePt.copy(player.pos).addScaledVector(up,CONFIG.shootPlaneHeight);
   const proj=projectToScreen(chestPt);
   const dyPixels=proj.y-aimClientY(); // positive = aim cursor sits above the player on screen = aiming up
-  const heightFactor=clamp(dyPixels/CONFIG.shotAimVerticalPixels,0,1);
+  const heightFactor=CONFIG.aimLoftFromScreen?clamp(dyPixels/CONFIG.shotAimVerticalPixels,0,1):0;
   out.set(player.pos.x+dx,CONFIG.iceHeight+heightFactor*1.2,player.pos.z+dz);
 }
 const _tpsPlanePt=new THREE.Vector3();
@@ -11544,8 +11741,14 @@ function updatePlayer(dt){
          and cleared straight after, so it can never leak into a later shot. */
       player.forcedAim=ts.aim;
       player.turnShotErr=Math.min(CONFIG.turnShotErrCap,ts.off*CONFIG.turnShotErrPerRad);
+      /* the cone that was ON SCREEN this frame — the preview keeps running
+         through the pivot (see aimViz.tick), so this is live rather than the
+         one captured at button-up. ts.err is the fallback for a release with
+         no preview running at all. */
+      player.forcedErr=(typeof aimViz!=='undefined'&&aimViz&&aimViz.shownErr!=null)
+        ?aimViz.shownErr:ts.err;
       fireShot(ts.type,undefined,ts.info);
-      player.forcedAim=null;player.turnShotErr=0;
+      player.forcedAim=null;player.turnShotErr=0;player.forcedErr=null;
       player.turnShot=null;player.slapChargeT=0;player.shotLoadT=0;
     }
   }

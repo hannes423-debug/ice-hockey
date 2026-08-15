@@ -3,6 +3,9 @@
 #
 #   ./ih25_probe.sh ih25_contact_probe.js
 #   TARGET=ice_hockey.html ./ih25_probe.sh ih25_collide_probe.js   # the original
+#   WINDOW=780,1688 DSF=2 ./ih25_probe.sh ih25_menu_probe.js      # a phone
+#     (headless refuses to make a window narrower than ~500 px, so a phone
+#      viewport has to be reached through the device scale factor instead)
 #
 # The swiftshader flags are not optional: with no GL context the page reports a
 # bare "Script error. @:0" and half-executes, which reads exactly like a broken
@@ -26,7 +29,8 @@ sleep 1
 timeout 180 google-chrome \
   --headless=new --disable-gpu-sandbox --no-sandbox \
   --enable-unsafe-swiftshader --use-angle=swiftshader --use-gl=angle \
-  --user-data-dir="$TMP/prof" --window-size=1280,800 \
+  --user-data-dir="$TMP/prof" --window-size="${WINDOW:-1280,800}" \
+  --force-device-scale-factor="${DSF:-1}" \
   "http://localhost:$PORT/_ih25probe.html" >"$TMP/chrome.log" 2>&1 &
 CHROME=$!
 
