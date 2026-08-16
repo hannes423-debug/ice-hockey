@@ -41,6 +41,7 @@
 # re-include anything inside an excluded DIRECTORY.
 /tools/*
 !/tools/menu_probe.sh
+!/tools/vendor_fonts.py
 /armtest/
 /reference/*
 !/reference/rink_reference_2026-08-13.png
@@ -54,6 +55,13 @@
 
 __pycache__/
 *.pyc
+
+# Desktop build. `npm run build:appimage` writes dist/ and it is a BUILD
+# ARTIFACT, not a second codebase — the AppImage is cut from the same
+# published files GitHub Pages serves, and a release attaches it to a tag.
+# node_modules is ~250 MB of Electron.
+/node_modules/
+/dist/
 
 # Pre-change backups live alongside the real files. They must never be
 # committed, and while untracked they bury genuine changes in git status, which
