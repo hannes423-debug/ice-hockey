@@ -3,7 +3,7 @@
  * fetch('/PROBE?...') so the result lands in the http.server access log.
  *
  * Asserts, in order:
- *   1  the payload carries all 28 clips and every new one has real keys
+ *   1  the payload carries all 29 clips and every new one has real keys
  *   2  every new binding in attachSkaterClips resolved to an action
  *   3  stanceWanted's hysteresis holds a lean parked on the boundary
  *   4  a lean crossing the band plays the CORRECT transition clip, and the
@@ -58,7 +58,11 @@
     /* ---- 1  payload ---- */
     const clips=(typeof SKATER_CLIPS!=='undefined'&&SKATER_CLIPS)?SKATER_CLIPS:[];
     const names=clips.map(c=>c.name);
-    chk('payload_28_clips',clips.length===28,'got '+clips.length);
+    /* 28 until the 2026-08-17 IK delivery added BackHandShot (merge_ik2.py).
+       The count is asserted rather than bounded so that a clip vanishing and
+       another arriving cannot cancel out. */
+    chk('payload_29_clips',clips.length===29,'got '+clips.length);
+    chk('payload_has_backhand',names.indexOf('BackHandShot')>=0,'BackHandShot');
     let missing=NEW11.filter(n=>names.indexOf(n)<0);
     chk('payload_has_all_11_new',missing.length===0,'missing '+missing.join(','));
     /* every new clip must carry real animation, not a single static key. The

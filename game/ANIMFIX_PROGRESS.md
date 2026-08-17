@@ -1279,3 +1279,102 @@ and `.bak_pre_rawarms0817` (before the payload rebuild). Full write-up in
   off the rendered MESH, so the mesh must be scaled to the resolved shaft, not to
   `CONFIG.stickLen`; and the build is 1.081× Blender, which reads as a uniform
   8% bug if you forget it.
+
+---
+
+# 2026-08-17 (second pass) — the "IK Rig only" blend: what it actually delivered
+
+Source: `hasa1992 - 3D Low Poly with Rig(2).rar` in `~/Lataukset` (three
+byte-identical downloads, md5 `71fa7e51…`), holding one file dated 2026-08-17
+07:11, now kept at `~/Työpöytä/Hoki animations/hasa1992 - 3D Low Poly with IK
+Rig only.blend`. **7-Zip 23.01 cannot read it** — RAR5 written by RAR 7.x,
+"Unsupported Method". `unrar` 7.0.7 reads it; there is no sudo here, so it was
+unpacked from the `.deb` with `dpkg-deb -x` into the scratchpad.
+
+30 actions, no `FK*` conversion copies, the same 73-bone metarig with `stick`
+and both `handIK` bones CHILD_OF it. **13 clips that existed only on the non-IK
+rig now exist on the IK rig** — the whole 08-15 stance pack, both spinoramas,
+both windmill dekes, and a new BackHandShot. The three stance idles were
+renamed (`1IdleL/1IdleN/1IdleR` → `0IdleForeHand/0IdleNeutral/0IdleBackHand`)
+and are byte-identical to their old selves at the raw fcurve level.
+
+## What was measured, and with what
+
+New scripts, all tracked: `dump_fcurves.py` (raw fcurve dump for blend-vs-blend
+diff), `ikmap2.py` (names + the posed/unposed split), `cmp_ik2.py`,
+`merge_ik2.py`, `stancepop.py`. Probe: `game/bhprobe.sh` + `bhprobe.js`.
+
+- **The six clips in ANIMATOR_ASK.txt are byte-identical to the Aug-4 file.**
+  Raw fcurve level, every curve, every key: `maxabs 0.000000000`. `stickpose.py`
+  still calls them NEVER KEYED. WalkForward, WalkBackward, Acceleration,
+  GlideForward, Stop, StopHockey were not touched. **The ask stands.**
+- **Sixteen payload clips already carried the animator's arms exactly.**
+  `cmp_ik2.py` reports `armMax 0.000` against the new export — including all
+  seven that the 08-17 first pass rebuilt through `merge_raw.py` +
+  `IH_GRIP_FRAMES`. That is an independent confirmation of that work from a
+  file it was not derived from: the hand-locked grip reproduces the animator's
+  own arms bit for bit. Non-arm bones agree to ≤0.041 deg, so the rigs are
+  interchangeable.
+- **Only one clip was genuinely new and usable: `BackHandShot`** (blade
+  -0.061..0.878 m in Blender, i.e. it reaches the ice and lifts).
+
+## What shipped
+
+`merge_ik2.py` APPENDS rather than replaces — the 28 shipped clips are copied
+through untouched, sampler bytes and all, and BackHandShot is added from
+`ik_anim2.glb`. Payload 28 → 29 clips, ANIM_B64 1443408 → 1485352 chars,
+html 3.43 → 3.47 MB. Backup `ice_hockey.html.bak_pre_ik2_0817`.
+
+`type==='backhand'` had been a first-class shot in the sim for a long time —
+its own speed range, follow duration and HUD label — and was firing the
+FOREHAND wrist-shot clip for want of anything else. `A.backhandShot` is bound
+in `attachSkaterClips` and `fireShot` picks it, in the same `||`-to-`shoot`
+shape the slap shot already used.
+
+**`bhprobe.sh` → 7/7 PASS, and 4/4 FAIL on `ice_hockey.html.bak_pre_ik2_0817`**
+with both controls (wrist still Shooting, slap still SlapShot) green on BOTH
+builds. Regressions: `stickprobe` 0 failures, `packprobe` 0, `simprobe` 0,
+`vsprobe` 0. `packprobe.js`'s `payload_28_clips` became `payload_29_clips` plus
+a `payload_has_backhand` row — the count is asserted, not bounded, so a clip
+vanishing and another arriving cannot cancel out.
+
+Trap worth keeping: **`fireShot(type, oneTimerInSpeed, gestInfo)` takes the TYPE
+first and acts on the global `player`** — it does not take an entity. The first
+version of the probe passed `player` as the type, which is truthy, so every
+branch fell through and all three shot types reported `Shooting`. The slap
+control failing was the tell that the probe was wrong, not the build.
+
+## What was deliberately NOT taken, and the defect that found
+
+The four transitions that touch Neutral, and IdleN, have authored versions in
+this blend and were **left on the old bake**. Neutral is still a stickless
+arms-at-the-sides pose there (blade 1.04 m up), so taking them would put a
+floating stick on the most-used idle in the game. Same reason `merge_raw.py`
+left them baked.
+
+But measuring that decision turned up a real, already-shipped defect.
+`stancepop.py` compares each transition's first and last frame against the
+stance loop it hands over to:
+
+| transition | startArm | endArm |
+|---|---|---|
+| IdleNeutralToForeHand | 4.5 | **166.5** |
+| IdleNeutralToBackHand | 3.7 | **175.7** |
+| IdleForeHandToNeutral | **166.4** | **175.6** |
+| IdleBackHandToNeutral | **175.7** | **139.8** |
+| IdleForeHandToBackHand | 0.03 | 0.00 |
+| IdleBackHandToForeHand | 0.00 | 0.02 |
+
+Body bones agree to 0.036 deg on all six — it is purely the arms. The two
+F↔B transitions are clean because they AND IdleL/IdleR are all authored; the
+four Neutral ones disagree because they are baked and the stances they hand to
+are not. **This is the cost of the 08-16 partial swap** and it cannot be fixed
+by a bake: swapping the four just moves the 166 deg from the forehand end to
+the neutral end. It needs Neutral re-posed holding a stick, at which point all
+five drop in with no processing. `ANIMATOR_ASK.txt` now says so.
+
+Severity is bounded and stated honestly: `stanceTick` plays transitions through
+`playOnce`, which sets `oneShot` → `wantOff` → `handleBlend` fades to 0, so the
+CLIP owns the arms during the transition and the IK owns them at both ends.
+The seam is cross-faded rather than a hard snap. **It has not been judged by
+eye.**

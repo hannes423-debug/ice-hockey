@@ -1,5 +1,5 @@
 TO THE ANIMATOR - what we found in the two blends, and the one thing we need
-updated 2026-08-17
+updated 2026-08-17 (second pass, after the "IK Rig only" file)
 
 Short version: your note about the two files solved the grip, the newer pack is
 now in the game using your own stick, and there is exactly ONE thing left that
@@ -72,3 +72,46 @@ ONE SMALL NOTE, NO ACTION NEEDED
 ForeHand is byte identical to IdleL, BackHand to IdleR, and Neutral to IdleN in
 the newer file. We checked at the raw curve level, so they are duplicates made
 in Blender rather than an export fault. We just use one of each.
+
+
+================================================================================
+2026-08-17, SECOND PASS - "hasa1992 - 3D Low Poly with IK Rig only.blend"
+================================================================================
+
+Thank you for the IK-only file. Measured in full. What it confirmed, what it
+added, and what is still open:
+
+CONFIRMED. Sixteen clips in the game now match your arms EXACTLY - 0.000
+degrees, every arm bone, every frame. That includes the seven stance clips we
+had rebuilt by hand, so the grip we measured off your file was right and the
+game is showing your work unaltered. Non-arm bones agree to 0.04 degrees, so
+the two rigs are interchangeable.
+
+ADDED. BackHandShot is new and it is in the game as of today. The backhand has
+always been its own shot in the sim - its own speed, its own release timing -
+but it was playing the forehand animation for want of a backhand one. It now
+plays yours. Nothing had to be processed: the stick is keyed, the blade reaches
+the ice, it dropped straight in.
+
+STILL OPEN - THE SAME SIX. WalkForward, WalkBackward, Acceleration,
+GlideForward, Stop, StopHockey are byte-for-byte identical to the versions in
+the August 4 file. We checked at the raw curve level, so this is not an export
+or naming problem - those six were not touched. They are still the ordinary
+skating states, so they are still on screen more than anything else, and they
+still hold no stick. The request is unchanged and is the one above: re-pose the
+ARMS, starting each from a stance idle that already holds the stick, the same
+way you made the newer pack. Keying the `stick` control does not do it.
+
+ONE MORE THING WE CAN NOW MEASURE, AND IT RAISES NEUTRAL'S PRIORITY.
+Neutral being stickless is no longer only a cosmetic gap. Because ForeHand and
+BackHand are yours and Neutral is still ours, the four transitions that touch
+Neutral disagree with the stance they hand over to by 140 to 176 degrees in the
+arms, where the two ForeHand<->BackHand transitions agree to 0.03. The body
+agrees to 0.04 everywhere, so it is purely the arms. In the game the transition
+is cross-faded, which softens it, but it is a real seam and it is in the most
+ordinary thing a player does: shifting stance while standing still.
+
+Re-posing Neutral as a stick-carrying stance fixes all five clips at once
+(0IdleNeutral and the four Neutral transitions), and like the seven above they
+would need nothing from us. That is now the highest-value single item in this
+file, ahead of the six - though the six are still what is most visible.

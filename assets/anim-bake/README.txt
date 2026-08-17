@@ -489,3 +489,68 @@ back toward the clip's own blade when it is further than CONFIG.animReachLimit
 from it. The player still steers, he just cannot be commanded past what the
 animation can reach. Inert on every clip that owns no stick, and at
 animReachLimit 0 the old behaviour returns exactly.
+
+
+================================================================================
+2026-08-17 SECOND PASS - "hasa1992 - 3D Low Poly with IK Rig only.blend"
+================================================================================
+
+Delivered 2026-08-17 07:11 in "hasa1992 - 3D Low Poly with Rig(2).rar". Kept at
+~/Työpöytä/Hoki animations/. RAR5 from RAR 7.x: 7-Zip 23.01 says "Unsupported
+Method", use unrar 7.x (no sudo here - apt-get download unrar && dpkg-deb -x).
+
+30 actions, no FK* copies. Same 73-bone metarig, `stick` + both handIK CHILD_OF
+it. 13 clips that existed only on the non-IK rig are now on the IK rig.
+
+PIPELINE (all of it re-runnable):
+
+    blender -b '<IK only>.blend' -P inspect_nonik.py       # objects/bones/actions
+    blender -b '<IK only>.blend' -P stickpose.py           # posed vs never-keyed
+    blender -b '<IK only>.blend' -P dump_fcurves.py -- new.json
+    blender -b '<Aug-4 IK>.blend' -P dump_fcurves.py -- old.json
+    blender -b '<IK only>.blend' -P export_ik.py -- ik_anim2.glb
+    python3 cmp_ik2.py            # arms vs the shipped payload, per clip
+    python3 merge_ik2.py          # -> anim_ik2.b64  (APPENDS, does not replace)
+    python3 splice.py anim_ik2.b64
+    python3 stancepop.py          # do the transitions land on their stances?
+    cd ../../game && ./bhprobe.sh 600x600
+
+FINDINGS, all measured:
+
+  * THE SIX CLIPS FROM ANIMATOR_ASK.txt ARE BYTE-IDENTICAL TO THE AUG-4 FILE.
+    Raw fcurve level, maxabs 0.000000000, and stickpose.py still calls them
+    NEVER KEYED. WalkForward WalkBackward Acceleration GlideForward Stop
+    StopHockey were not touched. Do not go looking for an export or naming
+    fault - dump_fcurves.py compares the SOURCE CURVES, not a sampled export,
+    which is the only way to tell those apart (see the 08-15 duplicate-clip
+    lesson).
+
+  * 16 PAYLOAD CLIPS ALREADY MATCH THE ANIMATOR'S ARMS TO 0.000 DEG. cmp_ik2.py.
+    That covers all seven the 08-17 first pass rebuilt via merge_raw.py +
+    IH_GRIP_FRAMES, from a file those offsets were NOT derived from. The
+    hand-locked grip reproduces his arms bit for bit. Non-arm bones <=0.041 deg.
+
+  * ONE GENUINELY NEW USABLE CLIP: BackHandShot, blade -0.061..0.878 m. Shipped.
+    Everything else new is either already in (0.000 deg) or unposed.
+
+  * 2TurnTightL differs from the Aug-4 version by ONE duplicated end keyframe
+    with identical values. Functionally identical; not worth re-sourcing.
+
+  * THE THREE STANCE IDLES WERE RENAMED, not re-authored: 1IdleL/1IdleN/1IdleR
+    -> 0IdleForeHand/0IdleNeutral/0IdleBackHand, byte-identical. ikmap2.py
+    carries the map; merge_ik.py's bare name[1:] is NOT enough on this file.
+
+WHY THE NEUTRAL CLIPS WERE LEFT BAKED, AND WHAT THAT REVEALED:
+
+Neutral is STILL a stickless arms-at-the-sides pose (0IdleNeutral blade 1.04 m
+up), so IdleN and the four transitions that touch Neutral stay on the bake -
+taking them would float the stick on the most-used idle in the game.
+
+stancepop.py then measured what that partial sourcing costs: the four Neutral
+transitions disagree with the stance loop they hand over to by 140-176 deg in
+the ARMS (body 0.036 deg), while the two ForeHand<->BackHand transitions agree
+to 0.03 deg because both ends are authored. Swapping the four would only move
+the disagreement from the forehand end to the neutral end. The fix is the
+animator re-posing Neutral holding a stick; then all five drop straight in.
+
+SP_MIN/SP_MAX and the axR/axL notes from the 08-16 pass are unchanged.
