@@ -172,6 +172,15 @@ pre = "<script>\nwindow.IH25 = " + geo_js + ";\n" + (HERE / "ih25_pre.js").read_
 
 patch("buildRoom();", "IH25.tagArena(buildRoom);", "arena: tag it so the backdrop can hide it")
 
+# The source is served from game/, the published build sits at the repo root,
+# and vendor/ is at the root — so the one relative path in the file has to
+# differ between them. Rewriting it here (rather than keeping a second copy of
+# three.js under game/) means the discrepancy is stated once and dies loudly if
+# the tag is ever edited, which is the whole contract of this script.
+patch('<script src="../vendor/three.min.js">',
+      '<script src="vendor/three.min.js">',
+      "vendor: three.js path is root-relative in the published copy")
+
 mask_b64 = base64.b64encode(MASK.read_bytes()).decode("ascii")
 bd_b64 = base64.b64encode(BOARDS.read_bytes()).decode("ascii")
 post = ("<script>\nwindow.IH25_MASK_URL = 'data:image/png;base64," + mask_b64 + "';\n"

@@ -49,14 +49,22 @@ MANIFEST=(
 # are edited in place and this script must never touch them. Listed so that a
 # file appearing in deploy/ and in neither list gets flagged rather than
 # silently ignored.
+#
+# vendor/ (three.js + GLTFLoader) and fonts/ are here as DIRECTORIES rather
+# than files: they are published, they have no source elsewhere in the tree,
+# and they are what makes the site — and the packaged desktop build — run with
+# no third-party request at all. Regenerate fonts/ with tools/vendor_fonts.py.
 DEPLOY_ONLY=(index.html style.css script.js menu-player.js README.md .gitignore
-             img/locker-room.jpg)
+             img/locker-room.jpg vendor fonts)
 
 # Source files that happen to sit at the root. Since the merge, the root holds
 # both the published site AND project-level source, so "a root-level file in
 # neither list" is no longer automatically a mistake. These are not published;
 # GitHub Pages will serve them, but nothing links to them.
-ROOT_SOURCE=(deploy.sh MOVE-MANIFEST.txt)
+# package.json is the DESKTOP build's manifest (electron/ + electron-builder).
+# It sits at the root because that is where the site is, and the desktop build
+# wraps the site rather than copying it — see DESKTOP.md.
+ROOT_SOURCE=(deploy.sh MOVE-MANIFEST.txt package.json package-lock.json)
 
 # ------------------------------------------------------------------- colour --
 if [ -t 1 ]; then R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; X=$'\e[0m'

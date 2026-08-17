@@ -958,3 +958,324 @@ the blade planted without floating it in the crouched poses.
 
 NOT DEPLOYED. Live is still 55ae7c4 (slapshot split + Cock-Cola Heroes + crest,
 original short arms).
+
+---
+
+# 2026-08-15 — the stance-graph pack (11 clips) + full wiring
+
+Source: `~/Lataukset/hasa1992 - 3D Low Poly with Rig(1).rar`. Payload 17 → 28
+clips. `ice_hockey.html` 3.49 → 4.22 MB. Backup: `.bak_pre_pack0815`.
+
+**Probes: `./packprobe.sh` 27/27 PASS. Regressions green — `./simprobe.sh`
+22 PASS / FAILURES=0, `./vsprobe.sh` 45/45.** Bake pipeline and every
+measurement behind it: `assets/anim-bake/README.txt` (the 08-15 section).
+
+## What the pack actually was
+
+- **No stick animation.** The blend carries a 6-bone stick armature with stick
+  geometry and **zero** animation curves on it — no constraint to the player,
+  no action touching its bones. The old *IK* blend does animate a `stick` bone,
+  but it is byte-identical to the 08-04 one and has none of the new clips. The
+  grip is still synthesised by the bake.
+- **3 of the 14 "new" clips are renames.** `0IdleNeutral`/`0IdleForeHand`/
+  `0IdleBackHand` are **byte-identical** (maxabs 0.000000) to the shipped
+  `IdleN`/`IdleL`/`IdleR`. **ForeHand == IdleL, BackHand == IdleR.**
+- The rig is unchanged (rest pose and all 17 shared clips agree to 0.064 deg).
+- The 11 new clips form a **closed stance graph**, measured by clustering every
+  clip's first and last frame against the stance poses — all within 0.05 deg.
+
+## The blade is no longer pinned to the ice
+
+The old bake solved shaft elevation *from* `tip.y == ICE` and pulled the tip to
+a fixed forehand offset. Under that model ForeHand and BackHand are the same
+stance, and the windmill's lift is flattened. Now the shaft carries a free
+elevation and the tip follows a **per-frame target derived from the authored
+hands**, with `tip.y >= ICE` as a constraint. Result: ForeHand→BackHand crosses
+lat **+0.73 → −0.33**, the windmills lift to **0.83/0.91 m**.
+
+**Neutral is the one invented pose** — neither source has a valid stick there
+(authored hands put the blade 0.91 m up, the shipped bake 0.56 m up and behind).
+It is derived as the ForeHand/BackHand midpoint dropped onto the ice.
+
+## The three stances were RE-BAKED in place
+
+So a transition solved to the authored path lands on a stance solved the same
+way. This is a **grip** re-bake — *not* the arm-lengthening re-bake played and
+rejected on 08-04.
+
+Worth knowing: **the shipped payload's grip bake is present but does not satisfy
+its own constraints** — 52-89 deg grip-axis error and 0.48-0.63 m hand spacing
+against an SP_MAX of 0.44. The re-baked 14 measure **1.565 deg worst** and
+0.31-0.44 m. The 11 untouched old clips still carry the loose bake.
+
+## Wiring
+
+- **`stanceTick`** is a layer on top of `LOWER_STATES`, not six more rows: a
+  transition is a 0.833 s *commitment*, and the table is a pure per-frame
+  function that would re-select it every frame. `playOnce` already means
+  "commit, suspend the graph, come back" — so transitions are one-shots.
+  Same hysteresis band as `idle_l`/`idle_r`, because without it a lean parked on
+  the boundary would launch a fresh transition on every crossing.
+- **`ihTryDekeClip`** — the swing magnitude picks the move, so no new input had
+  to be invented: `dekeMinSwing` 0.3 = the reach boost that was always there,
+  `windmillSwing` 0.45 = windmill deke, `spinoramaSwing` 0.9 = spinorama. Gated
+  on actually carrying the puck.
+- **The moves own the arms for free.** `playOnce` sets `ent.oneShot`, which
+  drives `poseStick`'s `wantOff` → `handleBlend` → 0, and the arm IK lives
+  *inside* `applyStickHandle`, which only runs while that blend is non-zero.
+  Probe measures handleBlend 1 → 0.008. This only works because the clips are
+  grip-baked: poseStick re-reads the grip off the posed fists, so the rendered
+  stick lands where the animator drew it.
+
+## Open / not done
+
+- **NOT deployed.** `./deploy.sh` not run; nothing shipped.
+- **Not judged by eye by the user** — every number here is headless.
+- `SpinoramaL` carries **0.628 m of horizontal root travel**, ~2x the largest
+  shipped clip (StopHockey 0.336). Kept as authored, because every shipped clip
+  keeps its root motion and the sim owns position anyway — but it is the one
+  thing most likely to read as the skater sliding off their own position.
+- `IdleForeHandPulledBack` is bound (`A.idleFPulled`) but **nothing selects it**.
+- Transitions into/out of Neutral end with the blade ~0.14 m off the ice (the
+  solver compromising against arms that are genuinely at the sides), against
+  0.02 for the ForeHand/BackHand ends.
+
+---
+
+## 2026-08-16 — the animator's grip, from the IK blend (9 clips now authored)
+
+Prompted by the animator's own note on the `Työpöytä/Hoki animations/` delivery:
+*"there are 2 versions of the animations, one with FK at the start and one
+without... ignore the FK ones as I only use that to convert into non IK rig"*,
+and *"the stick should also be there moving correctly."*
+
+He is right, and the FK half of the note is the smaller half.
+
+**The IK rig has a stick, and the fists are parented to it.** `metarig` carries
+a 73rd bone `stick`; the 6-bone stick armature is CHILD_OF it; and `handIK.L`
+and `handIK.R` are CHILD_OF it as well. Both hands ride the authored shaft by
+construction. **The conversion to the non-IK rig is what threw the stick away** —
+63 bones, no `stick`, no constraints — so every "the pack does not hold a stick"
+note in this file has really been describing the conversion, not the animation.
+The whole 2026-08-01 grip bake exists to re-invent something the source had.
+
+### What shipped
+
+`ANIM_B64` rebuilt: **9 of the 28 clips are now the animator's own arms**, taken
+straight from the IK blend with the constraints baked by the exporter. Payload
+2.25 MB → 1.56 MB of base64 (the rebuild also drops 217 accessors that earlier
+in-place rewrites had orphaned); `ice_hockey.html` 4.22 → 3.54 MB. Backup at
+`ice_hockey.html.bak_pre_ikgrip0816`.
+
+Authored now: `IdleL IdleR Shooting WalkForwardWithPuck SlapShot TurnPunchL
+TurnPunchR TurnTightL TurnTightR`.
+
+Probes green after the swap: `packprobe.sh` 27/27, `simprobe.sh` FAILURES=0,
+`vsprobe.sh` 45/45.
+
+**DEPLOYED 2026-08-16 as `7eacd14`** and verified live (`game.html` md5 matches
+the working copy; the served `ANIM_B64` is byte-identical to `anim_ik.b64`).
+Remember that **the published `game.html` is the 2.5D build, not
+`ice_hockey.html`** — `make25d.py` had to be re-run first or the ship would
+have published a prototype built from a stale base. It had not been re-run since
+08-15 10:28, so this deploy carries the 08-15 stance pack as well as the IK grip.
+All 32 patches matched, `verify_mask.py` FAILURES=0, `ih25_frame_probe`
+ZONE FRAMING OK, `ih25_cone_probe` RIBBON IS THE SHOT.
+
+The same commit finally published a previous session's vendoring: `vendor/`
+(three.js r128 + GLTFLoader) and `fonts/` were untracked while the regenerated
+`game.html` and `index.html` already pointed at them root-relative — shipping
+without them would have 404'd three.js and left a black page. All 8 woff2 files
+and both scripts verified 200 on the live host.
+
+### Why only 9 of 16
+
+`assets/anim-bake/stickpose.py` evaluates the stick armature in Blender and
+reads the blade tip's world height on every frame (ice z≈0.0, the toe rides at
+z≈0.10). Seven clips — **IdleN, WalkForward, WalkBackward, Acceleration,
+GlideForward, Stop, StopHockey**, i.e. the earliest batch, from before the stick
+control existed — never had the `stick` bone keyed. It sits at its rest
+transform, horizontal at chest height, and because the fists are CHILD_OF it
+they ride it up there: tip **0.75–1.24 m off the ice for the whole clip**.
+Shipping those would hang a floating horizontal stick on the most-used states in
+the game. They keep the old bake. `IKSET=all python3 merge_ik.py` takes them
+anyway, for an A/B only.
+
+### The measurements that made the swap safe
+
+- `cmp_ik.py` — rest poses identical to **0.000000 m**, every non-arm bone
+  agrees with the shipped payload to **≤ 0.038 deg**, and the six arm bones
+  differ by **125–180 deg**. That difference is the grip: his against ours.
+- `measure_ik.py` — against the animator's own `stick` bone, which nothing in
+  this pipeline touches: grip tunnels **0.02–0.06 m** off it (one shaft radius),
+  the shaft line **2–7 deg** off it, hand spacing constant within a clip. That
+  last one is what CHILD_OF predicts, so it is a check on the story as well as
+  the numbers.
+- `verify_ik.py`, lower fist vs the shaft, off the payload alone: **3.3–9.9 deg
+  on the 9 authored clips.**
+
+### Before / after, lower fist against the shaft (`verify_ik.py`, mean per clip)
+
+The shipped payload was far worse than the 08-15 note implied: **13 of its 28
+clips had the lower fist 65-88 deg off its own shaft.** Seven of those are now
+the animator's.
+
+| clip | shipped | now | source |
+|---|---|---|---|
+| Shooting | 64.7° | **9.2°** | authored |
+| WalkForwardWithPuck | 81.4° | **5.2°** | authored |
+| SlapShot | 73.6° | **8.8°** | authored |
+| TurnPunchL | 82.8° | **3.3°** | authored |
+| TurnPunchR | 80.0° | **3.8°** | authored |
+| TurnTightL | 83.9° | **3.8°** | authored |
+| TurnTightR | 74.9° | **3.8°** | authored |
+| IdleL | 0.03° | 9.3° | authored (was already a good bake) |
+| IdleR | 0.05° | 4.4° | authored (was already a good bake) |
+| WalkForward | 88.0° | 88.0° | **still the 08-01 bake** |
+| WalkBackward | 83.7° | 83.7° | **still the 08-01 bake** |
+| Acceleration | 87.1° | 87.1° | **still the 08-01 bake** |
+| GlideForward | 87.1° | 87.1° | **still the 08-01 bake** |
+| Stop | 87.2° | 87.2° | **still the 08-01 bake** |
+| StopHockey | 81.7° | 81.7° | **still the 08-01 bake** |
+| IdleN, the 6 transitions, PulledBack, 2 windmills, 2 spinoramas | 0.00-0.07° | unchanged | 08-15 bake, fine |
+
+IdleL/IdleR are the one judgement call in the table: their 08-15 bake measured
+better on this metric, but at a spacing pinned to the SP_MAX cap (0.440 m
+exactly, both of them) rather than chosen. The authored versions are 0.557 m
+and read wider and less cramped in `gripshots/`.
+
+**The SlapShot windup is back.** The old bake pinned the blade to the ice on
+every frame, which flattened the overhead windup into a low sweep (a known,
+documented defect of bake3/bake4). The authored clip lifts the blade to
+**1.45 m at phase 0.1 and 1.97 m at phase 0.2**, measured off the rendered
+stick in the real build.
+
+### Two things the authored grip says about the bake's assumptions
+
+- **Hand spacing is 0.45–0.65 m.** `SP_MIN/SP_MAX` (0.26–0.44) was invented
+  here and is too narrow — a real grip puts the lower hand a third of the way
+  down a 1.5 m stick. The baked clips look cramped beside the authored ones
+  (IdleN 0.33 against IdleL 0.56), and that difference is visible across the
+  stance-graph crossfades, which is the first thing to judge by eye.
+- **The top fist is rotated 30–45 deg off the shaft** on the knob. That is
+  anatomy. `axR` reads ~0 on baked clips only because bake4 constructed the
+  shaft along `GRIP_AX_R` in the first place — a tautology. Read `axL`.
+
+### Still broken, and NOT fixable from this source
+
+Six of the seven unposed clips — **WalkForward, WalkBackward, Acceleration,
+GlideForward, Stop, StopHockey** — still carry the ORIGINAL 08-01/08-04 bake,
+which measures **82–88 deg on the lower fist** with the blade **0.45–0.55 m off
+the ice**. (IdleN is the seventh and is fine: 0.01 deg, blade at 0.018 — the
+08-15 pass re-baked it.) These are the worst-looking clips in the build and they
+are the common skating states.
+
+Two ways out, in order of preference:
+
+1. **Ask the animator to key the `stick` control in those six.** Costs us
+   nothing and makes them authored like the other nine. This is the ask to send
+   back, alongside the still-open `IdleStickhandle/L/R` request.
+2. Re-bake them with the fixed 08-15 solver against an ice-pinned tip target.
+   `bakepack3.authored_tip()` explicitly does not work on this pack (IdleN reads
+   tip y 0.91, arms at the sides), which is why the old bake used constants.
+
+### New tools
+
+| file | what |
+|---|---|
+| `assets/anim-bake/export_ik.py` | export the non-FK actions with constraints baked |
+| `assets/anim-bake/stickpose.py` | did the animator key the stick in this clip? |
+| `assets/anim-bake/cmp_ik.py` | IK export vs shipped payload, bone by bone |
+| `assets/anim-bake/measure_ik.py` | fists vs the animator's own `stick` bone |
+| `assets/anim-bake/merge_ik.py` | rebuild the payload; `IKSET=all` for the A/B |
+| `assets/anim-bake/verify_ik.py` | both fists on one shaft, off the payload |
+| `game/gripshot.sh` + `gripshot.js` | photograph one clip's grip in the real build |
+
+`./gripshot.sh <clip> <phase> <handle 0|1>` — pass **handle=0**. The skill-stick
+layer re-aims the shaft by up to 91.7 deg (`handleMaxAngle` 1.60 rad) and hides
+exactly the defect you are looking for. Its handle=1 numbers are not
+trustworthy: it calls `poseStick` a second time in the same frame, outside
+`mixerUpdateClean`, so the procedural arm writes apply twice and the fists
+squeeze together.
+
+### Also settled in passing
+
+- The RAR dropped in `Työpöytä/Hoki animations/` on 08-16 contains the same two
+  blends already loose in that folder, byte for byte (md5 checked). **The IK
+  blend is dated Aug 4 and holds only the 17 old actions** — the 08-15 stance
+  pack (transitions, windmill, spinorama) exists ONLY on the non-IK rig, so
+  those 12 clips have no authored-grip version to take. If the animator still
+  has the IK-side version of that pack, it is worth asking for.
+
+## 2026-08-16 (second pass) — lock the stick to the hand: 24 clips yes, six no
+
+The animator pointed at both blends: the IK one has the stick (ignore its `FK*`
+actions, they are only his conversion scaffold), the non-IK one has more clips
+without it but "the stick can be locked in to the top arm". Measured in full;
+**no game code changed yet.** Scripts and every number live in
+`assets/anim-bake/README.txt` (section "LOCKING THE STICK TO THE HAND").
+
+- **It is the LOWER fist that owns the shaft, not the top one.** The whole
+  stick is constant in `hand.L`'s frame to 0.0000 m — Shooting and SlapShot
+  included — while in `hand.R`'s frame the tip swings 0.78–0.91 m on those same
+  clips. The top hand is a hinge on the knob. Lock to `hand.L`.
+- **The offset is two points in `hand.L`'s local frame**, one pair per grip
+  (neutral / forehand / backhand / with-puck), shaft 1.594 m. Leave-one-out
+  across the three clips that share the neutral grip: **0.000–0.011 m and
+  0.03 deg.**
+- **This gives the 08-15 stance pack an authored grip it could not otherwise
+  have.** The IK blend stops at 17 actions (Aug 4), so the 12 stance clips had
+  no authored-grip version to take — but their hands already hold the stick, so
+  the offset alone is enough. Blade lands at 0.007–0.081 m on the stances, the
+  ForeHand↔BackHand transitions, both spinoramas and both windmill dekes.
+- **Neutral is still stickless** (`0IdleNeutral`, `1IdleN`: blade 1.04 m up),
+  which is the same conclusion the 08-15 bake reached by a different route.
+- **The six broken skating clips are NOT rescued by this.** They hold their
+  fists at the neutral spacing but not the neutral orientation, so the neutral
+  offset puts their blade 0.55–1.24 m up. Fitting them a grip of their own
+  finds one that grazes the ice, but the six fits disagree by a median 71 deg
+  (up to 112) and one joint offset fails at 0.263 m. The same fitting procedure
+  recovers a KNOWN grip to 0.2–3.7 deg on clips whose blade really stays down,
+  so the fit is fine and the arms are not.
+- **The ask to the animator changes.** "Key the `stick` control in those six"
+  is not enough — the control follows the hands and those hands hold nothing.
+  He needs to RE-POSE THE ARMS in WalkForward, WalkBackward, Acceleration,
+  GlideForward, Stop and StopHockey from a stance idle that already holds the
+  stick, exactly as he did for the 08-15 pack. Delivered that way they need no
+  bake at all.
+
+## 2026-08-17 — the clip owns the stick, for seven stance clips
+
+`./stickprobe.sh` → **7/7 PASS**, and **7/7 FAIL on the pre-change build**
+(`./stickprobe.sh 600x600 ice_hockey.html.bak_pre_clipstick0817`). Regressions
+green: `simprobe.sh` 0 failures, `packprobe.sh` 0 failures, `vsprobe.sh` 0
+failures. Backups `ice_hockey.html.bak_pre_clipstick0817` (before any of this)
+and `.bak_pre_rawarms0817` (before the payload rebuild). Full write-up in
+`assets/anim-bake/README.txt`.
+
+- **`IdleForeHandPulledBack`, `IdleBackHandToForeHand`, `IdleForeHandToBackHand`,
+  `SpinoramaL/R`, `WindmillDekeL/R` now carry the animator's raw arms and take
+  their shaft from his own grip.** Blade height in the build lands within 3 mm
+  of what Blender measures for the same clip, once the build's 1.081 character
+  scale is applied.
+- **The arms had to come back first.** The payload's stance clips were carrying
+  the 08-15 re-bake, not his arms, so a grip offset measured on his hands was
+  being applied to somebody else's — the first wiring put the blade 1.56 m up.
+  `assets/anim-bake/merge_raw.py` rebuilds those seven from `assets/new_anim.glb`
+  (the raw export, taken hours before the bake solve).
+- **`IH_GRIP_FRAMES` carries a roll**, which the two-fist line never could. Where
+  a clip owns the stick, `stickRollCal` and the wrist-derived roll are bypassed.
+- **Deliberately NOT included:** the four transitions touching Neutral and
+  `IdleN` (Neutral is a stickless pose — a locked stick flies 1.04 m up), the six
+  broken skating clips (their arms hold no stick at all), and the nine IK-splice
+  clips (already correct; widening the change is not free).
+- **Gameplay now bends toward the animation** (`CONFIG.animReachLimit`, 0.55 m),
+  a user-authorised partial reversal of "a large `stickVisErr` may never be
+  closed by moving gameplay". Input still builds `poseAimPt` alone; it is pulled
+  back toward the clip's blade only when it asks for more than the animation has.
+  `animReachLimit:0` restores the old behaviour exactly.
+- **Three traps worth knowing** (detail in the anim-bake README): `handleBlend`
+  means the layer is ENABLED, not that the player is steering; `stickVis` is read
+  off the rendered MESH, so the mesh must be scaled to the resolved shaft, not to
+  `CONFIG.stickLen`; and the build is 1.081× Blender, which reads as a uniform
+  8% bug if you forget it.
