@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ice Hockey — Xbox WebView probe</title>
+<!--
+  MEASURE THE CONSOLE. DO NOT GUESS AT IT.
+
+  Everything anyone can tell you about "what the Xbox WebView supports" is a
+  claim about EdgeHTML in general, on some firmware, from some year. This page
+  is the only statement about YOUR console that is worth anything: point the
+  host at it instead of at the game and read the answers off the TV.
+
+      xbox/IceHockeyXbox/config.json
+        "remoteUrl": "https://hannes423-debug.github.io/ice-hockey/xbox/probe.html"
+
+  Deliberately standalone: no three.js, no shim, no shared CSS, nothing but
+  ES5 that any engine since 2011 can parse. If THIS page fails to render, the
+  problem is the host or the network, not the game.
+
+  Everything is sized for a TV read from a sofa.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 4vh 5vw;
+    background: #05070b; color: #dce7f5;
+    font: 20px/1.5 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 34px; margin: 0 0 4px; letter-spacing: .04em; }
+  h2 { font-size: 22px; margin: 28px 0 8px; color: #7fd4ff; letter-spacing: .06em; text-transform: uppercase; }
+  .sub { color: #7d90a8; margin: 0 0 8px; font-size: 17px; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 3px 10px 3px 0; vertical-align: top; border-bottom: 1px solid #16202e; }
+  td.k { color: #9fb2c8; width: 34%; }
+  td.v { color: #eaf2ff; font-family: Consolas, "Courier New", monospace; word-break: break-all; }
+  .ok   { color: #57d98b; }
+  .bad  { color: #ff6b6b; }
+  .warn { color: #ffbe55; }
+  .note { color: #7d90a8; font-size: 15px; }
+  #pad { min-height: 120px; }
+  .bar { display: inline-block; height: 10px; background: #2b7fd4; vertical-align: middle; }
+</style>
+</head>
+<body>
+
+<h1>ICE HOCKEY — WebView probe</h1>
+<p class="sub" id="stamp"></p>
+
+<h2>Engine</h2><table id="engine"></table>
+<h2>WebGL</h2><table id="webgl"></table>
+<h2>JavaScript</h2>
+<p class="note">This page deliberately does <b>not</b> load <code>compat/es2019.js</code>, so it reports the raw engine.
+<b>flat / flatMap</b> showing red is therefore expected and already handled — without the shim the game boots and then silently discards every saved setting (measured by <code>xbox/tools/edgehtml_sim.sh</code>).
+Anything <i>else</i> red needs a shim added to that file, or a change in the game.</p>
+<table id="js"></table>
+<h2>CSS</h2>
+<p class="note">The menu leans on <code>clamp()</code> and flexbox <code>gap</code> heavily. Red here means the UI lays out wrong rather than not at all.</p>
+<table id="css"></table>
+<h2>Storage &amp; network</h2><table id="misc"></table>
+<h2>Gamepad — press every button</h2>
+<p class="note">The game reads this exact API. <code>mapping</code> must say <b>standard</b>, or button indices will not line up.</p>
+<div id="pad">no gamepad seen yet — press A</div>
+<h2>Frame rate</h2><table id="fps"></table>
+
+<script>
+/* ES5 only. No arrow functions, no let/const, no template literals — this file
+   has to be readable by an engine that might not support them, since finding
+   that out is its job. */
+function row(tbl, k, v, cls) {
+  var t = document.getElementById(tbl), tr = t.insertRow(-1);
+  var a = tr.insertCell(0), b = tr.insertCell(1);
+  a.className = 'k'; a.textContent = k;
+  b.className = 'v ' + (cls || ''); b.textContent = v;
+}
+function yn(k, ok, tbl, detail) {
+  row(tbl || 'js', k, (ok ? 'yes' : 'NO') + (detail ? '  (' + detail + ')' : ''), ok ? 'ok' : 'bad');
+  return ok;
+}
+/* Syntax support cannot be feature-detected with an if(); it has to be parsed
+   in a string, or the parse error takes this whole file with it. */
+function syntaxOk(src) { try { new Function(src); return true; } catch (e) { return false; } }
+
+document.getElementById('stamp').textContent = new Date().toString() + '  ·  ' + location.href;
+
+/* ---------------------------------------------------------------- engine -- */
+row('engine', 'userAgent', navigator.userAgent);
+row('engine', 'platform', navigator.platform || '(none)');
+row('engine', 'devicePixelRatio', String(window.devicePixelRatio));
+row('engine', 'screen', screen.width + ' x ' + screen.height);
+row('engine', 'window inner', window.innerWidth + ' x ' + window.innerHeight);
+row('engine', 'hardwareConcurrency', String(navigator.hardwareConcurrency || '(unknown)'));
+row('engine', 'deviceMemory (GB)', String(navigator.deviceMemory || '(unreported)'));
+/* The one that tells you the layout scaling opt-out in App.xaml.cs worked: on
+   an Xbox at 1080p WITHOUT it you see ~1280x720 here. */
+row('engine', 'expected on Xbox 1080p', '1920 x 1080 window — smaller means layout scaling is still on', 'note');
+
+/* ---------------------------------------------------------------- webgl --- */
+(function () {
+  var c = document.createElement('canvas'), gl = null, which = '(none)';
+  var names = ['webgl2', 'webgl', 'experimental-webgl'];
+  for (var i = 0; i < names.length; i++) {
+    try { gl = c.getContext(names[i]); } catch (e) { gl = null; }
+    if (gl) { which = names[i]; break; }
+  }
+  row('webgl', 'context', which, gl ? 'ok' : 'bad');
+  if (!gl) { row('webgl', 'verdict', 'NO WEBGL — the game cannot run here', 'bad'); return; }
+
+  var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  row('webgl', 'vendor', dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR));
+  row('webgl', 'renderer', dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+  row('webgl', 'GL version', gl.getParameter(gl.VERSION));
+  row('webgl', 'GLSL', gl.getParameter(gl.SHADING_LANGUAGE_VERSION));
+  row('webgl', 'max texture size', String(gl.getParameter(gl.MAX_TEXTURE_SIZE)));
+  row('webgl', 'max vertex uniforms', String(gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)));
+  row('webgl', 'max varyings', String(gl.getParameter(gl.MAX_VARYING_VECTORS)));
+  /* three.js r128 needs these for the skinned player models and the shadow
+     map; a missing one is a specific, findable visual bug rather than a
+     blank screen, so it is worth naming them individually. */
+  var want = ['OES_texture_float', 'OES_element_index_uint', 'OES_standard_derivatives',
+              'ANGLE_instanced_arrays', 'WEBGL_depth_texture', 'EXT_texture_filter_anisotropic'];
+  for (var j = 0; j < want.length; j++) {
+    row('webgl', want[j], gl.getExtension(want[j]) ? 'yes' : 'NO',
+        gl.getExtension(want[j]) ? 'ok' : 'warn');
+  }
+})();
+
+/* ------------------------------------------------------------ javascript -- */
+yn('Array.prototype.flat        (ES2019, shimmed)', !!Array.prototype.flat);
+yn('Array.prototype.flatMap     (ES2019, shimmed — THE GAME USES THIS)', !!Array.prototype.flatMap);
+yn('Object.fromEntries          (ES2019)', !!Object.fromEntries);
+yn('String.prototype.matchAll   (ES2020)', !!String.prototype.matchAll);
+yn('Promise.allSettled          (ES2020)', !!Promise.allSettled);
+yn('globalThis                  (ES2020)', typeof globalThis !== 'undefined');
+yn('BigInt                      (ES2020)', typeof BigInt !== 'undefined');
+yn('String.prototype.replaceAll (ES2021)', !!String.prototype.replaceAll);
+yn('Array.prototype.at          (ES2022)', !!Array.prototype.at);
+yn('structuredClone', typeof structuredClone !== 'undefined');
+yn('optional chaining  a?.b     (syntax)', syntaxOk('var o={};return o?.x;'));
+yn('nullish coalescing a ?? b   (syntax)', syntaxOk('return null ?? 1;'));
+yn('async / await              (syntax)', syntaxOk('return (async function(){await 0;});'));
+yn('class fields               (syntax)', syntaxOk('return class{x=1};'));
+yn('ES modules (script type=module)', 'noModule' in document.createElement('script'));
+yn('WebAssembly', typeof WebAssembly !== 'undefined');
+yn('ResizeObserver (guarded in menu-player.js)', typeof ResizeObserver !== 'undefined');
+yn('OffscreenCanvas (feature-detected by three.js)', typeof OffscreenCanvas !== 'undefined');
+yn('requestAnimationFrame', !!window.requestAnimationFrame);
+yn('Pointer Events', !!window.PointerEvent);
+yn('Web Audio', !!(window.AudioContext || window.webkitAudioContext));
+
+/* ------------------------------------------------------------------ css --- */
+(function () {
+  var has = window.CSS && CSS.supports;
+  function s(k, prop, val) {
+    if (!has) { row('css', k, 'CSS.supports missing — cannot test', 'warn'); return; }
+    var ok = CSS.supports(prop, val);
+    row('css', k, ok ? 'yes' : 'NO', ok ? 'ok' : 'bad');
+  }
+  row('css', 'CSS.supports available', has ? 'yes' : 'NO', has ? 'ok' : 'bad');
+  s('custom properties  var()', 'color', 'var(--x)');
+  s('clamp()            THE MENU USES 129 OF THESE', 'width', 'clamp(1px, 2vw, 3px)');
+  s('min() / max()', 'width', 'min(1px, 2px)');
+  s('flexbox gap        THE MENU USES 35 OF THESE', 'gap', '1px');
+  s('aspect-ratio', 'aspect-ratio', '1');
+  s('backdrop-filter', 'backdrop-filter', 'blur(1px)');
+  s('-webkit-backdrop-filter', '-webkit-backdrop-filter', 'blur(1px)');
+  s('position: sticky', 'position', 'sticky');
+  /* selector support is the ONE-argument form of CSS.supports; passing it as
+     a property/value pair the way the rows above do always answers "no". */
+  row('css', ':is() / :where()',
+      has && CSS.supports('selector(:is(a))') ? 'yes' : 'NO',
+      has && CSS.supports('selector(:is(a))') ? 'ok' : 'bad');
+  s('inset shorthand', 'inset', '0');
+  s('dvh units', 'height', '100dvh');
+
+  /* CSS.supports can be wrong about a property the engine parses and then
+     ignores, so measure ONE of them for real: two boxes in a flex row with a
+     40px gap are 40px apart, or the gap silently did nothing. */
+  var probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;left:-9999px;display:flex;gap:40px;';
+  probe.innerHTML = '<div style="width:10px;height:10px"></div><div style="width:10px;height:10px"></div>';
+  document.body.appendChild(probe);
+  var kids = probe.children;
+  var measured = kids[1].getBoundingClientRect().left - kids[0].getBoundingClientRect().right;
+  document.body.removeChild(probe);
+  row('css', 'flex gap, MEASURED', Math.round(measured) + 'px (should be 40)',
+      Math.round(measured) === 40 ? 'ok' : 'bad');
+})();
+
+/* ------------------------------------------------------- storage/network -- */
+(function () {
+  try {
+    localStorage.setItem('__ihprobe', '1');
+    var back = localStorage.getItem('__ihprobe');
+    localStorage.removeItem('__ihprobe');
+    yn('localStorage read/write  (the menu hands the game its mode through this)', back === '1', 'misc');
+  } catch (e) { row('misc', 'localStorage', 'THREW: ' + e.message, 'bad'); }
+
+  row('misc', 'origin', location.origin || '(opaque — localStorage will not be shared)',
+      location.origin && location.origin !== 'null' ? 'ok' : 'bad');
+  yn('fetch', typeof fetch !== 'undefined', 'misc');
+  yn('XMLHttpRequest', typeof XMLHttpRequest !== 'undefined', 'misc');
+  yn('WebSocket', typeof WebSocket !== 'undefined', 'misc');
+  yn('RTCPeerConnection', typeof RTCPeerConnection !== 'undefined' ||
+     typeof webkitRTCPeerConnection !== 'undefined', 'misc');
+  row('misc', 'online', String(navigator.onLine));
+})();
+
+/* -------------------------------------------------------------- gamepad --- */
+(function () {
+  var el = document.getElementById('pad');
+  if (!navigator.getGamepads) { el.textContent = 'navigator.getGamepads MISSING — the game has no input here'; el.className = 'bad'; return; }
+  function tick() {
+    var pads = navigator.getGamepads(), out = '', any = false;
+    for (var i = 0; i < pads.length; i++) {
+      var g = pads[i]; if (!g) continue;
+      any = true;
+      out += '<div><b>#' + i + '</b> ' + g.id + '<br>' +
+             'mapping: <span class="' + (g.mapping === 'standard' ? 'ok' : 'bad') + '">' +
+             (g.mapping || '(empty)') + '</span> · ' + g.axes.length + ' axes · ' +
+             g.buttons.length + ' buttons<br>axes: ';
+      for (var a = 0; a < g.axes.length; a++) out += g.axes[a].toFixed(2) + '  ';
+      out += '<br>pressed: ';
+      var none = true;
+      for (var b = 0; b < g.buttons.length; b++) {
+        if (g.buttons[b].pressed || g.buttons[b].value > 0.1) {
+          out += '<span class="ok">' + b + '</span>(' + g.buttons[b].value.toFixed(2) + ') ';
+          none = false;
+        }
+      }
+      if (none) out += '<span class="note">none</span>';
+      out += '</div><br>';
+    }
+    el.innerHTML = any ? out : 'no gamepad seen yet — press A';
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+
+/* ------------------------------------------------------------------ fps --- */
+(function () {
+  var frames = 0, t0 = Date.now(), worst = 999, best = 0, printed = false;
+  function tick() {
+    frames++;
+    var dt = Date.now() - t0;
+    if (dt >= 1000) {
+      var fps = Math.round(frames * 1000 / dt);
+      if (fps < worst) worst = fps;
+      if (fps > best) best = fps;
+      if (!printed) {
+        row('fps', 'requestAnimationFrame', '', '');
+        row('fps', 'peak', '', '');
+        row('fps', 'lowest', '', '');
+        printed = true;
+      }
+      var t = document.getElementById('fps');
+      t.rows[0].cells[1].textContent = fps + ' fps (this page draws nothing — this is the ceiling)';
+      t.rows[1].cells[1].textContent = best + ' fps';
+      t.rows[2].cells[1].textContent = worst + ' fps';
+      frames = 0; t0 = Date.now();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

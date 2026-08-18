@@ -15,7 +15,9 @@
     "build:web": "./deploy.sh sync",
     "test:electron": "electron --no-sandbox tools/electron_smoke.js",
     "test:offline": "tools/offline_probe.sh index.html && tools/offline_probe.sh game.html",
-    "verify": "cd game && ./simprobe.sh && ./vsprobe.sh"
+    "verify": "cd game && ./simprobe.sh && ./vsprobe.sh",
+    "xbox:assets": "python3 xbox/tools/make-assets.py",
+    "xbox:sync": "xbox/tools/sync-local.sh"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -40,6 +42,7 @@
       "ice-hockey-customize-app.js",
       "ice-hockey-customize-core.js",
       "ice-hockey-customize-data.js",
+      "compat/**/*",
       "vendor/**/*",
       "fonts/**/*",
       "img/**/*",

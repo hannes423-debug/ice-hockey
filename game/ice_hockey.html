@@ -98,6 +98,13 @@
      The path is ../vendor/ because THIS file is served from game/; make25d.py
      rewrites it to vendor/ for the published copy at the repo root, and dies
      if that rewrite ever stops matching. -->
+<!-- Loaded FIRST and everywhere, ahead of the game itself: the Xbox
+     Developer Mode host (xbox/) runs this same page in an EdgeHTML
+     WebView, which has no Array.prototype.flatMap. Without it the game
+     still boots and then silently forgets every saved setting — see
+     compat/es2019.js, and xbox/tools/edgehtml_sim.sh, which measures it
+     both ways. A no-op in every Chromium/Firefox/Safari build. -->
+<script src="../compat/es2019.js"></script>
 <script src="../vendor/three.min.js"></script>
 <script>
 ( function () {

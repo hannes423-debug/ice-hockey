@@ -492,6 +492,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;heigh
 
 <div class="toast" id="toast"></div>
 
+<!-- Loaded FIRST and everywhere, ahead of the game itself: the Xbox
+     Developer Mode host (xbox/) runs this same page in an EdgeHTML
+     WebView, which has no Array.prototype.flatMap. Without it the game
+     still boots and then silently forgets every saved setting — see
+     compat/es2019.js, and xbox/tools/edgehtml_sim.sh, which measures it
+     both ways. A no-op in every Chromium/Firefox/Safari build. -->
+<script src="compat/es2019.js"></script>
 <script src="fullscreen.js"></script>
 <!-- self-hosted, see vendor/. This file is PUBLISHED to the repo root, so the
      path is written for there; customizer/vendor is a symlink to ../vendor so

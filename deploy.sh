@@ -54,8 +54,12 @@ MANIFEST=(
 # than files: they are published, they have no source elsewhere in the tree,
 # and they are what makes the site — and the packaged desktop build — run with
 # no third-party request at all. Regenerate fonts/ with tools/vendor_fonts.py.
+#
+# compat/ joins them for the same reason and one more: es2019.js is loaded by
+# index.html, game.html AND the Locker Room, so it must reach the site whatever
+# else moves. It exists for the Xbox WebView (xbox/) — see the file itself.
 DEPLOY_ONLY=(index.html style.css script.js menu-player.js README.md .gitignore
-             img/locker-room.jpg vendor fonts)
+             img/locker-room.jpg vendor fonts compat)
 
 # Source files that happen to sit at the root. Since the merge, the root holds
 # both the published site AND project-level source, so "a root-level file in

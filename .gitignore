@@ -60,6 +60,11 @@
 !/tools/menu_probe.sh
 !/tools/editor_probe.sh
 !/tools/vendor_fonts.py
+# The two probes package.json's scripts point at. tools/ is ignored wholesale
+# because most of it is scratch, but a committed `npm run test:electron` that
+# resolves to a missing file is worse than the clutter these two add.
+!/tools/electron_smoke.js
+!/tools/offline_probe.sh
 /armtest/
 /reference/*
 !/reference/rink_reference_2026-08-13.png
@@ -92,3 +97,21 @@ __pycache__/
 __probe*.html
 /three.min.js
 /GLTFLoader.js
+
+# ---------------------------------------------------------------- xbox host --
+# Build output and the bundled copy of the game. GameLocal/ is written by
+# xbox/tools/sync-local.sh from files that are already tracked at the root — it
+# is a copy, never a source, and committing it would double the repo and give a
+# stale duplicate somewhere to hide.
+/xbox/IceHockeyXbox/GameLocal/
+/xbox/**/bin/
+/xbox/**/obj/
+/xbox/**/AppPackages/
+/xbox/**/BundleArtifacts/
+/xbox/**/*.appx
+/xbox/**/*.appxbundle
+/xbox/**/*.msix
+# The self-signed certificate Visual Studio generates on first build. A signing
+# key never belongs in a public repository, and a Developer Mode console is
+# happy with a freshly generated one.
+/xbox/**/*.pfx

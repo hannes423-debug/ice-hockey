@@ -1,0 +1,46 @@
+<Page
+    x:Class="IceHockeyXbox.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:IceHockeyXbox"
+    Background="#FF05070B">
+
+    <!-- The whole app. One WebView, edge to edge, and a status card that is
+         visible only while the game has not painted yet or has failed to load.
+
+         #05070B is the menu's own darkest tone, the same value electron's
+         BrowserWindow uses, so the handoff from the splash screen to the page
+         has no colour step in it. -->
+    <Grid>
+        <WebView x:Name="Game"
+                 DefaultBackgroundColor="#FF05070B"
+                 HorizontalAlignment="Stretch"
+                 VerticalAlignment="Stretch" />
+
+        <Border x:Name="Status"
+                Background="#E605070B"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="1100">
+                <TextBlock x:Name="StatusTitle"
+                           Text="ICE HOCKEY"
+                           FontSize="40" FontWeight="Bold"
+                           Foreground="#FFE8F2FF"
+                           HorizontalAlignment="Center" />
+                <TextBlock x:Name="StatusLine"
+                           Text="starting…"
+                           FontSize="22"
+                           Foreground="#FF8FA6C4"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           Margin="0,18,0,0" />
+                <TextBlock x:Name="StatusHint"
+                           FontSize="18"
+                           Foreground="#FF5C728E"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           Margin="0,26,0,0" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</Page>

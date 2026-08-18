@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!-- Ice Hockey — Xbox Developer Mode test host.
+
+     A THIN HOST, not a product. There is no Store identity here, no Xbox Live,
+     no achievements and no age rating, because this package is only ever
+     sideloaded onto a console in Developer Mode over Xbox Device Portal. If it
+     ever became a Store submission, the Identity below is the first thing that
+     would have to change (to the one the Partner Center reserves for you).
+
+     The game itself is not in this manifest at all. It is HTML that the host
+     loads at runtime, from GitHub Pages or from the copy under GameLocal\. -->
+
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  IgnorableNamespaces="uap">
+
+  <Identity
+    Name="hannes423.IceHockey.XboxDev"
+    Publisher="CN=hannes423"
+    Version="0.1.0.0" />
+
+  <Properties>
+    <DisplayName>Ice Hockey (Xbox Dev)</DisplayName>
+    <PublisherDisplayName>hannes423</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- Windows.Universal is here so the host can be run and debugged on the
+         PC first — same code, same WebView, and F5/F6 stand in for the pad
+         combo. Windows.Xbox is the actual target.
+         17763 (1809) is the floor because that is the oldest OS an Xbox in
+         Developer Mode is realistically on, and it has everything used here. -->
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+    <TargetDeviceFamily Name="Windows.Xbox"      MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+                 Executable="$targetnametoken$.exe"
+                 EntryPoint="IceHockeyXbox.App">
+
+      <uap:VisualElements
+        DisplayName="Ice Hockey"
+        Description="Xbox Developer Mode test host for the Ice Hockey web game."
+        BackgroundColor="#05070B"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#05070B" />
+      </uap:VisualElements>
+
+      <!-- WHAT THIS IS FOR, since it is easy to mistake for a URL allow-list:
+           navigation is NOT restricted by these rules — the WebView will load
+           any https:// URL you put in config.json with or without them. What a
+           rule grants is APP CONTENT status: only a URI matching a rule can use
+           ScriptNotify, be scripted from the host with InvokeScriptAsync, or
+           reach WinRT. Nothing here depends on that today (the host talks to
+           the page through no channel at all), so the entry exists to make the
+           published origin the one trusted place, and it is deliberately
+           WindowsRuntimeAccess="none": remote code gets no WinRT, ever.
+
+           A LAN dev server (http://192.168.x.x:8000) CANNOT be listed here —
+           the Match syntax allows a wildcard only as the leftmost DNS label,
+           and an IP address has none. It still loads and still plays; it just
+           does not get app-content status, which costs this host nothing. -->
+      <uap:ApplicationContentUriRules>
+        <uap:Rule Match="https://hannes423-debug.github.io/ice-hockey/" Type="include" WindowsRuntimeAccess="none" />
+      </uap:ApplicationContentUriRules>
+
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- REMOTE mode fetches the game over HTTPS from GitHub Pages. This is the
+         one capability the host genuinely cannot work without. -->
+    <Capability Name="internetClient" />
+
+    <!-- LAN. Two separate uses, both real:
+           1. pointing config.json at a dev server on this network
+              (http://192.168.1.x:8000 — `npm run dev` on the PC), so a change
+              is on the TV without a push and a Pages rebuild;
+           2. the console reaching a local game server, if this game ever grows
+              one (today it has none — see xbox/README.md).
+         NOT internetClientServer: that grants INBOUND connections from the
+         internet, which nothing here accepts. Add it only if peer-to-peer
+         (WebRTC) multiplayer is ever built, and not before. -->
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
+
+</Package>

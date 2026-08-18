@@ -1,0 +1,10 @@
+<Application
+    x:Class="IceHockeyXbox.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:IceHockeyXbox"
+    RequestedTheme="Dark">
+    <!-- Dark, because the game is: the split second between the splash screen
+         and the WebView's first paint is XAML's, and the default light theme
+         makes it a white flash on a TV. -->
+</Application>

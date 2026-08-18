@@ -1,0 +1,17 @@
+{
+  "//": "The Xbox host's ONLY setting. Ships inside the package; a copy dropped",
+  "//2": "into the app's LocalState folder (Xbox Device Portal -> File Explorer)",
+  "//3": "overrides it WITHOUT rebuilding or redeploying the package.",
+
+  "//mode": "REMOTE = load remoteUrl (GitHub Pages, or a LAN dev server).  LOCAL = load the copy bundled in the package under GameLocal/.",
+  "mode": "REMOTE",
+
+  "//remoteUrl": "Any https:// origin, or http:// on your own LAN. Must end in a page or a trailing slash.",
+  "remoteUrl": "https://hannes423-debug.github.io/ice-hockey/",
+
+  "//localUrl": "ms-appx-web:// gives the bundled copy a real origin, so index.html and game.html share localStorage. file:// would not - see electron/main.js, which solves the same problem with app://.",
+  "localUrl": "ms-appx-web:///GameLocal/index.html",
+
+  "//cacheBust": "REMOTE only: append ?ih=<launch time> so a fresh push is picked up instead of the WebView's cached copy. Never affects the public site - the parameter only exists on this app's own requests.",
+  "cacheBust": true
+}

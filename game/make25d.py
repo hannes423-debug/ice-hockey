@@ -181,6 +181,15 @@ patch('<script src="../vendor/three.min.js">',
       '<script src="vendor/three.min.js">',
       "vendor: three.js path is root-relative in the published copy")
 
+# Same rewrite, same reason, for the ES2019 shim the Xbox WebView needs. It is
+# a separate patch so that losing one tag can never be mistaken for losing the
+# other: three.js missing is a blank screen, which announces itself, while the
+# shim missing is a console that boots fine and quietly drops the player's
+# saved settings — much the harder of the two to ever attribute.
+patch('<script src="../compat/es2019.js">',
+      '<script src="compat/es2019.js">',
+      "compat: es2019 shim path is root-relative in the published copy")
+
 mask_b64 = base64.b64encode(MASK.read_bytes()).decode("ascii")
 bd_b64 = base64.b64encode(BOARDS.read_bytes()).decode("ascii")
 post = ("<script>\nwindow.IH25_MASK_URL = 'data:image/png;base64," + mask_b64 + "';\n"

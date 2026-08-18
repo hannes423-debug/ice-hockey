@@ -105,6 +105,13 @@
      settings are chosen and confirmed HERE, not on a second screen in-game. -->
 <div class="confirm-overlay" id="confirmOverlay" aria-hidden="true"></div>
 
+<!-- Loaded FIRST and everywhere, ahead of the game itself: the Xbox
+     Developer Mode host (xbox/) runs this same page in an EdgeHTML
+     WebView, which has no Array.prototype.flatMap. Without it the game
+     still boots and then silently forgets every saved setting — see
+     compat/es2019.js, and xbox/tools/edgehtml_sim.sh, which measures it
+     both ways. A no-op in every Chromium/Firefox/Safari build. -->
+<script src="compat/es2019.js"></script>
 <script src="fullscreen.js"></script>
 <script src="script.js"></script>
 <!-- 3D player preview: your ★ favourite team+jersey look from the Locker

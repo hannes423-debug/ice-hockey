@@ -1,0 +1,8 @@
+<!-- .NET Native runtime directives. The host uses no reflection and no
+     serialization, so the default XAML-app policy is all it needs; this file
+     exists because the Release (.NET Native) build expects one. -->
+<Directives xmlns="http://schemas.microsoft.com/netfx/2013/01/metadata">
+  <Application>
+    <Assembly Name="*Application*" Dynamic="Required All" />
+  </Application>
+</Directives>

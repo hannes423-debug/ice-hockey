@@ -37,6 +37,8 @@ It holds **both** the published site and the source that builds it.
 | `game/` | The game source and the pipeline that builds it. |
 | `customizer/` | The Locker Room equipment editor. Its HTML needs its three sibling `.js` files in the same folder. |
 | `img/` | Site images. `locker-room.jpg` is the main menu's backdrop. |
+| `xbox/` | The Xbox Developer Mode test host: a thin UWP WebView around the same site, plus `probe.html` for measuring what the console's WebView actually supports. See `xbox/README.md`. |
+| `compat/` | `es2019.js` — loaded first by every page, for the Xbox WebView's older JS engine. A no-op everywhere else. |
 | `reference/` | The rink and locker-room reference pictures, the prompt used to generate the rink, and `LOCKER_ROOM_IMAGE.md` (how the menu backdrop is made, and the contract future set dressing follows). |
 | `assets/`, `legacy/`, `tools/`, `armtest/` | Models, the fork parent, and side rigs. Not tracked; they live on disk only. |
 
