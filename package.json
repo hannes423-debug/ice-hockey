@@ -1,0 +1,65 @@
+{
+  "name": "ice-hockey",
+  "productName": "Ice Hockey",
+  "version": "0.1.0",
+  "description": "EA-NHL-style three.js ice hockey game on a regulation NHL rink.",
+  "homepage": "https://hannes423-debug.github.io/ice-hockey/",
+  "license": "MIT",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "python3 -m http.server 8000",
+    "electron:dev": "electron --no-sandbox .",
+    "electron:start": "IH_PACKAGED_PREVIEW=1 electron --no-sandbox .",
+    "build:appimage": "electron-builder --linux AppImage",
+    "build:web": "./deploy.sh sync",
+    "test:electron": "electron --no-sandbox tools/electron_smoke.js",
+    "test:offline": "tools/offline_probe.sh index.html && tools/offline_probe.sh game.html",
+    "verify": "cd game && ./simprobe.sh && ./vsprobe.sh"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "io.github.hannes423.icehockey",
+    "productName": "Ice Hockey",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "index.html",
+      "game.html",
+      "ice-hockey-customize.html",
+      "style.css",
+      "script.js",
+      "menu-player.js",
+      "fullscreen.js",
+      "ice-hockey-customize-app.js",
+      "ice-hockey-customize-core.js",
+      "ice-hockey-customize-data.js",
+      "vendor/**/*",
+      "fonts/**/*",
+      "img/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Game",
+      "synopsis": "EA-NHL-style three.js ice hockey on a regulation rink",
+      "desktop": {
+        "entry": {
+          "Name": "Ice Hockey",
+          "Categories": "Game;SportsGame;"
+        }
+      }
+    },
+    "appImage": {
+      "artifactName": "IceHockey-${version}-${arch}.AppImage"
+    }
+  }
+}
